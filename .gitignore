@@ -1,0 +1,15 @@
+# dependencies and build artifacts
+node_modules/
+.next/
+out/
+docs/
+.data/
+
+# local configuration and runtime output
+.env
+.env.local
+.env.example
+*.log
+
+# OS metadata
+.DS_Store
