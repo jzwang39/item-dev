@@ -15,6 +15,15 @@
 4. 执行 `npm run db:seed:admin` 创建首位管理员。该命令幂等，已有启用管理员时不会重复创建。
 5. 执行 `npm run dev`，访问 `http://localhost:3000`。
 
+## 文档解析
+
+- TXT、DOCX 与含文字层的 PDF 可在 macOS、Linux 和 Windows 上直接提取文本。
+- 扫描版 PDF 会自动改用腾讯云通用文字识别。需要配置
+  `TENCENTCLOUD_OCR_ENABLED=true`、`TENCENTCLOUD_SECRET_ID`、`TENCENTCLOUD_SECRET_KEY` 和可选的
+  `TENCENTCLOUD_REGION`。
+- 未配置 OCR 时，扫描件会返回明确错误，不会生成空白或虚构正文。腾讯云 OCR 的 PDF Base64 请求上限为 10MB，
+  超限文件需先压缩或拆分。
+
 ## 安全约束
 
 - 首位管理员只由受控 Seed 创建，不提供公开注册，也不在 Web 进程启动时自动 Seed。

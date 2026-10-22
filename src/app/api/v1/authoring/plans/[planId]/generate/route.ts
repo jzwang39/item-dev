@@ -9,13 +9,7 @@ import { getSavedModelConnection } from "@/modules/model-connection/service";
 import { createUlid } from "@/shared/database/ulid";
 import { query, withTransaction } from "@/shared/database/mysql";
 
-const levelCodes = [
-  "level_5",
-  "level_4",
-  "level_3",
-  "level_2",
-  "level_1",
-] as const;
+type LevelCode = "level_5" | "level_4" | "level_3" | "level_2" | "level_1";
 const questionSchema = z.object({
   assessmentPointCode: z.string().min(1),
   questionType: z.enum(["single", "multiple", "judgement"]),
@@ -39,7 +33,7 @@ type ModelResponse = {
 type PlanScope = {
   occupationId: string;
   occupation: string;
-  levelCode: (typeof levelCodes)[number];
+  levelCode: LevelCode;
   assessmentMode: "理论知识" | "操作技能";
   blueprintVersions: {
     outline: { id: string; versionNo: number };

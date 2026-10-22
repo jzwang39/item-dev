@@ -14,11 +14,14 @@
     "@auth/core": "^0.37.4",
     "bcryptjs": "^2.4.3",
     "exceljs": "^4.4.0",
+    "mammoth": "^1.13.0",
     "mysql2": "^3.11.5",
     "next": "^14.2.25",
     "next-auth": "^5.0.0-beta.25",
+    "pdfjs-dist": "^4.10.38",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "tencentcloud-sdk-nodejs-ocr": "^4.1.330",
     "zod": "^3.24.1"
   },
   "devDependencies": {

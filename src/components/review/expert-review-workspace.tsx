@@ -28,11 +28,16 @@ type ReviewTask = {
   point: string;
 };
 
-async function readJson(response: Response): Promise<any> {
+type ApiResponse<T> = {
+  data?: T;
+  error?: { message?: string };
+};
+
+async function readJson<T>(response: Response): Promise<ApiResponse<T>> {
   if (!response.headers.get("content-type")?.includes("application/json")) {
     return { error: { message: `服务返回异常（HTTP ${response.status}）。` } };
   }
-  return response.json();
+  return response.json() as Promise<ApiResponse<T>>;
 }
 
 export function ExpertReviewWorkspace({
@@ -58,13 +63,16 @@ function ExpertTaskWorkspace() {
   });
   const load = async () => {
     const response = await fetch("/api/v1/expert/reviews");
-    const payload = await readJson(response);
+    const payload = await readJson<{
+      tasks: Array<Omit<ReviewTask, "code" | "level" | "type" | "point">>;
+      summary: { pending: number; returned: number; approved: number };
+    }>(response);
     if (!response.ok) {
       setNotice(payload.error?.message ?? "审定任务加载失败。");
       return;
     }
     setTasks(
-      payload.data.tasks.map(
+      (payload.data?.tasks ?? []).map(
         (task: Omit<ReviewTask, "code" | "level" | "type" | "point">) => ({
           ...task,
           code: task.questionNo,
@@ -74,7 +82,7 @@ function ExpertTaskWorkspace() {
         }),
       ),
     );
-    setSummary(payload.data.summary);
+    setSummary(payload.data?.summary ?? { pending: 0, returned: 0, approved: 0 });
   };
   useEffect(() => {
     void load();
@@ -99,7 +107,7 @@ function ExpertTaskWorkspace() {
         confirmed,
       }),
     });
-    const payload = await readJson(response);
+    const payload = await readJson<Record<string, never>>(response);
     if (!response.ok) {
       setNotice(payload.error?.message ?? "提交审定结果失败。");
       return;
@@ -309,14 +317,17 @@ function AdminReviewWorkspace() {
 
   const load = async () => {
     const response = await fetch("/api/v1/review/assignments");
-    const payload = await readJson(response);
+    const payload = await readJson<{
+      reviewTasks?: AdminReviewTask[];
+      summary?: { pending: number; returned: number; approved: number; expertCount: number };
+    }>(response);
     if (!response.ok) {
       setNotice(payload.error?.message ?? "审核任务加载失败。");
       return;
     }
-    setTasks(payload.data.reviewTasks ?? []);
+    setTasks(payload.data?.reviewTasks ?? []);
     setSummary(
-      payload.data.summary ?? {
+      payload.data?.summary ?? {
         pending: 0,
         returned: 0,
         approved: 0,
@@ -509,13 +520,16 @@ function AssignmentContent() {
 
   const load = async () => {
     const response = await fetch("/api/v1/review/assignments");
-    const payload = await readJson(response);
+    const payload = await readJson<{
+      experts: ReviewExpert[];
+      questions: AssignableQuestion[];
+    }>(response);
     if (!response.ok) {
       setNotice(payload.error?.message ?? "待分配任务加载失败。");
       return;
     }
-    setExperts(payload.data.experts);
-    setQuestions(payload.data.questions);
+    setExperts(payload.data?.experts ?? []);
+    setQuestions(payload.data?.questions ?? []);
   };
   useEffect(() => {
     void load();
@@ -549,13 +563,13 @@ function AssignmentContent() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ expertId, questionIds: selectedIds }),
     });
-    const payload = await readJson(response);
+    const payload = await readJson<{ assigned: number }>(response);
     setSaving(false);
     if (!response.ok) {
       setNotice(payload.error?.message ?? "审核任务分配失败。");
       return;
     }
-    setNotice(`已向所选专家分配 ${payload.data.assigned} 道审核任务。`);
+    setNotice(`已向所选专家分配 ${payload.data?.assigned ?? 0} 道审核任务。`);
     setSelectedIds([]);
     await load();
   };

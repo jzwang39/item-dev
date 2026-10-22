@@ -47,7 +47,7 @@ export async function GET(request: Request) {
       { error: { code: "UNAUTHENTICATED", message: "登录已失效。" } },
       { status: 401 },
     );
-  const [occupations, structures, plans, papers] = await Promise.all([
+  const [occupations, structures, papers] = await Promise.all([
     query<(RowDataPacket & { id: string; name: string; code: string })[]>(
       "SELECT po.id, po.name, po.code FROM project_occupations po INNER JOIN projects p ON p.id = po.project_id WHERE p.status = 'active' AND po.status = 'active' ORDER BY po.name",
     ),
@@ -67,16 +67,6 @@ export async function GET(request: Request) {
       })[]
     >(
       `SELECT ps.id, ps.name, ps.current_version_id, ps.occupation_id, po.name AS occupation_name, ps.level_code, ps.assessment_mode, psv.duration_minutes, psv.total_items, psv.total_score, psv.snapshot_json FROM paper_structures ps INNER JOIN paper_structure_versions psv ON psv.id = ps.current_version_id INNER JOIN project_occupations po ON po.id = ps.occupation_id WHERE ps.status <> 'archived' ORDER BY ps.updated_at DESC`,
-    ),
-    query<
-      (RowDataPacket & {
-        id: string;
-        name: string;
-        status: string;
-        current_version_id: string | null;
-      })[]
-    >(
-      "SELECT id, name, status, current_version_id FROM assembly_plans WHERE status <> 'cancelled' ORDER BY updated_at DESC",
     ),
     query<
       (RowDataPacket & {

@@ -1,13 +1,12 @@
-import { access, readFile } from "node:fs/promises";
-import { extname, join } from "node:path";
-import { promisify } from "node:util";
-import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { extname } from "node:path";
 
 import type { RowDataPacket } from "mysql2/promise";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getVerifiedSession } from "@/auth";
+import { extractDocxText, extractPdfText } from "@/modules/documents/extraction/service";
 import { query } from "@/shared/database/mysql";
 import { createUlid } from "@/shared/database/ulid";
 
@@ -15,10 +14,6 @@ type SourceFileRow = RowDataPacket & {
   version_id: string; name: string; source_type: string; remark: string | null; original_name: string;
   mime_type: string; object_key: string; size_bytes: number; parse_status: string; created_at: string; project_id: string;
 };
-
-const execFileAsync = promisify(execFile);
-const pdfExtractorPath = "/tmp/itembank-pdf-text-extractor";
-const pdfExtractionTimeoutMs = 10 * 60 * 1000;
 
 async function findSource(sourceId: string) {
   const rows = await query<SourceFileRow[]>(
@@ -38,38 +33,12 @@ async function extractText(source: SourceFileRow, bytes: Buffer) {
   const extension = extname(source.original_name).toLowerCase();
   if (extension === ".txt") return bytes.toString("utf8");
   if (extension === ".docx") {
-    const { stdout } = await execFileAsync("/usr/bin/textutil", ["-convert", "txt", "-stdout", source.object_key], { maxBuffer: 20 * 1024 * 1024 });
-    return stdout.trim();
+    return extractDocxText(bytes);
   }
   if (extension === ".pdf") {
-    await ensurePdfExtractor();
-    const { stdout } = await execFileAsync(pdfExtractorPath, [source.object_key], {
-      maxBuffer: 20 * 1024 * 1024,
-      timeout: pdfExtractionTimeoutMs
-    });
-    const result = JSON.parse(stdout) as { text: string };
-    return result.text.trim();
+    return (await extractPdfText(bytes)).text;
   }
   throw new Error("不支持该文件类型的文本提取。");
-}
-
-async function ensurePdfExtractor() {
-  try {
-    await access(pdfExtractorPath);
-  } catch {
-    await execFileAsync(
-      "/usr/bin/xcrun",
-      [
-        "swiftc",
-        "-framework", "PDFKit",
-        "-framework", "Vision",
-        "-framework", "AppKit",
-        join(process.cwd(), "scripts", "extract-pdf-text.swift"),
-        "-o", pdfExtractorPath
-      ],
-      { timeout: 120000 }
-    );
-  }
 }
 
 function textFilename(originalName: string) {

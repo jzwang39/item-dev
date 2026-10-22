@@ -1,19 +1,15 @@
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
-import { promisify } from "node:util";
 
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 
+import { extractDocxText, extractPdfText } from "@/modules/documents/extraction/service";
 import { createUlid } from "@/shared/database/ulid";
 import { withTransaction } from "@/shared/database/mysql";
 
-const execFileAsync = promisify(execFile);
 const levels = ["level_5", "level_4", "level_3", "level_2", "level_1"] as const;
 const uploadDirectory = "/tmp/itembank-blueprint-imports";
-const pdfExtractorPath = "/tmp/itembank-pdf-text-extractor";
-const pdfExtractionTimeoutMs = 10 * 60 * 1000;
 
 type LevelCode = (typeof levels)[number];
 type ProjectRow = RowDataPacket & { id: string };
@@ -207,48 +203,18 @@ async function extractUploadedText(file: File): Promise<{ text: string; usedOcr:
   if (bytes.length === 0 || bytes.length > 30 * 1024 * 1024) {
     throw new TheoryWeightImportError("文件不能为空且不得超过 30MB。");
   }
-  await mkdir(uploadDirectory, { recursive: true });
-  const temporaryPath = join(uploadDirectory, `${createUlid()}${extension}`);
-  await writeFile(temporaryPath, bytes);
-
   if (extension === ".txt") {
     return { text: bytes.toString("utf8"), usedOcr: false };
   }
   if (extension === ".docx") {
-    const { stdout } = await execFileAsync("/usr/bin/textutil", ["-convert", "txt", "-stdout", temporaryPath], { maxBuffer: 12 * 1024 * 1024 });
-    return { text: stdout, usedOcr: false };
+    return { text: await extractDocxText(bytes), usedOcr: false };
   }
 
   try {
-    await ensurePdfExtractor();
-    const { stdout } = await execFileAsync(pdfExtractorPath, [temporaryPath], {
-      maxBuffer: 20 * 1024 * 1024,
-      // Scanned occupational standards can require several minutes of Vision OCR.
-      timeout: pdfExtractionTimeoutMs
-    });
-    return JSON.parse(stdout) as { text: string; usedOcr: boolean };
+    const result = await extractPdfText(bytes);
+    return { text: result.text, usedOcr: result.usedOcr };
   } catch (error) {
     throw new TheoryWeightImportError(`PDF 文本提取或 OCR 失败：${error instanceof Error ? error.message : "未知错误"}`);
-  }
-}
-
-async function ensurePdfExtractor() {
-  try {
-    await access(pdfExtractorPath);
-    return;
-  } catch {
-    await execFileAsync(
-      "/usr/bin/xcrun",
-      [
-        "swiftc",
-        "-framework", "PDFKit",
-        "-framework", "Vision",
-        "-framework", "AppKit",
-        join(process.cwd(), "scripts", "extract-pdf-text.swift"),
-        "-o", pdfExtractorPath
-      ],
-      { timeout: 120000 }
-    );
   }
 }
 

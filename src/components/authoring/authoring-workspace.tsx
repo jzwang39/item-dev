@@ -1639,9 +1639,29 @@ function SkillCompilationWorkspace({
                     <button
                       className="rounded-lg border border-[#dfe5ef] bg-white px-3.5 py-2 text-xs font-medium text-[#60708a] hover:border-[#aabcf5] hover:text-[#3f60e8]"
                       onClick={() => {
-                        const { code, range: _range, ...form } = point;
+                          const form: NewSkillPoint = {
+                            name: point.name,
+                            level1Code: point.level1Code,
+                            level1Name: point.level1Name,
+                            level2Code: point.level2Code,
+                            level2Name: point.level2Name,
+                            level3Code: point.level3Code,
+                            level3Name: point.level3Name,
+                            ordinal: point.ordinal,
+                            weight: point.weight,
+                            importance: point.importance,
+                            abilityLevel: point.abilityLevel,
+                            targetCount: point.targetCount,
+                            selection: point.selection,
+                            method: point.method,
+                            minutes: point.minutes,
+                            standardText: point.standardText,
+                            citation: point.citation,
+                            knowledgeMaterial: point.knowledgeMaterial,
+                            knowledgePoints: point.knowledgePoints
+                          };
                         setPointError("");
-                        setEditingPointCode(code);
+                          setEditingPointCode(point.code);
                         setNewPoint(form);
                         setIsPointEditorOpen(true);
                       }}
