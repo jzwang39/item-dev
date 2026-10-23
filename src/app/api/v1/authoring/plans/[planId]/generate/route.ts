@@ -56,13 +56,18 @@ type PlanQuota = {
 function endpoint(baseUrl: string, provider: string) {
   const url = new URL(baseUrl);
   url.pathname = url.pathname.replace(/\/+$/, "");
+  const isZhipuPaaS = url.hostname === "open.bigmodel.cn" && url.pathname.startsWith("/api/paas/");
   const anthropic =
-    provider.toLowerCase().includes("claude") ||
-    provider.toLowerCase().includes("anthropic") ||
-    url.pathname.endsWith("/messages");
+    !isZhipuPaaS &&
+    (provider.toLowerCase().includes("claude") ||
+      provider.toLowerCase().includes("anthropic") ||
+      url.pathname.endsWith("/messages"));
   if (anthropic) return { url: url.toString(), protocol: "anthropic" as const };
-  if (!url.pathname.endsWith("/v1")) url.pathname = `${url.pathname || ""}/v1`;
-  url.pathname = `${url.pathname}/chat/completions`;
+  if (!url.pathname.endsWith("/chat/completions")) {
+    const isZhipuV4 = isZhipuPaaS && url.pathname.endsWith("/api/paas/v4");
+    if (!isZhipuV4 && !url.pathname.endsWith("/v1")) url.pathname = `${url.pathname || ""}/v1`;
+    url.pathname = `${url.pathname}/chat/completions`;
+  }
   return { url: url.toString(), protocol: "openai" as const };
 }
 

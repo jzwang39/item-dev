@@ -5,6 +5,8 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 
 type EntryRole = "admin" | "expert";
 
+const invalidCredentialsMessage = "用户名或密码错误，请重试。";
+
 const roleContent: Record<
   EntryRole,
   { eyebrow: string; title: string; description: string; action: string }
@@ -26,9 +28,20 @@ const roleContent: Record<
 export function LoginGateway() {
   const [role, setRole] = useState<EntryRole | null>(null);
   const [error, setError] = useState("");
+  const [pageError, setPageError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const usernameRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    const errorCode = new URLSearchParams(window.location.search).get("error");
+    if (!errorCode) {
+      return;
+    }
+
+    setPageError(errorCode === "CredentialsSignin" ? invalidCredentialsMessage : "登录失败，请稍后重试。");
+    window.history.replaceState({}, "", window.location.pathname);
+  }, []);
 
   useEffect(() => {
     if (!role) {
@@ -49,6 +62,7 @@ export function LoginGateway() {
   function openLogin(nextRole: EntryRole, trigger: HTMLButtonElement) {
     triggerRef.current = trigger;
     setError("");
+    setPageError("");
     setRole(nextRole);
   }
 
@@ -67,21 +81,26 @@ export function LoginGateway() {
     setSubmitting(true);
     setError("");
 
-    const result = await signIn("credentials", {
-      username: String(formData.get("username") ?? ""),
-      password: String(formData.get("password") ?? ""),
-      entryRole: role,
-      redirect: false,
-      callbackUrl: "/workspace"
-    });
+    try {
+      const result = await signIn("credentials", {
+        username: String(formData.get("username") ?? ""),
+        password: String(formData.get("password") ?? ""),
+        entryRole: role,
+        redirect: false,
+        callbackUrl: "/workspace"
+      });
 
-    setSubmitting(false);
-    if (!result?.ok) {
-      setError("账号、密码或登录入口不正确，请重新输入。");
-      return;
+      if (!result?.ok) {
+        setError(result?.error === "CredentialsSignin" ? invalidCredentialsMessage : "登录失败，请稍后重试。");
+        return;
+      }
+
+      window.location.assign(result.url ?? "/workspace");
+    } catch {
+      setError("登录失败，请稍后重试。");
+    } finally {
+      setSubmitting(false);
     }
-
-    window.location.assign(result.url ?? "/workspace");
   }
 
   return (
@@ -132,6 +151,11 @@ export function LoginGateway() {
                 <span>专家登录</span>
               </button>
             </div>
+            {pageError ? (
+              <p aria-live="polite" className="entry-login-message" role="alert">
+                {pageError}
+              </p>
+            ) : null}
             <div className="entry-principles">
               <div>
                 <strong>智能体</strong>
@@ -220,7 +244,11 @@ export function LoginGateway() {
               <span>密码</span>
               <input autoComplete="current-password" name="password" placeholder="请输入密码" required type="password" />
             </label>
-            {error ? <p className="auth-message">{error}</p> : null}
+            {error ? (
+              <p aria-live="polite" className="auth-message" role="alert">
+                {error}
+              </p>
+            ) : null}
             <button className="auth-submit" disabled={submitting} type="submit">
               {submitting ? <span className="entry-spinner" /> : null}
               {submitting ? "正在验证身份…" : roleContent[role].action}

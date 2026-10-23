@@ -202,6 +202,18 @@ button {
   margin-top: 42px;
 }
 
+.entry-login-message {
+  width: fit-content;
+  margin: 14px 0 0;
+  padding: 8px 12px;
+  border: 1px solid #ffaba847;
+  border-radius: 8px;
+  background: #9d30301f;
+  color: #ffb9b6;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .entry-button {
   display: inline-flex;
   min-height: 56px;

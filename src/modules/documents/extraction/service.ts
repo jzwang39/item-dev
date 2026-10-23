@@ -1,5 +1,8 @@
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
 import mammoth from "mammoth";
-import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { getDocument, GlobalWorkerOptions } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { ocr } from "tencentcloud-sdk-nodejs-ocr";
 
 const nativeTextThreshold = 80;
@@ -44,6 +47,11 @@ async function extractNativePdfText(bytes: Buffer): Promise<Omit<PdfExtractionRe
   let loadingTask: ReturnType<typeof getDocument> | undefined;
   let document;
   try {
+    // Next.js does not copy PDF.js's worker into its server vendor chunks.
+    // Point PDF.js at the installed module before it creates its Node fake worker.
+    GlobalWorkerOptions.workerSrc = pathToFileURL(
+      resolve(process.cwd(), "node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs")
+    ).href;
     // Use a copy because PDF.js may transfer the source ArrayBuffer to its worker.
     const data = new Uint8Array(bytes);
     loadingTask = getDocument({ data, useWorkerFetch: false });

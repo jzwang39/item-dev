@@ -4,6 +4,7 @@ node_modules/
 out/
 docs/
 .data/
+*.tsbuildinfo
 
 # local configuration and runtime output
 .env

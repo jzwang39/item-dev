@@ -189,10 +189,14 @@ function getModelEndpoint(baseUrl: string, provider: string) {
   const url = new URL(baseUrl);
   if (!["http:", "https:"].includes(url.protocol)) throw new Error("模型 API 地址仅支持 HTTP 或 HTTPS。");
   url.pathname = url.pathname.replace(/\/+$/, "");
-  const isAnthropic = provider.toLowerCase().includes("claude") || provider.toLowerCase().includes("anthropic") || url.pathname.endsWith("/messages");
+  const isZhipuPaaS = url.hostname === "open.bigmodel.cn" && url.pathname.startsWith("/api/paas/");
+  const isAnthropic = !isZhipuPaaS && (provider.toLowerCase().includes("claude") || provider.toLowerCase().includes("anthropic") || url.pathname.endsWith("/messages"));
   if (isAnthropic) return { url: url.toString(), protocol: "anthropic" as const };
-  if (!url.pathname.endsWith("/v1")) url.pathname = `${url.pathname || ""}/v1`;
-  url.pathname = `${url.pathname}/chat/completions`;
+  if (!url.pathname.endsWith("/chat/completions")) {
+    const isZhipuV4 = isZhipuPaaS && url.pathname.endsWith("/api/paas/v4");
+    if (!isZhipuV4 && !url.pathname.endsWith("/v1")) url.pathname = `${url.pathname || ""}/v1`;
+    url.pathname = `${url.pathname}/chat/completions`;
+  }
   return { url: url.toString(), protocol: "openai" as const };
 }
 
