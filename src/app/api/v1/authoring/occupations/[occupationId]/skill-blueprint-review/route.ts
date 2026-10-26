@@ -5,6 +5,7 @@ import type { RowDataPacket } from "mysql2/promise";
 import { getVerifiedSession } from "@/auth";
 import { withTransaction } from "@/shared/database/mysql";
 import { createUlid } from "@/shared/database/ulid";
+import { assertOutlineConfirmed } from "@/modules/blueprints/point-review";
 
 const schema = z.object({ levelCode: z.enum(["level_5", "level_4", "level_3", "level_2", "level_1"]), opinion: z.string().max(5000) });
 
@@ -16,25 +17,20 @@ export async function GET(request: Request, { params }: Readonly<{ params: { occ
   const levelCode = new URL(request.url).searchParams.get("levelCode") ?? "";
   try {
     const data = await withTransaction(async (connection) => {
-        const [rows] = await connection.execute<(RowDataPacket & { after_json: string | { opinion?: string } | null; created_at: Date | string; display_name: string | null })[]>(
-        `SELECT al.after_json, al.created_at, a.display_name
-           FROM audit_logs al
-           INNER JOIN blueprints b ON b.current_version_id = al.object_id
-           LEFT JOIN accounts a ON a.id = al.actor_id
-          WHERE b.occupation_id = ? AND b.level_code = ? AND b.blueprint_kind = 'skill_outline'
-            AND b.assessment_mode = 'skill' AND al.action = 'blueprint.skill_outline.approve'
-          ORDER BY al.created_at DESC LIMIT 1`,
-        [params.occupationId, levelCode]
+      const [confirmed] = await connection.execute<(RowDataPacket & { total: number; confirmed: number; approved_at: Date | string | null; reviewer: string | null })[]>(
+        `SELECT COUNT(*) AS total,COALESCE(SUM(r.status='confirmed'),0) AS confirmed,
+          MAX(r.confirmed_at) AS approved_at,MAX(a.display_name) AS reviewer
+         FROM blueprints b JOIN blueprint_nodes n ON n.blueprint_version_id=b.current_version_id AND n.node_kind='assessment_point'
+         LEFT JOIN outline_point_reviews r ON r.node_id=n.id LEFT JOIN accounts a ON a.id=r.confirmed_by
+         WHERE b.occupation_id=? AND b.level_code=? AND b.blueprint_kind='skill_outline' AND b.assessment_mode='skill'`,
+        [params.occupationId, levelCode],
       );
-      const row = rows[0];
-      if (!row) return null;
-        const after = typeof row.after_json === "string"
-          ? JSON.parse(row.after_json) as { opinion?: string }
-          : row.after_json ?? {};
-        const approvedAt = row.created_at instanceof Date
-          ? row.created_at.toISOString()
-          : new Date(row.created_at).toISOString();
-        return { opinion: after.opinion ?? "", approvedAt, reviewer: row.display_name ?? "管理员" };
+      const state = confirmed[0];
+      if (Number(state.total) > 0 && Number(state.total) === Number(state.confirmed) && state.approved_at) {
+        return { opinion: "全部考评点已审核并经管理员确认。", approvedAt: new Date(state.approved_at).toISOString(), reviewer: state.reviewer ?? "管理员" };
+      }
+      // Historical audit-only approval no longer grants permission.
+      return null;
     });
     return NextResponse.json({ data });
   } catch {
@@ -57,6 +53,7 @@ export async function POST(request: Request, { params }: Readonly<{ params: { oc
       const [outlines] = await connection.execute<(RowDataPacket & { current_version_id: string | null })[]>(`SELECT current_version_id FROM blueprints WHERE project_id = ? AND occupation_id = ? AND level_code = ? AND blueprint_kind = 'skill_outline' AND assessment_mode = 'skill' LIMIT 1`, [projects[0].id, params.occupationId, data.levelCode]);
       const blueprintVersionId = outlines[0]?.current_version_id;
       if (!blueprintVersionId) throw new SkillBlueprintReviewError("当前等级尚未保存操作技能考评点，不能登记蓝图通过。");
+      await assertOutlineConfirmed(connection, blueprintVersionId);
       await connection.execute(
         `INSERT INTO audit_logs (id, project_id, actor_id, action, object_type, object_id, after_json, result)
          VALUES (?, ?, ?, 'blueprint.skill_outline.approve', 'blueprint_version', ?, ?, 'success')`,

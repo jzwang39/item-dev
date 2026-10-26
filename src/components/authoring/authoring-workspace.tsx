@@ -1,6 +1,8 @@
 "use client";
 
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { SkillStandardUpload, SkillWeightMatrix, SkillStructureMatrix, type ImportedSkillStandard } from "./skill-standard-upload";
+import { SkillOutlinePanel } from "./skill-outline-panel";
 
 const tabs = ["考评蓝图", "命题任务", "资料依据", "质量检查"] as const;
 
@@ -51,11 +53,15 @@ type TheoryAssessmentPoint = {
   name: string;
   primaryNo: string;
   primaryName: string;
+  primaryWeight?: number | null;
   secondaryNo: string;
   secondaryName: string;
+  secondaryWeight?: number | null;
   tertiaryNo: string;
   tertiaryName: string;
+  tertiaryWeight?: number | null;
   importance: "low" | "medium" | "high" | "critical" | null;
+  importanceCode?: "X" | "Y" | "Z";
   remark: string;
   textbookPage: string;
 };
@@ -129,6 +135,29 @@ type OccupationStandard = {
   original_name: string;
 };
 
+type Textbook = {
+  sourceId: string;
+  sourceVersionId: string;
+  name: string;
+  originalName: string;
+  createdAt: string;
+  chapterCount: number;
+};
+
+type TheoryOutlineGenerationJob = {
+  id: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  mode: "textbook" | "model";
+  totalBatches: number;
+  completedBatches: number;
+  generatedPointCount: number;
+  errorMessage: string | null;
+  textbookSourceVersionId: string | null;
+  resultBlueprintVersionId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 const theoryLevels = [
   { value: "level_5", label: "五级 / 初级工" },
   { value: "level_4", label: "四级 / 中级工" },
@@ -173,13 +202,6 @@ const theoryWeightRows = [
     item: "技术管理和培训",
     weights: ["—", "—", "—", "5", "10"],
   },
-];
-
-const skillWeightRows = [
-  { item: "任务准备与核对", weights: [0, 25, 0, 0, 0] },
-  { item: "按任务单完成加工", weights: [0, 25, 0, 0, 0] },
-  { item: "过程检验与记录", weights: [0, 25, 0, 0, 0] },
-  { item: "交付验收与追溯", weights: [0, 25, 0, 0, 0] },
 ];
 
 function Arrow() {
@@ -280,6 +302,17 @@ function TheoryCompilationWorkspace({
   const [outlineError, setOutlineError] = useState("");
   const [isImportingWeights, setIsImportingWeights] = useState(false);
   const [isImportingOutline, setIsImportingOutline] = useState(false);
+  const [textbookMode, setTextbookMode] = useState<"textbook" | "model">(
+    "textbook",
+  );
+  const [pendingTextbook, setPendingTextbook] = useState<File | null>(null);
+  const [textbooks, setTextbooks] = useState<Textbook[]>([]);
+  const [generationJobs, setGenerationJobs] = useState<
+    TheoryOutlineGenerationJob[]
+  >([]);
+  const [isUploadingTextbook, setIsUploadingTextbook] = useState(false);
+  const [isStartingGeneration, setIsStartingGeneration] = useState(false);
+  const [outlinePage, setOutlinePage] = useState(1);
   const currentLevel =
     theoryLevels.find((item) => item.value === level) ?? theoryLevels[1];
   const displayRows =
@@ -371,6 +404,41 @@ function TheoryCompilationWorkspace({
     };
   }, [level, profession.id]);
 
+  const refreshGenerationState = useCallback(async () => {
+    const response = await fetch(
+      `/api/v1/authoring/occupations/${profession.id}/theory-outline-generation?levelCode=${encodeURIComponent(level)}`,
+    );
+    const body = (await response.json()) as {
+      data?: { textbooks: Textbook[]; jobs: TheoryOutlineGenerationJob[] };
+      error?: { message?: string };
+    };
+    if (!response.ok || !body.data) {
+      throw new Error(body.error?.message ?? "教材与生成任务加载失败。");
+    }
+    setTextbooks(body.data.textbooks);
+    setGenerationJobs(body.data.jobs);
+    return body.data.jobs;
+  }, [level, profession.id]);
+
+  useEffect(() => {
+    let active = true;
+    void refreshGenerationState()
+      .catch((error: unknown) => {
+        if (active) {
+          setOutlineError(
+            error instanceof Error ? error.message : "教材与生成任务加载失败。",
+          );
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [refreshGenerationState]);
+
+  useEffect(() => {
+    setOutlinePage(1);
+  }, [level, outlineSnapshot?.versionId]);
+
   async function importWeightTable() {
     if (!pendingWeightFile && !sourceVersionId) return;
     setWeightError("");
@@ -435,6 +503,88 @@ function TheoryCompilationWorkspace({
       setIsImportingOutline(false);
     }
   }
+
+  async function uploadTextbook() {
+    if (!pendingTextbook) return;
+    setOutlineError("");
+    setIsUploadingTextbook(true);
+    try {
+      const formData = new FormData();
+      formData.set("levelCode", level);
+      formData.set("file", pendingTextbook);
+      const response = await fetch(
+        `/api/v1/authoring/occupations/${profession.id}/theory-outline-generation`,
+        { method: "POST", body: formData },
+      );
+      const body = (await response.json()) as { error?: { message?: string } };
+      if (!response.ok) throw new Error(body.error?.message ?? "教材上传失败。");
+      setPendingTextbook(null);
+      await refreshGenerationState();
+    } catch (error) {
+      setOutlineError(error instanceof Error ? error.message : "教材上传失败。");
+    } finally {
+      setIsUploadingTextbook(false);
+    }
+  }
+
+  async function startOutlineGeneration() {
+    setOutlineError("");
+    setIsStartingGeneration(true);
+    try {
+      const response = await fetch(
+        `/api/v1/authoring/occupations/${profession.id}/theory-outline-generation`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "generate",
+            levelCode: "all",
+            mode: textbookMode,
+          }),
+        },
+      );
+      const body = (await response.json()) as { error?: { message?: string } };
+      if (!response.ok) throw new Error(body.error?.message ?? "细目表任务创建失败。");
+      await refreshGenerationState();
+    } catch (error) {
+      setOutlineError(
+        error instanceof Error ? error.message : "细目表任务创建失败。",
+      );
+    } finally {
+      setIsStartingGeneration(false);
+    }
+  }
+
+  const activeGeneration = generationJobs.find(
+    (job) => job.status === "queued" || job.status === "running",
+  );
+  const pageSize = 20;
+  const totalOutlinePages = outlineSnapshot
+    ? Math.max(1, Math.ceil(outlineSnapshot.points.length / pageSize))
+    : 1;
+  const displayedOutlinePoints = outlineSnapshot?.points.slice(
+    (outlinePage - 1) * pageSize,
+    outlinePage * pageSize,
+  ) ?? [];
+
+  useEffect(() => {
+    if (!activeGeneration) return;
+    const timer = setInterval(() => {
+      void refreshGenerationState()
+        .then((jobs) => {
+          if (jobs.some((job) => job.status === "queued" || job.status === "running")) return;
+          void fetch(
+            `/api/v1/authoring/occupations/${profession.id}/theory-outlines?levelCode=${encodeURIComponent(level)}`,
+          )
+            .then((response) => response.json())
+            .then((body: { data?: { current: TheoryOutlineSnapshot | null } }) =>
+              setOutlineSnapshot(body.data?.current ?? null),
+            );
+        })
+        .catch(() => undefined);
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [activeGeneration, level, profession.id, refreshGenerationState]);
 
   return (
     <div className="mt-7">
@@ -552,33 +702,6 @@ function TheoryCompilationWorkspace({
         </div>
       </section>
 
-      <section className="mt-7 rounded-[18px] border border-[#e1e6ef] bg-white px-8 py-6 shadow-card">
-        <div className="flex flex-wrap items-center justify-between gap-5">
-          <div>
-            <h2 className="m-0 text-lg font-semibold text-[#293242]">
-              细目表编制等级
-            </h2>
-            <p className="m-0 mt-2 text-sm text-[#6f7f96]">
-              细目表按照职业和技能等级分别保存，等级来源于当前职业权重表；不影响职业级权重表。
-            </p>
-          </div>
-          <label className="flex items-center gap-3 text-sm font-medium text-[#536178]">
-            技能等级
-            <select
-              className="h-11 min-w-[180px] rounded-lg border border-[#d9e2ef] bg-white px-3 text-[#3f567b] outline-none focus:border-[#7691ee] focus:ring-2 focus:ring-[#e8eeff]"
-              onChange={(event) => setLevel(event.target.value)}
-              value={level}
-            >
-              {theoryLevels.map((item) => (
-                <option key={item.value} value={item.value}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-      </section>
-
       <section className="mt-7 overflow-hidden rounded-[18px] border border-[#e1e6ef] bg-white shadow-card">
         <div className="flex flex-wrap items-center justify-between gap-5 border-b border-[#e8ecf3] px-8 py-6">
           <div>
@@ -586,60 +709,186 @@ function TheoryCompilationWorkspace({
               第二步 · 理论知识考评要素细目表
             </h2>
             <p className="m-0 mt-2 text-sm text-[#6f7f96]">
-              先选择上方技能等级，再上传对应等级的细目表；识别结果只会按职业、技能等级独立保存。
+              沿用理论知识权重表，选择是否有教材后生成完整细目表。
             </p>
           </div>
+        </div>
+        <div className="space-y-5 px-8 py-6">
+          <p className="m-0 text-sm text-[#607694]">
+            一次生成五级、四级、三级、二级、一级的完整细目表；下方 Tab 用于切换查看。
+          </p>
+          <div className="flex flex-wrap items-center gap-7 text-sm text-[#536178]">
+            <label className="flex cursor-pointer items-center gap-2">
+              <input
+                checked={textbookMode === "textbook"}
+                onChange={() => setTextbookMode("textbook")}
+                type="radio"
+              />
+              有教材
+            </label>
+            <label className="flex cursor-pointer items-center gap-2">
+              <input
+                checked={textbookMode === "model"}
+                onChange={() => setTextbookMode("model")}
+                type="radio"
+              />
+              无教材
+            </label>
+          </div>
+          {textbookMode === "textbook" ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="cursor-pointer rounded-lg border border-[#d5e0ef] bg-white px-4 py-2.5 text-sm font-medium text-[#4e6484] hover:border-[#8daaf1]">
+                上传教材
+                <input
+                  accept=".pdf,.docx,.txt"
+                  className="sr-only"
+                  onChange={(event) =>
+                    setPendingTextbook(event.target.files?.[0] ?? null)
+                  }
+                  type="file"
+                />
+              </label>
+              <span className="text-sm text-[#7b8da7]">
+                {pendingTextbook?.name || "支持 PDF、DOCX、TXT"}
+              </span>
+              <button
+                className="rounded-lg border border-[#3f60e8] px-4 py-2.5 text-sm font-medium text-[#3f60e8] disabled:cursor-not-allowed disabled:border-[#c7d1ed] disabled:text-[#9aa8c9]"
+                disabled={!pendingTextbook || isUploadingTextbook}
+                onClick={() => void uploadTextbook()}
+                type="button"
+              >
+                {isUploadingTextbook ? "教材解析中..." : "确认上传"}
+              </button>
+            </div>
+          ) : null}
+          {textbooks.length ? (
+            <div className="rounded-lg bg-[#f7f9fd] px-4 py-3 text-sm text-[#526b91]">
+              最新教材：{textbooks[0].originalName}，已拆分 {textbooks[0].chapterCount} 个章/节。
+              <a
+                className="ml-3 text-[#3f60e8] underline"
+                href={`/api/v1/authoring/sources/${textbooks[0].sourceId}/content?mode=download`}
+                target="_blank"
+              >
+                查看教材
+              </a>
+              {textbooks.length > 1 ? (
+                <details className="mt-2 text-[#7b8da7]">
+                  <summary className="cursor-pointer">查看 {textbooks.length - 1} 个历史教材版本</summary>
+                  <div className="mt-2 space-y-1">
+                    {textbooks.slice(1).map((textbook) => (
+                      <a
+                        className="block text-[#3f60e8] underline"
+                        href={`/api/v1/authoring/sources/${textbook.sourceId}/content?mode=download`}
+                        key={textbook.sourceVersionId}
+                        target="_blank"
+                      >
+                        {textbook.originalName} · {new Date(textbook.createdAt).toLocaleString("zh-CN", { hour12: false })}
+                      </a>
+                    ))}
+                  </div>
+                </details>
+              ) : null}
+            </div>
+          ) : null}
           <button
-            className="rounded-lg bg-[#3f60e8] px-5 py-3 text-sm font-medium text-white shadow-[0_8px_16px_rgba(63,96,232,0.18)] transition hover:bg-[#3354d8]"
-            onClick={() => {
-              setPendingOutlineFile(null);
-              setOutlineError("");
-              setIsOutlineImportOpen(true);
-            }}
+            className="rounded-lg bg-[#3f60e8] px-5 py-3 text-sm font-medium text-white shadow-[0_8px_16px_rgba(63,96,232,0.18)] transition hover:bg-[#3354d8] disabled:cursor-not-allowed disabled:bg-[#aab8eb]"
+            disabled={Boolean(activeGeneration) || isStartingGeneration || (textbookMode === "textbook" && !textbooks.length)}
+            onClick={() => void startOutlineGeneration()}
             type="button"
           >
-            ▣ 上传细目表文件
+            {activeGeneration
+              ? "正在生成全部等级细目表..."
+              : textbookMode === "model"
+                ? "AI大模型生成"
+                : "生成细目表"}
           </button>
+          {activeGeneration ? (
+            <div className="max-w-[620px]">
+              <div className="flex justify-between text-sm text-[#526b91]">
+                <span>正在按章节和权重分批生成考评点（批次）</span>
+                <span>{activeGeneration.completedBatches} / {activeGeneration.totalBatches || "?"} 批</span>
+              </div>
+              <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#e5ebf6]">
+                <div
+                  className="h-full rounded-full bg-[#3f60e8] transition-all"
+                  style={{ width: `${activeGeneration.totalBatches ? activeGeneration.completedBatches / activeGeneration.totalBatches * 100 : 4}%` }}
+                />
+              </div>
+            </div>
+          ) : null}
+          <div className="flex flex-wrap gap-2 border-t border-[#e8ecf3] pt-5">
+            {theoryLevels.map((item) => (
+              <button
+                className={`rounded-lg border px-4 py-2 text-sm font-medium ${
+                  level === item.value
+                    ? "border-[#3f60e8] bg-[#3f60e8] text-white"
+                    : "border-[#d9e2ef] bg-white text-[#536178] hover:border-[#8ca6ee]"
+                }`}
+                key={item.value}
+                onClick={() => setLevel(item.value)}
+                type="button"
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
         </div>
         <p className="m-0 bg-[#f2f6ff] px-8 py-3 text-sm text-[#55729a]">
           {isLoadingOutline
             ? `正在读取${currentLevel.label}的理论知识细目表...`
             : outlineSnapshot
-              ? `当前为第 ${outlineSnapshot.versionNo} 版，来源：${outlineSnapshot.sourceName}，已解析 ${outlineSnapshot.points.length} 个考评点。导入新文件将创建新版本并全量替换当前等级的考评点。`
-              : `当前${currentLevel.label}尚未上传细目表。上传 .xlsx 后将解析考评点并保存为该等级的首个版本。`}
+              ? `当前为第 ${outlineSnapshot.versionNo} 版，来源：${outlineSnapshot.sourceName}，已生成 ${outlineSnapshot.points.length} 个考评点。`
+              : `当前${currentLevel.label}尚未生成细目表。生成成功后会创建新版本，历史版本将保留追溯。`}
         </p>
-        {outlineError && !isOutlineImportOpen ? (
+        {outlineError ? (
           <p className="m-0 border-b border-[#f2dfe2] bg-[#fff8f8] px-8 py-3 text-sm text-[#c6474e]">
             {outlineError}
           </p>
         ) : null}
+        {generationJobs[0]?.status === "failed" ? (
+          <p className="m-0 border-b border-[#f2dfe2] bg-[#fff8f8] px-8 py-3 text-sm text-[#c6474e]">
+            最近一次生成失败，未发布任何不完整数据：{generationJobs[0].errorMessage || "请检查模型配置后重试。"}
+          </p>
+        ) : null}
+        {generationJobs.filter((job) => job.status === "succeeded").length > 1 ? (
+          <details className="border-b border-[#e8ecf3] px-8 py-3 text-sm text-[#607694]">
+            <summary className="cursor-pointer">历史细目表版本（默认使用最新成功版本）</summary>
+            <div className="mt-2 space-y-1">
+              {generationJobs.filter((job) => job.status === "succeeded").slice(1).map((job) => (
+                <p className="m-0" key={job.id}>
+                  {job.mode === "textbook" ? "教材生成" : "AI 大模型生成"} · {job.generatedPointCount} 个考评点 · {new Date(job.updatedAt).toLocaleString("zh-CN", { hour12: false })}
+                </p>
+              ))}
+            </div>
+          </details>
+        ) : null}
         {outlineSnapshot ? (
           <div className="overflow-x-auto">
-            <table className="min-w-[1250px] w-full border-collapse text-left text-sm">
+            <table className="min-w-[1500px] w-full border-collapse text-left text-sm">
               <thead className="bg-[#fafbfe] text-xs font-medium text-[#8a98ae]">
                 <tr>
                   <th className="px-5 py-4 font-medium">序号</th>
-                  <th className="px-5 py-4 font-medium">一级 / 二级 / 三级</th>
-                  <th className="px-5 py-4 font-medium">考评点编号</th>
-                  <th className="px-5 py-4 font-medium">考评点名称</th>
+                  <th className="px-5 py-4 font-medium">一级名称/代码</th>
+                  <th className="px-5 py-4 font-medium">权重</th>
+                  <th className="px-5 py-4 font-medium">二级名称/代码</th>
+                  <th className="px-5 py-4 font-medium">权重</th>
+                  <th className="px-5 py-4 font-medium">三级名称/代码</th>
+                  <th className="px-5 py-4 font-medium">权重</th>
+                  <th className="px-5 py-4 font-medium">代码</th>
+                  <th className="px-5 py-4 font-medium">名称</th>
                   <th className="px-5 py-4 font-medium">重要程度</th>
-                  <th className="px-5 py-4 font-medium">备注</th>
-                  <th className="px-5 py-4 font-medium">教材页码</th>
                 </tr>
               </thead>
               <tbody className="text-[#45536a]">
-                {outlineSnapshot.points.map((point, index) => (
+                {displayedOutlinePoints.map((point, index) => (
                   <tr className="border-t border-[#e8ecf3]" key={point.code}>
-                    <td className="px-5 py-4">{index + 1}</td>
-                    <td className="px-5 py-4 leading-6">
-                      {[
-                        `${point.primaryNo} ${point.primaryName}`,
-                        `${point.secondaryNo} ${point.secondaryName}`,
-                        `${point.tertiaryNo} ${point.tertiaryName}`,
-                      ]
-                        .filter((value) => value.trim())
-                        .join(" / ") || "—"}
-                    </td>
+                    <td className="px-5 py-4">{(outlinePage - 1) * pageSize + index + 1}</td>
+                    <td className="px-5 py-4">{point.primaryName}<small className="block text-[#7587a1]">{point.primaryNo}</small></td>
+                    <td className="px-5 py-4 font-semibold text-[#294f99]">{point.primaryWeight ?? "—"}</td>
+                    <td className="px-5 py-4">{point.secondaryName}<small className="block text-[#7587a1]">{point.secondaryNo}</small></td>
+                    <td className="px-5 py-4 font-semibold text-[#294f99]">{point.secondaryWeight ?? "—"}</td>
+                    <td className="px-5 py-4">{point.tertiaryName}<small className="block text-[#7587a1]">{point.tertiaryNo}</small></td>
+                    <td className="px-5 py-4 font-semibold text-[#294f99]">{point.tertiaryWeight ?? "—"}</td>
                     <td className="px-5 py-4 font-medium text-[#3f60e8]">
                       {point.code}
                     </td>
@@ -647,25 +896,19 @@ function TheoryCompilationWorkspace({
                       {point.name}
                     </td>
                     <td className="px-5 py-4">
-                      {
-                        (
-                          {
-                            low: "低",
-                            medium: "中",
-                            high: "高",
-                            critical: "关键",
-                          } as const
-                        )[point.importance ?? "medium"]
-                      }
+                      {point.importanceCode ?? ({ low: "Z", medium: "Y", high: "Y", critical: "X" } as const)[point.importance ?? "medium"]}
                     </td>
-                    <td className="max-w-[240px] px-5 py-4">
-                      {point.remark || "—"}
-                    </td>
-                    <td className="px-5 py-4">{point.textbookPage || "—"}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            {totalOutlinePages > 1 ? (
+              <div className="flex items-center justify-end gap-3 border-t border-[#e8ecf3] px-6 py-4 text-sm text-[#526b91]">
+                <button className="rounded border px-3 py-1 disabled:text-[#aab4c4]" disabled={outlinePage === 1} onClick={() => setOutlinePage((page) => page - 1)} type="button">上一页</button>
+                <span>第 {outlinePage} / {totalOutlinePages} 页</span>
+                <button className="rounded border px-3 py-1 disabled:text-[#aab4c4]" disabled={outlinePage === totalOutlinePages} onClick={() => setOutlinePage((page) => page + 1)} type="button">下一页</button>
+              </div>
+            ) : null}
           </div>
         ) : null}
       </section>
@@ -893,6 +1136,7 @@ function SkillCompilationWorkspace({
   onReturn: () => void;
 }>) {
   const [level, setLevel] = useState("level_4");
+  const [importedStandard, setImportedStandard] = useState<ImportedSkillStandard | null>(null);
   const [skillWeightSnapshot, setSkillWeightSnapshot] =
     useState<SkillWeightSnapshot | null>(null);
   const [editableSkillWeights, setEditableSkillWeights] = useState<
@@ -915,6 +1159,11 @@ function SkillCompilationWorkspace({
   const [skillAssessmentPoints, setSkillAssessmentPoints] = useState<
     SkillAssessmentPoint[]
   >([]);
+  const [skillRefreshVersion, setSkillRefreshVersion] = useState(0);
+  const refreshSkillPoints = useCallback(() => {
+    setSkillRefreshVersion((value) => value + 1);
+    setBlueprintApproval(null);
+  }, []);
   const [editingPointCode, setEditingPointCode] = useState<string | null>(null);
   const [blueprintApproval, setBlueprintApproval] = useState<{
     opinion: string;
@@ -959,13 +1208,7 @@ function SkillCompilationWorkspace({
   const currentLevel =
     theoryLevels.find((item) => item.value === level) ?? theoryLevels[1];
   const displayedSkillWeights =
-    skillWeightSnapshot?.items ??
-    skillWeightRows.map((row) => ({
-      name: row.item,
-      weights: Object.fromEntries(
-        theoryLevels.map((item, index) => [item.value, row.weights[index]]),
-      ),
-    }));
+    skillWeightSnapshot?.items ?? [];
   const skillWeightTotals = theoryLevels.map((item) =>
     displayedSkillWeights.reduce(
       (total, row) => total + (row.weights[item.value] ?? 0),
@@ -1052,7 +1295,7 @@ function SkillCompilationWorkspace({
     return () => {
       active = false;
     };
-  }, [profession.id, level, skillAssessmentPoints.length]);
+  }, [profession.id, level, skillAssessmentPoints.length, skillRefreshVersion]);
 
   useEffect(() => {
     let active = true;
@@ -1079,23 +1322,7 @@ function SkillCompilationWorkspace({
     return () => {
       active = false;
     };
-  }, [profession.id, level]);
-
-  function openWeightEditor() {
-    const items = displayedSkillWeights.map((item) => ({
-      name: item.name,
-      weights: { ...item.weights },
-    }));
-    while (items.length < 8) {
-      items.push({
-        name: "",
-        weights: { level_5: 0, level_4: 0, level_3: 0, level_2: 0, level_1: 0 },
-      });
-    }
-    setEditableSkillWeights(items);
-    setSkillWeightError("");
-    setIsWeightEditorOpen(true);
-  }
+  }, [profession.id, level, skillRefreshVersion]);
 
   function updateWeightItem(
     index: number,
@@ -1297,6 +1524,7 @@ function SkillCompilationWorkspace({
       setBlueprintApproval(null);
       setEditingPointCode(null);
       setIsPointEditorOpen(false);
+      refreshSkillPoints();
     } catch (error) {
       setPointError(
         error instanceof Error ? error.message : "考评点保存失败。",
@@ -1369,30 +1597,28 @@ function SkillCompilationWorkspace({
               第一步 · 技能要求权重表
             </h2>
             <p className="m-0 mt-2 text-sm text-[#6f7f96]">
-              权重表按照职业编制，五个等级分别记录百分比。
+              上传本职业国家职业标准，提取五个等级及职业方向的权重；“—”表示不适用。
             </p>
           </div>
-          <button
-            className="rounded-lg bg-[#3f60e8] px-5 py-3 text-sm font-medium text-white shadow-[0_8px_16px_rgba(63,96,232,0.18)] hover:bg-[#3354d8]"
-            onClick={openWeightEditor}
-            type="button"
-          >
-            ▣ 查看权重表
-          </button>
+          <div className="flex items-center gap-3">
+          <SkillStandardUpload occupationId={profession.id} onChange={setImportedStandard} />
+          </div>
         </div>
         <p className="m-0 bg-[#f2f6ff] px-8 py-3 text-sm text-[#55729a]">
-          {isLoadingSkillWeights
+          {importedStandard
+            ? `当前为第 ${importedStandard.versionNo} 版，来源：${importedStandard.sourceName}。`
+            : isLoadingSkillWeights
             ? "正在读取职业技能要求权重表..."
             : skillWeightSnapshot
               ? `当前为第 ${skillWeightSnapshot.versionNo} 版，来源：${skillWeightSnapshot.sourceName}。`
-              : "当前展示离线示例数据；保存后将以职业级版本保存。"}
+              : "尚未上传国家职业标准，可上传识别权重表和内容结构。"}
         </p>
         {skillWeightError && !isWeightEditorOpen ? (
           <p className="m-0 border-b border-[#f2dfe2] bg-[#fff8f8] px-8 py-3 text-sm text-[#c6474e]">
             {skillWeightError}
           </p>
         ) : null}
-        <div className="overflow-x-auto">
+        {importedStandard ? <SkillWeightMatrix data={importedStandard} /> : <div className="overflow-x-auto">
           <table className="min-w-[1000px] w-full border-collapse text-center text-sm">
             <thead className="bg-[#fafbfe] text-[#8a98ae]">
               <tr>
@@ -1439,34 +1665,7 @@ function SkillCompilationWorkspace({
               </tr>
             </tbody>
           </table>
-        </div>
-      </section>
-
-      <section className="mt-7 rounded-[18px] border border-[#e1e6ef] bg-white px-8 py-6 shadow-card">
-        <div className="flex flex-wrap items-center justify-between gap-5">
-          <div>
-            <h2 className="m-0 text-lg font-semibold text-[#293242]">
-              细目表编制等级
-            </h2>
-            <p className="m-0 mt-2 text-sm text-[#6f7f96]">
-              细目表按照职业和技能等级分别保存，等级来源于当前职业权重表；不影响职业级权重表。
-            </p>
-          </div>
-          <label className="flex items-center gap-3 text-sm font-medium text-[#536178]">
-            技能等级
-            <select
-              className="h-11 min-w-[180px] rounded-lg border border-[#d9e2ef] bg-white px-3 text-[#3f567b] outline-none focus:border-[#7691ee] focus:ring-2 focus:ring-[#e8eeff]"
-              onChange={(event) => setLevel(event.target.value)}
-              value={level}
-            >
-              {theoryLevels.map((item) => (
-                <option key={item.value} value={item.value}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
+        </div>}
       </section>
 
       <section className="mt-7 overflow-hidden rounded-[18px] border border-[#e1e6ef] bg-white shadow-card">
@@ -1476,18 +1675,18 @@ function SkillCompilationWorkspace({
               第二步 · 操作技能考评内容结构表
             </h2>
             <p className="m-0 mt-2 text-sm text-[#6f7f96]">
-              依据技能要求权重表，规划考评项目、考核方式、选考要求及时间，再形成技能细目表。
+              根据第一步权重自动形成各等级内容结构。标准未明确的时间与选考规则显示待核对。
             </p>
           </div>
-          <button
+          {!importedStandard ? <button
             className="rounded-lg bg-[#3f60e8] px-5 py-3 text-sm font-medium text-white shadow-[0_8px_16px_rgba(63,96,232,0.18)] hover:bg-[#3354d8]"
             onClick={() => setIsStructureOverviewOpen(true)}
             type="button"
           >
             ♢ 维护内容结构
-          </button>
+          </button> : null}
         </div>
-        <div className="overflow-x-auto">
+        {importedStandard ? <SkillStructureMatrix data={importedStandard} /> : <div className="overflow-x-auto">
           <table className="min-w-[1000px] w-full border-collapse text-left text-sm">
             <thead className="bg-[#fafbfe] text-xs font-medium text-[#8a98ae]">
               <tr>
@@ -1531,7 +1730,7 @@ function SkillCompilationWorkspace({
               )}
             </tbody>
           </table>
-        </div>
+        </div>}
       </section>
 
       <section className="mt-7 overflow-hidden rounded-[18px] border border-[#e1e6ef] bg-white shadow-card">
@@ -1541,7 +1740,7 @@ function SkillCompilationWorkspace({
               第三步 · 操作技能考评要素细目表
             </h2>
             <p className="m-0 mt-2 text-sm text-[#6f7f96]">
-              按内容结构编制技能考评点。当前等级：{currentLevel.label}。
+              沿用国家职业标准和内容结构，选择有教材或无教材生成全部方向、等级细目表。
             </p>
             {blueprintApproval ? (
               <p className="m-0 mt-2 text-sm text-[#27805b]">
@@ -1559,122 +1758,22 @@ function SkillCompilationWorkspace({
               </p>
             )}
           </div>
-          <div className="flex gap-3">
-            <button
-              className="rounded-lg border border-[#dce3ee] bg-white px-5 py-3 text-sm font-medium text-[#536178] hover:border-[#aabcf5] hover:text-[#3f60e8]"
-              onClick={() => {
-                setPointError("");
-                setEditingPointCode(null);
-                setNewPoint({
-                  name: "",
-                  level1Code: "S",
-                  level1Name: "操作技能",
-                  level2Code: "A",
-                  level2Name: "",
-                  level3Code: "A",
-                  level3Name: "",
-                  ordinal: 1,
-                  weight: 0,
-                  importance: "critical",
-                  abilityLevel: "理解",
-                  targetCount: 3,
-                  selection: "必考",
-                  method: "实操",
-                  minutes: 30,
-                  standardText: "",
-                  citation: "",
-                  knowledgeMaterial: "未关联",
-                  knowledgePoints: "",
-                });
-                setIsPointEditorOpen(true);
-              }}
-              type="button"
-            >
-              ＋ 新增考评点
-            </button>
-            <button
-              className="rounded-lg bg-[#3f60e8] px-5 py-3 text-sm font-medium text-white shadow-[0_8px_16px_rgba(63,96,232,0.18)] hover:bg-[#3354d8]"
-              onClick={() => {
-                setReviewError("");
-                setIsBlueprintReviewOpen(true);
-              }}
-              type="button"
-            >
-              ▣ 蓝图审核
-            </button>
-          </div>
         </div>
-        <div className="overflow-x-auto">
-          <table className="min-w-[1000px] w-full border-collapse text-left text-sm">
-            <thead className="bg-[#fafbfe] text-xs font-medium text-[#8a98ae]">
-              <tr>
-                {[
-                  "范围 / 编码",
-                  "考评要素 / 考评点",
-                  "权重",
-                  "重要程度",
-                  "操作",
-                ].map((header) => (
-                  <th className="px-6 py-4 font-medium" key={header}>
-                    {header}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="text-[#45536a]">
-              {skillAssessmentPoints.map((point) => (
-                <tr className="border-t border-[#e8ecf3]" key={point.code}>
-                  <td className="px-6 py-4">
-                    <p className="m-0">{point.level1Name}</p>
-                    <p className="m-0 mt-1 text-xs text-[#748197]">
-                      {point.code}
-                    </p>
-                  </td>
-                  <td className="px-6 py-4">{point.name}</td>
-                  <td className="px-6 py-4">{point.weight}%</td>
-                  <td className="px-6 py-4">
-                    {point.importance === "critical" ? "X" : point.importance}
-                  </td>
-                  <td className="px-6 py-4">
-                    <button
-                      className="rounded-lg border border-[#dfe5ef] bg-white px-3.5 py-2 text-xs font-medium text-[#60708a] hover:border-[#aabcf5] hover:text-[#3f60e8]"
-                      onClick={() => {
-                          const form: NewSkillPoint = {
-                            name: point.name,
-                            level1Code: point.level1Code,
-                            level1Name: point.level1Name,
-                            level2Code: point.level2Code,
-                            level2Name: point.level2Name,
-                            level3Code: point.level3Code,
-                            level3Name: point.level3Name,
-                            ordinal: point.ordinal,
-                            weight: point.weight,
-                            importance: point.importance,
-                            abilityLevel: point.abilityLevel,
-                            targetCount: point.targetCount,
-                            selection: point.selection,
-                            method: point.method,
-                            minutes: point.minutes,
-                            standardText: point.standardText,
-                            citation: point.citation,
-                            knowledgeMaterial: point.knowledgeMaterial,
-                            knowledgePoints: point.knowledgePoints
-                          };
-                        setPointError("");
-                          setEditingPointCode(point.code);
-                        setNewPoint(form);
-                        setIsPointEditorOpen(true);
-                      }}
-                      type="button"
-                    >
-                      编辑
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <SkillOutlinePanel
+          occupationId={profession.id}
+          occupationName={profession.name}
+          level={level}
+          onLevelChange={setLevel}
+          standardReady={!!importedStandard}
+          onGenerated={refreshSkillPoints}
+          refreshVersion={skillRefreshVersion}
+          onEdit={(point) => {
+            setPointError("");
+            setEditingPointCode(point.code);
+            setNewPoint({ ...point });
+            setIsPointEditorOpen(true);
+          }}
+        />
       </section>
 
       {isPointEditorOpen ? (
@@ -1822,7 +1921,7 @@ function SkillCompilationWorkspace({
                   目标题量
                   <input
                     className="mt-2 h-12 w-full rounded-lg border border-[#d8e1ee] px-3 text-[#385578]"
-                    min={1}
+                    min={0}
                     onChange={(e) => updatePoint("targetCount", e.target.value)}
                     type="number"
                     value={newPoint.targetCount}
@@ -4422,6 +4521,18 @@ type HistoryPlan = {
   created_at: string;
   updated_at: string;
   question_count: number;
+  generation_status?: "queued" | "running" | "partial" | "succeeded" | null;
+};
+
+type QuestionGenerationJob = {
+  id: string;
+  status: "queued" | "running" | "partial" | "succeeded";
+  target: number;
+  generated: number;
+  totalBatches: number;
+  completedBatches: number;
+  currentBatch: number | null;
+  failedUnits: Array<{ id: string; code: string; type: string; remaining: number; error: string }>;
 };
 
 type GeneratedQuestion = {
@@ -4482,6 +4593,11 @@ function AuthoringTaskPanel() {
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [historyPlanId, setHistoryPlanId] = useState<string | null>(null);
   const [executionError, setExecutionError] = useState("");
+  const [generationJob, setGenerationJob] = useState<QuestionGenerationJob | null>(null);
+  const [progressError, setProgressError] = useState("");
+  const [sessionExpired, setSessionExpired] = useState(false);
+  const manualCheckById = useRef(new Map<string, string>());
+  const generationActive = generationJob?.status === "queued" || generationJob?.status === "running";
   const [isQualityStandardOpen, setIsQualityStandardOpen] = useState(false);
   const [qualityStandard, setQualityStandard] = useState("");
   const [qualityStandardError, setQualityStandardError] = useState("");
@@ -4489,9 +4605,11 @@ function AuthoringTaskPanel() {
     useState(false);
   const [isSavingQualityStandard, setIsSavingQualityStandard] = useState(false);
   const getHistoryStage = (plan: HistoryPlan) => {
+    if (plan.generation_status === "queued" || plan.generation_status === "running") return "生成中";
+    if (plan.generation_status === "partial") return "部分失败";
+    if (plan.generation_status === "succeeded") return "已完成";
     if (plan.question_count > 0) return "已完成";
     if (plan.status === "cancelled") return "已暂停";
-    if (plan.quota_json.minimumTotal > 300) return "需拆分";
     return "待执行";
   };
   const rows = taskHistory.filter(
@@ -4516,6 +4634,46 @@ function AuthoringTaskPanel() {
     (questionPage - 1) * questionPageSize,
     questionPage * questionPageSize,
   );
+  useEffect(() => {
+    setQuestionPage((current) => Math.min(current, questionPageCount));
+  }, [questionPageCount]);
+  useEffect(() => {
+    setQuestionPage(1);
+    setSessionExpired(false);
+  }, [confirmedPlanId]);
+  const questionPagination = executionQuestions.length > questionPageSize ? (
+    <nav aria-label="试题分页" className="my-5 flex flex-wrap items-center justify-between gap-3 text-sm text-[#607493]">
+      <span>共 {executionQuestions.length} 道，每页 {questionPageSize} 道</span>
+      <div className="flex items-center gap-3">
+        <button
+          className="rounded-lg border border-[#cbdaf0] bg-white px-3 py-2 disabled:opacity-50"
+          disabled={questionPage <= 1}
+          onClick={() => setQuestionPage((current) => Math.max(1, current - 1))}
+          type="button"
+        >上一页</button>
+        <label>
+          第{" "}
+          <select
+            aria-label="试题页码"
+            className="rounded-lg border border-[#cbdaf0] bg-white px-2 py-2"
+            value={questionPage}
+            onChange={(event) => setQuestionPage(Number(event.target.value))}
+          >
+            {Array.from({ length: questionPageCount }, (_, index) => (
+              <option key={index + 1} value={index + 1}>{index + 1}</option>
+            ))}
+          </select>
+          {" "}/ {questionPageCount} 页
+        </label>
+        <button
+          className="rounded-lg border border-[#cbdaf0] bg-white px-3 py-2 disabled:opacity-50"
+          disabled={questionPage >= questionPageCount}
+          onClick={() => setQuestionPage((current) => Math.min(questionPageCount, current + 1))}
+          type="button"
+        >下一页</button>
+      </div>
+    </nav>
+  ) : null;
   const allPromptTemplates = [...promptTemplates, ...customPromptTemplates];
   const promptCategories = [
     "全部",
@@ -4586,12 +4744,69 @@ function AuthoringTaskPanel() {
   useEffect(() => {
     void loadTaskHistory();
   }, []);
+  useEffect(() => {
+    const planId = new URL(window.location.href).searchParams.get("executionPlan");
+    if (planId) setConfirmedPlanId(planId);
+  }, []);
+  useEffect(() => {
+    executionQuestions.forEach((question, index) => {
+      manualCheckById.current.set(question.id, manualChecks[index] ?? "待人工核查");
+    });
+  }, [executionQuestions, manualChecks]);
+  useEffect(() => {
+    if (!confirmedPlanId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/v1/authoring/plans/${confirmedPlanId}`, { cache: "no-store" });
+        const payload = await response.json() as {
+          data?: { questions: GeneratedQuestion[]; job: QuestionGenerationJob | null };
+          error?: { message?: string };
+        };
+        if (cancelled) return;
+        if (response.status === 401) {
+          setSessionExpired(true);
+          setProgressError("登录已失效，后台生成不受影响。请重新登录后继续查看。");
+          return;
+        }
+        if (!response.ok || !payload.data) throw new Error(payload.error?.message ?? "生成进度读取失败。");
+        setSessionExpired(false);
+        const data = payload.data;
+        setProgressError("");
+        setGenerationJob(data.job);
+        setExecutionQuestions(data.questions);
+        setManualChecks(data.questions.map((question) => manualCheckById.current.get(question.id) ?? "待人工核查"));
+        if (data.job?.status === "queued" || data.job?.status === "running") {
+          timer = setTimeout(() => void poll(), 2000);
+        } else {
+          void loadTaskHistory();
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setProgressError(error instanceof Error ? error.message : "进度读取失败，正在重试。");
+          timer = setTimeout(() => void poll(), 3000);
+        }
+      }
+    };
+    void poll();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [confirmedPlanId, generationJob?.status]);
+  const trackExecution = (planId: string | null) => {
+    const url = new URL(window.location.href);
+    if (planId) url.searchParams.set("executionPlan", planId);
+    else url.searchParams.delete("executionPlan");
+    window.history.replaceState(null, "", url);
+  };
   const applyQuickInput = (text: string) => setRequirement(text);
   const createNewTask = () => {
     setRequirement("");
     setSelectedTemplate("");
     setGeneratedPlan(null);
     setConfirmedPlanId(null);
+    setGenerationJob(null);
+    manualCheckById.current.clear();
+    trackExecution(null);
     setAutoPlanId(null);
     setExecutionQuestions([]);
     setQuestionPage(1);
@@ -4667,12 +4882,6 @@ function AuthoringTaskPanel() {
   };
   const executePlan = async (plan: GeneratedPlan) => {
     if (plan.status !== "ready") return;
-    if (plan.minimumTotal > 300) {
-      const message = `本次计划需生成 ${plan.minimumTotal} 道题，超过单批 300 道上限，未创建新的执行计划或试题草稿。请缩小命题范围或拆分为多个计划后再执行。`;
-      setExecutionError(message);
-      setNotice(message);
-      return;
-    }
     setIsConfirmingPlan(true);
     setExecutionError("");
     try {
@@ -4732,7 +4941,7 @@ function AuthoringTaskPanel() {
         { method: "POST" },
       );
       const executionPayload = (await executionResponse.json()) as {
-        data?: { questions: GeneratedQuestion[] };
+        data?: { job: QuestionGenerationJob | null };
         error?: { message?: string };
       };
       if (!executionResponse.ok || !executionPayload.data)
@@ -4740,15 +4949,18 @@ function AuthoringTaskPanel() {
           executionPayload.error?.message ?? "AI 命题任务执行失败。",
         );
       setConfirmedPlanId(planId);
+      setGenerationJob(executionPayload.data.job);
+      manualCheckById.current.clear();
+      trackExecution(planId);
       setAutoPlanId(null);
       setHistoryPlanId(null);
       setIsViewingHistoryResult(false);
       setGeneratedPlan(null);
-      setExecutionQuestions(executionPayload.data.questions);
+      setExecutionQuestions([]);
       setQuestionPage(1);
-      setManualChecks(executionPayload.data.questions.map(() => "待人工核查"));
+      setManualChecks([]);
       setNotice(
-        `已按计划自动生成 ${executionPayload.data.questions.length} 道试题草稿，请完成人工核查后交由专家审定。`,
+        `已启动 ${plan.minimumTotal} 道试题的后台分批生成，可刷新或关闭页面；失败部分可单独重试。`,
       );
       await loadTaskHistory();
     } catch (error) {
@@ -4756,6 +4968,24 @@ function AuthoringTaskPanel() {
         error instanceof Error ? error.message : "命题计划确认失败。";
       setExecutionError(message);
       setNotice(message);
+    } finally {
+      setIsConfirmingPlan(false);
+    }
+  };
+  const retryFailedGeneration = async () => {
+    if (!confirmedPlanId) return;
+    setIsConfirmingPlan(true);
+    setProgressError("");
+    try {
+      const response = await fetch(`/api/v1/authoring/plans/${confirmedPlanId}/generate`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "retry_failed" }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error?.message ?? "重试启动失败。");
+      setGenerationJob(payload.data.job);
+      setNotice("已重新排队失败请求，仅补齐缺失试题，保留已有草稿。");
+    } catch (error) {
+      setProgressError(error instanceof Error ? error.message : "重试启动失败。");
     } finally {
       setIsConfirmingPlan(false);
     }
@@ -4845,13 +5075,11 @@ function AuthoringTaskPanel() {
     });
     setHistoryPlanId(plan.id);
     setConfirmedPlanId(null);
+    setGenerationJob(null);
+    trackExecution(null);
     setExecutionQuestions([]);
     setIsViewingHistoryResult(false);
-    setExecutionError(
-      plan.quota_json.minimumTotal > 300
-        ? `该历史计划共需生成 ${plan.quota_json.minimumTotal} 道题，超过单批 300 道上限。请拆分范围后重新生成，现有计划不会产生试题成果。`
-        : "",
-    );
+    setExecutionError("");
     setNotice(`已打开“${plan.name}”的命题计划。`);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
@@ -4863,7 +5091,7 @@ function AuthoringTaskPanel() {
         cache: "no-store",
       });
       const payload = (await response.json()) as {
-        data?: { questions: GeneratedQuestion[] };
+        data?: { questions: GeneratedQuestion[]; job: QuestionGenerationJob | null };
         error?: { message?: string };
       };
       if (!response.ok || !payload.data)
@@ -4871,11 +5099,12 @@ function AuthoringTaskPanel() {
       setGeneratedPlan(null);
       setHistoryPlanId(null);
       setConfirmedPlanId(plan.id);
+      setGenerationJob(payload.data.job);
+      manualCheckById.current.clear();
+      trackExecution(plan.id);
       setExecutionQuestions(payload.data.questions);
       setManualChecks(
-        payload.data.questions.map((item) =>
-          item.autoCheck === "通过基础检查" ? "人工通过" : "待人工核查",
-        ),
+        payload.data.questions.map(() => "待人工核查"),
       );
       setQuestionPage(1);
       setIsViewingHistoryResult(true);
@@ -4910,8 +5139,7 @@ function AuthoringTaskPanel() {
         throw new Error(payload.error?.message ?? "命题计划生成失败。");
       setGeneratedPlan(payload.data);
       if (payload.data.status === "ready") {
-        setNotice("计划校验通过，正在自动冻结计划并生成试题草稿...");
-        await executePlan(payload.data);
+        setNotice(`计划校验通过，共 ${payload.data.minimumTotal} 道题；请确认后自动分批生成。`);
       } else {
         setNotice(payload.data.message);
       }
@@ -5053,29 +5281,6 @@ function AuthoringTaskPanel() {
         </p>
         <div className="mt-12 flex flex-wrap items-center justify-between gap-4">
           <h3 className="m-0 text-lg font-semibold text-[#385578]">命题需求</h3>
-          <div className="flex flex-wrap gap-3">
-            <button
-              className="rounded-xl border border-[#9bb6ee] bg-white px-5 py-3 text-sm font-medium text-[#3f60c8]"
-              onClick={() => setIsRulesOpen(true)}
-              type="button"
-            >
-              ▤ 命题规则要求
-            </button>
-            <button
-              className="rounded-xl border border-[#9bb6ee] bg-white px-5 py-3 text-sm font-medium text-[#3f60c8]"
-              onClick={() => setIsPromptLibraryOpen(true)}
-              type="button"
-            >
-              ▦ 提示词库
-            </button>
-            <button
-              className="rounded-xl border border-[#9bb6ee] bg-white px-5 py-3 text-sm font-medium text-[#3f60c8]"
-              onClick={() => setIsPromptManagerOpen(true)}
-              type="button"
-            >
-              ⚙ 管理提示词
-            </button>
-          </div>
         </div>
         {selectedTemplate ? (
           <p className="m-0 mt-4 rounded-xl bg-[#eaf4ff] px-4 py-3 text-[16px] text-[#3866a5]">
@@ -5292,8 +5497,7 @@ function AuthoringTaskPanel() {
               className="rounded-xl bg-[#2e66dd] px-5 py-3 text-base font-medium text-white disabled:cursor-not-allowed disabled:bg-[#9aaae0]"
               disabled={
                 generatedPlan.status !== "ready" ||
-                isConfirmingPlan ||
-                generatedPlan.minimumTotal > 300
+                isConfirmingPlan
               }
               onClick={() =>
                 historyPlanId && historyRequirementChanged
@@ -5303,12 +5507,8 @@ function AuthoringTaskPanel() {
               type="button"
             >
               {isConfirmingPlan
-                ? "生成中..."
-                : generatedPlan.minimumTotal > 300
-                  ? "需拆分后执行"
-                  : historyPlanId
-                    ? "确认计划并查看成果"
-                    : "重新执行命题"}
+                ? "正在启动..."
+                : `确认并分批生成（${generatedPlan.minimumTotal}题）`}
             </button>
           </div>
         </section>
@@ -5325,9 +5525,51 @@ function AuthoringTaskPanel() {
               </p>
             </div>
             <span className="rounded-xl bg-[#fff4df] px-4 py-2 text-sm text-[#a96f13]">
-              待专家审定
+              {generationActive ? "后台生成中" : generationJob?.status === "partial" ? "尚未完成" : "待人工核查"}
             </span>
           </div>
+          {generationJob ? (
+            <div className="mt-6 rounded-xl border border-[#d6e3ff] bg-[#f5f8ff] p-5">
+              <div className="flex flex-wrap justify-between gap-3 text-[#385578]">
+                <span>
+                  {generationJob.status === "succeeded" ? "全部试题已生成" : generationJob.status === "partial" ? "部分请求失败，已保留成功草稿" : "正在自动分批生成试题"}
+                </span>
+                <strong>已生成 {generationJob.generated} / {generationJob.target} 道 · {Math.floor(generationJob.generated * 100 / Math.max(1, generationJob.target))}%</strong>
+              </div>
+              <div
+                className="mt-3 h-2 overflow-hidden rounded-full bg-[#dfe8f8]"
+                role="progressbar" aria-label="试题生成进度" aria-valuemin={0} aria-valuemax={generationJob.target} aria-valuenow={generationJob.generated}
+              >
+                <div className="h-full rounded-full bg-[#4160ec] transition-all" style={{ width: `${generationJob.generated * 100 / Math.max(1, generationJob.target)}%` }} />
+              </div>
+              <p className="mb-0 mt-3 text-sm text-[#6980a4]">
+                {generationJob.currentBatch ? `当前第 ${generationJob.currentBatch} / ${generationJob.totalBatches} 批；` : ""}
+                已完成 {generationJob.completedBatches} / {generationJob.totalBatches} 批。每批最多100题，每点合并题型生成，最多2路并发；刷新或关闭页面不会中断。
+              </p>
+              {generationJob.failedUnits.length ? (
+                <div className="mt-4 text-sm text-[#a6711f]">
+                  <details>
+                    <summary className="cursor-pointer">查看 {generationJob.failedUnits.length} 个失败请求</summary>
+                    {generationJob.failedUnits.map((unit) => (
+                      <p className="mb-0 mt-2" key={unit.id}>{unit.code} · {unit.type === "mixed" ? "混合题型" : unit.type === "single" ? "单选" : unit.type === "multiple" ? "多选" : "判断"} · 缺 {unit.remaining} 题：{unit.error}</p>
+                    ))}
+                  </details>
+                  <button
+                    className="mt-3 rounded-lg bg-[#2e66dd] px-4 py-2 text-white disabled:bg-[#9aaae0]"
+                    disabled={isConfirmingPlan || generationActive}
+                    onClick={() => void retryFailedGeneration()} type="button"
+                  >{isConfirmingPlan ? "正在重试..." : "仅重试失败部分"}</button>
+                </div>
+              ) : null}
+              {progressError ? <p className="mb-0 mt-3 text-sm text-red-600" role="alert">{progressError}</p> : null}
+            </div>
+          ) : progressError ? <p className="mt-4 text-sm text-red-600" role="alert">{progressError}</p> : null}
+          {sessionExpired ? (
+            <a
+              className="mt-3 inline-block rounded-lg bg-[#2e66dd] px-4 py-2 text-sm text-white"
+              href={`/?callbackUrl=${encodeURIComponent(`/workspace/authoring?executionPlan=${confirmedPlanId ?? ""}`)}`}
+            >重新登录并返回当前任务</a>
+          ) : null}
           <div className="mt-7 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             {[
               ["已生成试题", `${executionQuestions.length}`],
@@ -5341,7 +5583,7 @@ function AuthoringTaskPanel() {
               ],
               [
                 "执行进度",
-                `${executionQuestions.length}/${executionQuestions.length}`,
+                `${generationJob?.generated ?? executionQuestions.length}/${generationJob?.target ?? executionQuestions.length}`,
               ],
             ].map(([label, value]) => (
               <div
@@ -5358,6 +5600,7 @@ function AuthoringTaskPanel() {
           <p className="m-0 mt-5 rounded-xl border border-[#f2d59a] bg-[#fff7e7] px-5 py-4 text-[15px] leading-7 text-[#a6711f]">
             当前仅提供可核验草稿和基础结构检查结果，尚未生效或进入题库；须由专家审定通过后方可入库。
           </p>
+          {questionPagination}
           <div className="mt-5 space-y-4">
             {visibleQuestions.map((item, pageIndex) => {
               const index = (questionPage - 1) * questionPageSize + pageIndex;
@@ -5417,30 +5660,7 @@ function AuthoringTaskPanel() {
               );
             })}
           </div>
-          {executionQuestions.length > questionPageSize ? (
-            <div className="mt-6 flex items-center justify-end gap-3 text-sm text-[#607493]">
-              <span>
-                第 {questionPage} / {questionPageCount} 页，共{" "}
-                {executionQuestions.length} 道
-              </span>
-              <button
-                className="rounded-lg border border-[#cbdaf0] bg-white px-3 py-2 disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={questionPage === 1}
-                onClick={() => setQuestionPage((current) => current - 1)}
-                type="button"
-              >
-                上一页
-              </button>
-              <button
-                className="rounded-lg border border-[#cbdaf0] bg-white px-3 py-2 disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={questionPage === questionPageCount}
-                onClick={() => setQuestionPage((current) => current + 1)}
-                type="button"
-              >
-                下一页
-              </button>
-            </div>
-          ) : null}
+          {questionPagination}
           <div className="mt-7 flex flex-wrap justify-end gap-3">
             <button
               className="rounded-xl border border-[#cbdaf0] bg-white px-5 py-3 text-base text-[#385578]"
@@ -5466,6 +5686,7 @@ function AuthoringTaskPanel() {
               className="rounded-xl bg-[#2e66dd] px-5 py-3 text-base font-medium text-white disabled:cursor-not-allowed disabled:bg-[#9aaae0]"
               disabled={
                 isSavingHandoff ||
+                Boolean(generationJob && generationJob.status !== "succeeded") ||
                 !executionQuestions.length ||
                 manualChecks.some((item) => item === "待人工核查")
               }
@@ -5504,7 +5725,8 @@ function AuthoringTaskPanel() {
             >
               <option>全部状态</option>
               <option>待执行</option>
-              <option>需拆分</option>
+              <option>生成中</option>
+              <option>部分失败</option>
               <option>已暂停</option>
               <option>已完成</option>
             </select>
@@ -5577,7 +5799,7 @@ function AuthoringTaskPanel() {
                         className="rounded-xl border border-[#b9cae5] bg-white px-4 py-2.5 text-sm font-medium text-[#385578]"
                         disabled={isLoadingHistoryResult}
                         onClick={() =>
-                          row.question_count > 0
+                          row.question_count > 0 || row.generation_status
                             ? void viewHistoryResult(row)
                             : viewHistoryPlan(row)
                         }

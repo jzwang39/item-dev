@@ -54,6 +54,19 @@ export async function POST(
         [params.planId],
       );
       if (!plans[0]) throw new Error("待交接的命题计划不存在或未确认。");
+      const [jobs] = await connection.execute<(RowDataPacket & { id: string; target_count: number })[]>(
+        "SELECT id,target_count FROM authoring_generation_jobs WHERE plan_id=? FOR UPDATE", [params.planId],
+      );
+      if (jobs[0]) {
+        const [counts] = await connection.execute<(RowDataPacket & { generated_count: number; pending: number })[]>(
+          `SELECT COUNT(*) AS generated_count,
+             (SELECT COUNT(*) FROM authoring_generation_units WHERE job_id=? AND status<>'succeeded') AS pending
+           FROM authoring_generation_slots WHERE job_id=? AND question_id IS NOT NULL`, [jobs[0].id, jobs[0].id],
+        );
+        if (Number(counts[0].generated_count) !== Number(jobs[0].target_count) || Number(counts[0].pending)) {
+          throw new Error("命题计划尚未全部生成完成，请补齐失败部分后再交接专家审定。");
+        }
+      }
       const approvedQuestionIds = parsed.data.manualChecks
         .filter((item) => item.status === "人工通过")
         .map((item) => item.questionId);

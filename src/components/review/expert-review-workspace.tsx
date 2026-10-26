@@ -1,8 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { OutlineReviewTasks } from "./outline-review-tasks";
+import { AdminQuestionReview } from "./admin-question-review";
+import { ReviewConfirmations } from "./review-confirmations";
+import { OutlineAssignmentModal } from "./outline-assignment-modal";
 
 type ReviewTask = {
+  questionId: string;
+  questionVersionId: string;
+  status: string;
   assignmentId: string;
   questionNo: string;
   occupationName: string;
@@ -48,6 +55,9 @@ export function ExpertReviewWorkspace({
 }
 
 function ExpertTaskWorkspace() {
+  const [taskTab, setTaskTab] = useState<"outlines" | "questions">("outlines");
+  const [editing, setEditing] = useState<ReviewTask | null>(null);
+  const [page, setPage] = useState(1);
   const [tasks, setTasks] = useState<ReviewTask[]>([]);
   const [selected, setSelected] = useState<ReviewTask | null>(null);
   const [stage, setStage] = useState("initial");
@@ -136,7 +146,7 @@ function ExpertTaskWorkspace() {
           专家审定
         </h1>
         <p className="m-0 mt-3 text-[16px] text-[#7b879a]">
-          处理已分配给专家且处于待审定状态的试题。
+          先审核本人细目表，经管理员确认后，再审核对应试题。
         </p>
         {notice ? (
           <p className="mt-6 rounded-xl border border-[#d7e5fb] bg-[#f2f7ff] px-5 py-4 text-[#4265d4]">
@@ -145,7 +155,7 @@ function ExpertTaskWorkspace() {
         ) : null}
         <p className="mt-10 rounded-xl border border-[#d7e5fb] bg-[#f2f7ff] px-6 py-5 text-[#6687b6]">
           ⓘ
-          审核任务仅展示分配给本人的待审定试题。提交退回意见后将移出当前队列，修订并重新送审后再处理。
+          仅展示分配给本人的任务。试题修订保存后重新审核；审核通过后交由管理员确认。
         </p>
         <div className="mt-8 grid grid-cols-1 overflow-hidden rounded-[18px] border border-[#e0e6f0] bg-white md:grid-cols-4">
           <Metric
@@ -165,10 +175,14 @@ function ExpertTaskWorkspace() {
           />
           <Metric label="任务专家" value="1" hint="当前登录专家" />
         </div>
-        <section className="mt-8 overflow-hidden rounded-[20px] border border-[#e0e6f0] bg-white shadow-card">
+        <div className="mt-8 grid items-start gap-6 lg:grid-cols-[200px_minmax(0,1fr)]">
+          <nav className="rounded-2xl border border-[#e0e6f0] bg-white p-3" aria-label="专家审核任务类型">
+            {(["outlines", "questions"] as const).map((value) => <button key={value} className={`mb-2 w-full rounded-lg p-4 text-left text-sm ${taskTab === value ? "border border-[#d6e3ff] bg-[#edf3ff] font-semibold text-[#405fe7]" : "text-[#607493]"}`} onClick={() => setTaskTab(value)}>{value === "outlines" ? "细目表审核任务" : "试题审核任务"}</button>)}
+          </nav>
+        {taskTab === "outlines" ? <OutlineReviewTasks role="expert" /> : <section className="overflow-hidden rounded-[20px] border border-[#e0e6f0] bg-white shadow-card">
           <div className="flex items-center justify-between border-b border-[#e5e9f0] px-8 py-6">
             <h2 className="m-0 text-xl font-semibold text-[#293242]">
-              审核任务队列
+              试题审核任务
             </h2>
             <span className="rounded-lg bg-[#edf4ff] px-3 py-2 text-sm text-[#557aa9]">
               {tasks.length}道
@@ -184,7 +198,7 @@ function ExpertTaskWorkspace() {
                     "技能等级",
                     "考核方式",
                     "题型",
-                    "试题内容",
+                    "状态",
                     "操作",
                   ].map((label) => (
                     <th className="px-6 py-5 font-medium" key={label}>
@@ -194,7 +208,7 @@ function ExpertTaskWorkspace() {
                 </tr>
               </thead>
               <tbody>
-                {tasks.map((task) => (
+                {tasks.slice((page - 1) * 20, page * 20).map((task) => (
                   <tr
                     className="border-t border-[#e6ebf3]"
                     key={task.assignmentId}
@@ -220,7 +234,7 @@ function ExpertTaskWorkspace() {
                       {task.questionType}
                     </td>
                     <td className="max-w-[360px] px-6 py-5 leading-7 text-[#30415e]">
-                      {task.stem}
+                      {task.status === "approved" ? "待管理员确认" : task.status === "stored" ? "已确认入库" : task.status === "returned" ? "退回修订" : "待审核"}
                     </td>
                     <td className="px-6 py-5">
                       <button
@@ -235,8 +249,9 @@ function ExpertTaskWorkspace() {
                         }}
                         type="button"
                       >
-                        ▣ 审定
+                        {["pending_review", "returned"].includes(task.status) ? "审核" : "查看"}
                       </button>
+                      <button className="ml-2 rounded-xl border border-[#d6e0ef] px-4 py-2.5 text-sm disabled:opacity-40" disabled={!["pending_review", "returned"].includes(task.status)} onClick={() => setEditing(task)}>编辑修订</button>
                     </td>
                   </tr>
                 ))}
@@ -253,7 +268,12 @@ function ExpertTaskWorkspace() {
               </tbody>
             </table>
           </div>
-        </section>
+          <p className="p-5 text-sm text-[#8293a9]">第 {page}/{Math.max(1, Math.ceil(tasks.length / 20))} 页 · 共 {tasks.length} 道
+            <button className="ml-4 disabled:opacity-40" disabled={page <= 1} onClick={() => setPage(page - 1)}>上一页</button>
+            <button className="ml-4 disabled:opacity-40" disabled={page >= Math.ceil(tasks.length / 20)} onClick={() => setPage(page + 1)}>下一页</button>
+          </p>
+        </section>}
+        </div>
       </div>
       {selected ? (
         <ReviewModal
@@ -272,6 +292,7 @@ function ExpertTaskWorkspace() {
           task={selected}
         />
       ) : null}
+      {editing ? <AdminQuestionReview role="expert" task={{ ...editing, id: editing.questionId, versionId: editing.questionVersionId }} onClose={() => setEditing(null)} onSaved={() => { setNotice("修订已保存为新版本，请重新审核，通过后交管理员确认。"); void load(); }} /> : null}
     </section>
   );
 }
@@ -301,10 +322,16 @@ type AdminReviewTask = Omit<AssignableQuestion, "assignedExpertName"> & {
   content?: ReviewTask["content"];
   answer?: unknown;
   analysis?: string | null;
+  versionId: string;
+  status: string;
+  canAdminReview: boolean;
 };
 
 function AdminReviewWorkspace() {
-  const [tab, setTab] = useState<"tasks" | "assign">("tasks");
+  const [tab, setTab] = useState<"tasks" | "assign" | "confirm">("tasks");
+  const [taskTab, setTaskTab] = useState<"outlines" | "questions">("outlines");
+  const [editing, setEditing] = useState<AdminReviewTask | null>(null);
+  const [page, setPage] = useState(1);
   const [tasks, setTasks] = useState<AdminReviewTask[]>([]);
   const [summary, setSummary] = useState({
     pending: 0,
@@ -338,7 +365,6 @@ function AdminReviewWorkspace() {
   useEffect(() => {
     void load();
   }, []);
-
   return (
     <section>
       <div className="flex gap-8 border-b border-[#e2e6ee]">
@@ -362,6 +388,10 @@ function AdminReviewWorkspace() {
             <span className="absolute inset-x-0 -bottom-px h-[3px] rounded-full bg-[#3f60e8]" />
           ) : null}
         </button>
+        <button className={`relative px-1 pb-4 text-[17px] ${tab === "confirm" ? "font-medium text-[#3f60e8]" : "text-[#7b879a]"}`} onClick={() => setTab("confirm")} type="button">
+          审核确定
+          {tab === "confirm" ? <span className="absolute inset-x-0 -bottom-px h-[3px] rounded-full bg-[#3f60e8]" /> : null}
+        </button>
       </div>
       {tab === "tasks" ? (
         <div className="pt-12">
@@ -369,17 +399,13 @@ function AdminReviewWorkspace() {
             专家审定
           </h1>
           <p className="m-0 mt-3 text-[16px] text-[#7b879a]">
-            查看已分配给专家且处于待审定状态的试题。
+            先审核细目表并由管理员确认，再进行试题编制及审定。
           </p>
           {notice ? (
             <p className="mt-6 rounded-xl border border-[#d7e5fb] bg-[#f2f7ff] px-5 py-4 text-[#4265d4]">
               {notice}
             </p>
           ) : null}
-          <p className="mt-10 rounded-xl border border-[#d7e5fb] bg-[#f2f7ff] px-6 py-5 text-[#6687b6]">
-            ⓘ
-            审核任务汇总各职业已分配的待审定试题。未分配题请在“分配任务”中处理；草稿、退回、已审定及归档题不进入队列。
-          </p>
           <div className="mt-8 grid grid-cols-1 overflow-hidden rounded-[18px] border border-[#e0e6f0] bg-white md:grid-cols-4">
             <Metric
               label="等待审定"
@@ -402,10 +428,14 @@ function AdminReviewWorkspace() {
               hint="当前分配范围内专家"
             />
           </div>
-          <section className="mt-8 overflow-hidden rounded-[20px] border border-[#e0e6f0] bg-white shadow-card">
+          <div className="mt-8 grid items-start gap-6 lg:grid-cols-[200px_minmax(0,1fr)]">
+            <nav className="rounded-2xl border border-[#e0e6f0] bg-white p-3" aria-label="审核任务类型">
+              {(["outlines", "questions"] as const).map((value) => <button key={value} className={`mb-2 w-full rounded-lg p-4 text-left text-sm ${taskTab === value ? "border border-[#d6e3ff] bg-[#edf3ff] font-semibold text-[#405fe7]" : "text-[#607493]"}`} onClick={() => setTaskTab(value)}>{value === "outlines" ? "细目表审核任务" : "试题审核任务"}</button>)}
+            </nav>
+            {taskTab === "outlines" ? <OutlineReviewTasks role="admin" /> : <section className="overflow-hidden rounded-[20px] border border-[#e0e6f0] bg-white shadow-card">
             <div className="flex items-center justify-between border-b border-[#e5e9f0] px-8 py-6">
               <h2 className="m-0 text-xl font-semibold text-[#293242]">
-                审核任务队列
+                试题审核任务
               </h2>
               <span className="rounded-lg bg-[#edf4ff] px-3 py-2 text-sm text-[#557aa9]">
                 {tasks.length}道
@@ -421,9 +451,6 @@ function AdminReviewWorkspace() {
                       "技能等级",
                       "考核方式",
                       "题型",
-                      "试题内容",
-                      "审核专家",
-                      "分配时间",
                       "审定状态",
                       "操作",
                     ].map((label) => (
@@ -434,7 +461,7 @@ function AdminReviewWorkspace() {
                   </tr>
                 </thead>
                 <tbody>
-                  {tasks.map((task) => (
+                  {tasks.slice((page - 1) * 20, page * 20).map((task) => (
                     <tr className="border-t border-[#e6ebf3]" key={task.id}>
                       <td className="px-6 py-5 text-[#6689b6]">
                         {task.questionNo}
@@ -453,28 +480,21 @@ function AdminReviewWorkspace() {
                       <td className="px-6 py-5 text-[#30415e]">
                         {task.questionType}
                       </td>
-                      <td className="max-w-[360px] px-6 py-5 leading-7 text-[#30415e]">
-                        {task.stem}
-                      </td>
-                      <td className="px-6 py-5 text-[#30415e]">
-                        {task.expertName}
-                      </td>
-                      <td className="px-6 py-5 text-[#30415e]">
-                        {formatDateTime(task.assignedAt)}
-                      </td>
                       <td className="px-6 py-5">
                         <span className="rounded bg-[#fff4df] px-2.5 py-1.5 text-sm text-[#a96f13]">
-                          待审定
+                          {task.status === "approved" ? "待管理员确认" : task.status === "returned" ? "退回修订" : task.status === "stored" ? "已确认入库" : "待审定"}
                         </span>
                       </td>
                       <td className="px-6 py-5">
-                        <button
+                        <div className="flex flex-wrap gap-2"><button
                           className="rounded-xl bg-[#405fe7] px-4 py-2.5 text-sm font-medium text-white"
                           onClick={() => setSelected(task)}
                           type="button"
                         >
-                          ▣ 审定
+                          审核
                         </button>
+                        <button className="rounded-xl border border-[#d6e0ef] px-4 py-2.5 text-sm disabled:opacity-40" title={!task.canAdminReview ? "已分配给专家，管理员不能审核" : ""} disabled={!task.canAdminReview || !["pending_review", "returned"].includes(task.status)} onClick={() => setEditing(task)}>编辑修订</button>
+                        {task.status === "approved" ? <button className="rounded-xl border border-[#d6e0ef] px-4 py-2.5 text-sm" onClick={() => setTab("confirm")}>前往审核确定</button> : null}</div>
                       </td>
                     </tr>
                   ))}
@@ -482,9 +502,9 @@ function AdminReviewWorkspace() {
                     <tr>
                       <td
                         className="px-6 py-14 text-center text-[#7185a5]"
-                        colSpan={10}
+                        colSpan={7}
                       >
-                        当前没有已分配的待审定试题。
+                        当前没有已分配的试题审核任务。
                       </td>
                     </tr>
                   ) : null}
@@ -492,12 +512,15 @@ function AdminReviewWorkspace() {
               </table>
             </div>
             <p className="m-0 px-7 py-5 text-sm text-[#8293a9]">
-              第 1 页 · 共 {tasks.length} 道
+              第 {page} / {Math.max(1, Math.ceil(tasks.length / 20))} 页 · 共 {tasks.length} 道
+              <button className="ml-4 disabled:opacity-40" disabled={page <= 1} onClick={() => setPage(page - 1)}>上一页</button>
+              <button className="ml-4 disabled:opacity-40" disabled={page >= Math.ceil(tasks.length / 20)} onClick={() => setPage(page + 1)}>下一页</button>
             </p>
-          </section>
+          </section>}
+          </div>
         </div>
       ) : (
-        <AssignmentContent />
+        tab === "assign" ? <AssignmentContent /> : <ReviewConfirmations />
       )}
       {selected ? (
         <AdminReviewPreviewModal
@@ -505,11 +528,13 @@ function AdminReviewWorkspace() {
           task={selected}
         />
       ) : null}
+      {editing ? <AdminQuestionReview task={editing} onClose={() => setEditing(null)} onSaved={() => { setNotice("管理员代审已提交，通过后请确认入库。"); void load(); }} /> : null}
     </section>
   );
 }
 
 function AssignmentContent() {
+  const [outlineExpert, setOutlineExpert] = useState<ReviewExpert | null>(null);
   const [experts, setExperts] = useState<ReviewExpert[]>([]);
   const [questions, setQuestions] = useState<AssignableQuestion[]>([]);
   const [expertId, setExpertId] = useState("");
@@ -624,8 +649,9 @@ function AssignmentContent() {
                     onClick={() => setExpertId(expert.id)}
                     type="button"
                   >
-                    {expertId === expert.id ? "已选择" : "分配"}
+                    {expertId === expert.id ? "已选择试题" : "分配试题"}
                   </button>
+                  <button className="ml-3 rounded-xl border border-[#d5e0ef] bg-white px-4 py-2.5 text-sm text-[#4e6484]" onClick={() => setOutlineExpert(expert)}>分配细目表</button>
                 </td>
               </tr>
             ))}
@@ -645,6 +671,7 @@ function AssignmentContent() {
           共 {experts.length} 位专家
         </p>
       </section>
+      {outlineExpert ? <OutlineAssignmentModal expert={outlineExpert} onClose={() => setOutlineExpert(null)} /> : null}
       {expertId ? (
         <section className="mt-8 rounded-[18px] border border-[#e0e6f0] bg-white p-7">
           <div className="grid gap-5 md:grid-cols-[1fr_auto]">
@@ -1176,15 +1203,14 @@ function AdminReviewPreviewModal({
             </div>
           </article>
           <p className="mt-5 rounded-xl border border-[#d7e5fb] bg-[#f2f7ff] px-5 py-4 leading-7 text-[#6687b6]">
-            ⓘ 本题已分配给“{task.expertName}”，分配时间为{" "}
+            本题已分配给“{task.expertName}”，分配时间为{" "}
             {formatDateTime(task.assignedAt)}
-            。专家登录后可据实提交审定意见；管理员在此核验题目与任务状态。
+            。管理员可通过任务列表的“编辑修订”入口代审，实际操作者将独立留痕。
           </p>
           <section className="mt-7">
             <h3 className="m-0 text-lg text-[#293242]">审定责任</h3>
             <p className="mb-0 mt-3 rounded-xl border border-[#f2dcae] bg-[#fff9eb] p-5 leading-7 text-[#a0783c]">
-              为保证专家个人责任留痕，管理员不能代替任务专家提交审定结论。请由{" "}
-              {task.expertName} 使用其专家账号完成初审、意见登记及确认。
+              管理员代审不冒用专家身份。审核通过后仍须管理员确认，修订内容保存新版本并保留历史意见。
             </p>
           </section>
         </div>
@@ -1277,10 +1303,10 @@ function ReviewModal({
               {task.level}
             </span>
             <span className="rounded-md bg-[#fff4df] px-3 py-2 text-sm text-[#a96f13]">
-              待审定
+              {task.status === "approved" ? "待管理员确认" : task.status === "stored" ? "已确认入库" : task.status === "returned" ? "退回修订" : "待审定"}
             </span>
             <span className="rounded-md bg-[#edf4ff] px-3 py-2 text-sm text-[#5279a9]">
-              v1
+              当前版本
             </span>
             <span className="rounded-md bg-[#edf4ff] px-3 py-2 text-sm text-[#5279a9]">
               {task.point}
@@ -1320,6 +1346,7 @@ function ReviewModal({
             本次将以当前登录专家身份登记初审意见；提交后将写入审定记录、试题状态事件与审计日志。
           </p>
           <h3 className="mt-8 text-lg text-[#293242]">登记专家审定意见</h3>
+          <fieldset disabled={task.status !== "pending_review"}>
           <div className="grid gap-5 md:grid-cols-2">
             <label className="text-[#6680a5]">
               审核 / 校对阶段
@@ -1382,12 +1409,12 @@ function ReviewModal({
             意见已由该专家实际给出，据实登记
           </label>
           <p className="text-[#7185a5]">
-            试题{task.code} · v1；修订后须重新审核。
+            试题{task.code} · 当前版本；修订后须重新审核。
           </p>
+          </fieldset>
           <h3 className="mt-7 text-lg text-[#293242]">终审入库检查</h3>
           <p className="rounded-xl border border-[#f2dcae] bg-[#fff9eb] p-5 leading-7 text-[#a0783c]">
-            ⓘ 关联流程样例仅供演练，不得用于正式评价；当前版本专家意见
-            0/2，终审入库条件未满足。
+            {task.status === "approved" ? "专家已审核通过，等待管理员确认。" : task.status === "stored" ? "管理员已确认入库。" : task.status === "returned" ? "已退回修订，请通过编辑修订保存新版本后重新审核。" : "专家审核通过后，必须由管理员确认方可入库。"}
           </p>
         </div>
         <div className="flex justify-end gap-3 border-t border-[#e5e9f0] bg-[#fafbfe] px-9 py-5">
@@ -1401,7 +1428,7 @@ function ReviewModal({
           <button
             className="rounded-xl bg-[#405fe7] px-5 py-3 text-base font-medium text-white disabled:bg-[#9aaaf0]"
             disabled={
-              !comment.trim() || !confirmed || alignmentScore === "pending"
+              task.status !== "pending_review" || !comment.trim() || !confirmed || alignmentScore === "pending"
             }
             onClick={onSubmit}
             type="button"
@@ -1413,7 +1440,7 @@ function ReviewModal({
             disabled
             type="button"
           >
-            终审入库（条件未满足）
+            管理员确认入库
           </button>
         </div>
       </div>

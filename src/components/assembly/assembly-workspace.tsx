@@ -541,18 +541,41 @@ function StepThree({
   onBack: () => void;
   onView: (id: string) => Promise<void>;
 }>) {
+  const [downloading, setDownloading] = useState<string | null>(null);
+  const [downloadNotice, setDownloadNotice] = useState("");
+  const download = async (paper: Paper, kind: "paper" | "answers") => {
+    setDownloading(`${paper.id}:${kind}`);
+    setDownloadNotice("");
+    try {
+      const response = await fetch(`/api/v1/assembly/download?paperId=${encodeURIComponent(paper.id)}&kind=${kind}`);
+      if (!response.ok) {
+        const payload = await response.json();
+        throw new Error(payload.error?.message ?? "下载失败。");
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${paper.title.replace(/[\\/:*?"<>|]/g, "_")}-${kind === "paper" ? "试卷" : "答案及评分标准"}.docx`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) { setDownloadNotice(error instanceof Error ? error.message : "下载失败。"); }
+    finally { setDownloading(null); }
+  };
   return (
     <>
       <p className="mt-10 rounded-xl border border-[#d7e5fb] bg-[#f2f7ff] px-6 py-5 text-[#6687b6]">
         ⓘ
         试卷正文与答案及评分标准分别查看、下载。正式组卷仅使用已入库试题，题库不足时不得生成空白试卷。
       </p>
+      {downloadNotice ? <p role="alert" className="mt-4 rounded-xl bg-[#fff4df] p-4 text-[#a96f13]">{downloadNotice}</p> : null}
       <section className="mt-7 rounded-[18px] border border-[#e0e6f0] bg-white">
         <header className="flex items-center justify-between border-b border-[#e5e9f0] p-8">
           <div>
             <h2 className="m-0 text-xl text-[#293242]">第三步 · 试卷成果</h2>
             <p className="mb-0 mt-3 text-[#7185a5]">
-              点击“查看完整试卷”可逐题阅读一整套试卷。
+              可查看完整试卷，分别下载 Word 试卷和答案及评分标准。
             </p>
           </div>
           <button
@@ -587,13 +610,15 @@ function StepThree({
                     {paper.plan_name}
                   </p>
                 </div>
-                <button
+                <div className="flex flex-wrap gap-3"><button
                   className="rounded-xl bg-[#405fe7] px-5 py-3 text-white"
                   onClick={() => void onView(paper.id)}
                   type="button"
                 >
                   查看完整试卷
                 </button>
+                <button className="rounded-xl bg-[#405fe7] px-5 py-3 text-white disabled:opacity-50" disabled={downloading !== null} onClick={() => void download(paper, "paper")} type="button">{downloading === `${paper.id}:paper` ? "生成中..." : "下载试卷"}</button>
+                <button className="rounded-xl border border-[#d6e0ef] px-5 py-3 text-[#526681] disabled:opacity-50" disabled={downloading !== null} onClick={() => void download(paper, "answers")} type="button">{downloading === `${paper.id}:answers` ? "生成中..." : "下载答案及评分标准"}</button></div>
               </div>
             ))}
           </div>

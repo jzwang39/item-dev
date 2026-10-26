@@ -32,15 +32,34 @@ export function LoginGateway() {
   const [submitting, setSubmitting] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const usernameRef = useRef<HTMLInputElement | null>(null);
+  const callbackUrlRef = useRef("/workspace");
 
   useEffect(() => {
-    const errorCode = new URLSearchParams(window.location.search).get("error");
+    const parameters = new URLSearchParams(window.location.search);
+    const callbackUrl = parameters.get("callbackUrl");
+    if (callbackUrl) {
+      try {
+        const target = new URL(callbackUrl, window.location.origin);
+        if (
+          target.origin === window.location.origin &&
+          (target.pathname === "/workspace" || target.pathname.startsWith("/workspace/"))
+        ) {
+          callbackUrlRef.current = `${target.pathname}${target.search}`;
+          setPageError("请重新登录，登录后将返回当前任务。");
+        }
+      } catch {
+        // Ignore malformed return URLs and use the default workspace.
+      }
+    }
+    const errorCode = parameters.get("error");
     if (!errorCode) {
       return;
     }
 
     setPageError(errorCode === "CredentialsSignin" ? invalidCredentialsMessage : "登录失败，请稍后重试。");
-    window.history.replaceState({}, "", window.location.pathname);
+    parameters.delete("error");
+    const search = parameters.toString();
+    window.history.replaceState({}, "", `${window.location.pathname}${search ? `?${search}` : ""}`);
   }, []);
 
   useEffect(() => {
@@ -87,7 +106,7 @@ export function LoginGateway() {
         password: String(formData.get("password") ?? ""),
         entryRole: role,
         redirect: false,
-        callbackUrl: "/workspace"
+        callbackUrl: callbackUrlRef.current
       });
 
       if (!result?.ok) {
@@ -95,7 +114,7 @@ export function LoginGateway() {
         return;
       }
 
-      window.location.assign(result.url ?? "/workspace");
+      window.location.assign(callbackUrlRef.current);
     } catch {
       setError("登录失败，请稍后重试。");
     } finally {
@@ -126,7 +145,7 @@ export function LoginGateway() {
             <h1>
               技能人才评价
               <br />
-              <em>国家题库智能命题</em>
+              <em>题库智能命题</em>
             </h1>
             <p className="entry-description">
               以职业标准为依据，让智能体协作命题。

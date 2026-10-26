@@ -552,9 +552,10 @@ export async function POST(request: Request) {
                 stem: string;
                 content_json: unknown;
                 answer_json: unknown;
+                score_rubric_json: unknown;
               })[]
             >(
-              `SELECT q.id,q.current_version_id,q.question_no,qv.stem,qv.content_json,qv.answer_json FROM questions q INNER JOIN question_versions qv ON qv.id=q.current_version_id WHERE q.project_id=? AND q.occupation_id=? AND q.level_code=? AND q.assessment_mode=? AND q.question_type IN (?,?) AND q.current_status='stored' ORDER BY RAND() LIMIT ?`,
+              `SELECT q.id,q.current_version_id,q.question_no,qv.stem,qv.content_json,qv.answer_json,qv.score_rubric_json FROM questions q INNER JOIN question_versions qv ON qv.id=q.current_version_id WHERE q.project_id=? AND q.occupation_id=? AND q.level_code=? AND q.assessment_mode=? AND q.question_type IN (?,?) AND q.current_status='stored' ORDER BY RAND() LIMIT ?`,
               [
                 plan[0].project_id,
                 plan[0].occupation_id,
@@ -577,7 +578,7 @@ export async function POST(request: Request) {
               itemNo++;
               paperScore += Number(section.score_per_item);
               await connection.execute(
-                "INSERT INTO paper_items (id,paper_id,item_no,section_no,question_id,question_version_id,question_no_snapshot,question_type,stem_snapshot,content_snapshot_json,answer_snapshot_json,score,ordering) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO paper_items (id,paper_id,item_no,section_no,question_id,question_version_id,question_no_snapshot,question_type,stem_snapshot,content_snapshot_json,answer_snapshot_json,score_rubric_snapshot_json,score,ordering) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [
                   createUlid(),
                   paperId,
@@ -590,6 +591,7 @@ export async function POST(request: Request) {
                   question.stem,
                   JSON.stringify(question.content_json),
                   JSON.stringify(question.answer_json),
+                  question.score_rubric_json === null ? null : JSON.stringify(question.score_rubric_json),
                   section.score_per_item,
                   itemNo,
                 ],

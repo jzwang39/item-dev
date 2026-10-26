@@ -7,7 +7,8 @@ import { getCurrentTheoryOutline } from "@/modules/blueprints/theory-outlines/se
 import { getCurrentTheoryWeights } from "@/modules/blueprints/theory-weights/service";
 import { listActiveOccupations } from "@/modules/authoring/occupations/service";
 import { getSavedModelConnection } from "@/modules/model-connection/service";
-import { query } from "@/shared/database/mysql";
+import { query, withTransaction } from "@/shared/database/mysql";
+import { assertOutlineConfirmed } from "@/modules/blueprints/point-review";
 
 export const dynamic = "force-dynamic";
 
@@ -70,12 +71,14 @@ export async function GET() {
       created_at: string;
       updated_at: string;
       question_count: number;
+      generation_status: string | null;
     };
     const rows = await query<PlanRow[]>(
       `SELECT ap.id, ap.name, ap.raw_requirement, ap.scope_json, ap.quota_json, ap.status, ap.created_at, ap.updated_at,
-              COUNT(qv.id) AS question_count
+              COUNT(DISTINCT qv.question_id) AS question_count,MAX(gj.status) AS generation_status
          FROM authoring_plans ap
          LEFT JOIN question_versions qv ON JSON_UNQUOTE(JSON_EXTRACT(qv.source_snapshot_json, '$.planId')) = ap.id
+         LEFT JOIN authoring_generation_jobs gj ON gj.plan_id=ap.id
          INNER JOIN projects p ON p.id = ap.project_id AND p.status = 'active'
         GROUP BY ap.id
         ORDER BY ap.updated_at DESC
@@ -134,6 +137,11 @@ export async function POST(request: Request) {
       });
     }
 
+    try {
+      await withTransaction((db) => assertOutlineConfirmed(db, outline.versionId));
+    } catch {
+      return NextResponse.json({ data: createBlockedPlan(parsed.data.requirement, { ...ai, occupationName: occupation.name }, systemRule, "当前细目表尚未全部审核并经管理员确认，请先在“专家审定 → 审核确定”完成确认。") });
+    }
     const quota = mergeQuota(systemRule, ai.temporaryMinimums);
     const points = outline.points.map((point) => ({
       name: point.name,

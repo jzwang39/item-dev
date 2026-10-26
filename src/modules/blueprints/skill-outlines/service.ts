@@ -65,7 +65,10 @@ export async function updateSkillAssessmentPoint(occupationId: string, levelCode
     const existing = previousId ? await readPoints(connection, previousId) : [];
     if (!existing.some((item) => item.code === originalCode)) throw new SkillOutlineError("待编辑的考评点不存在或已被更新。");
     if (point.code !== originalCode && existing.some((item) => item.code === point.code)) throw new SkillOutlineError("修改后的考评点代码已存在。");
-    const points = existing.map((item) => item.code === originalCode ? point : item);
+    const points = existing.map((item) => item.code === originalCode ? {
+      ...item, ...point,
+      importanceCode: point.importance === "critical" ? "X" : point.importance === "high" ? "Y" : "Z",
+    } : item);
     const [versionRows] = await connection.execute<(RowDataPacket & { version_no: number })[]>("SELECT COALESCE(MAX(version_no), 0) AS version_no FROM blueprint_versions WHERE blueprint_id = ? FOR UPDATE", [blueprintId]);
     const versionId = createUlid();
     const versionNo = Number(versionRows[0].version_no) + 1;

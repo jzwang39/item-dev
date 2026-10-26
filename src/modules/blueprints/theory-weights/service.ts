@@ -235,22 +235,24 @@ async function extractSourceText(sourceVersionId: string): Promise<{ text: strin
   });
 }
 
-function parseTheoryWeights(text: string): TheoryWeightItem[] {
+export function parseTheoryWeights(text: string): TheoryWeightItem[] {
   const items: TheoryWeightItem[] = [];
   let category = "未分类";
   const theorySection = getTheoryWeightSection(text);
+  const flatItems = parseFlatTheoryWeightRows(theorySection);
+  if (flatItems.length) return flatItems;
+  const lines = theorySection.replace(/\r/g, "\n").split("\n")
+    .map((rawLine) => rawLine.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
 
-  for (const rawLine of theorySection.replace(/\r/g, "\n").split("\n")) {
-    const line = rawLine.replace(/\s+/g, " ").trim();
-    if (!line) continue;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     const cells = getWeightCells(line);
     if (!cells) {
       if (line.length <= 20 && !/[。；，：]/.test(line)) category = line;
       continue;
     }
-    const first = line.match(/(?:—|--|-|\d+(?:\.\d+)?%?)/);
-    if (!first || first.index === undefined) continue;
-    const name = line.slice(0, first.index).replace(/[|｜、:：]/g, " ").trim();
+    const name = getWeightRowName(line, cells);
     if (!name || /等级|初级工|中级工|高级工|技师|百分比|权重|合计/.test(name)) continue;
     items.push({
       category,
@@ -259,8 +261,41 @@ function parseTheoryWeights(text: string): TheoryWeightItem[] {
     });
   }
 
-  if (!items.length) {
-    throw new TheoryWeightImportError("未能从文件中识别出“项目 + 五个等级权重”的完整表格。请上传含可复制文本的国家职业标准，或先完成扫描件 OCR。");
+  if (!items.length) return parseSplitTheoryWeightRows(lines);
+  return items;
+}
+
+function parseFlatTheoryWeightRows(section: string) {
+  const flat = section.replace(/\s+/g, " ").trim();
+  const cell = "(?:—|－|--|-|\\d+(?:\\.\\d+)?[%％]?)";
+  const pattern = new RegExp(`(${cell}(?:\\s+${cell}){4})`, "g");
+  const items: TheoryWeightItem[] = [];
+  let category = "未分类";
+  let previousEnd = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(flat))) {
+    const cells = getWeightCells(match[1]);
+    if (!cells) continue;
+    const prefix = flat.slice(previousEnd, match.index);
+    previousEnd = pattern.lastIndex;
+    if (/合计/.test(prefix)) break;
+    if (/基本\s*要求/.test(prefix)) category = "基本要求";
+    if (/相关\s*知识\s*要求/.test(prefix)) category = "相关知识要求";
+    const name = prefix
+      .replace(/^.*?(?:\)\s*)/, "")
+      .replace(/基本\s*要求|相关\s*知识\s*要求/g, "")
+      .trim()
+      .split(/\s+/)
+      .at(-1) ?? "";
+    if (!name || /等级|初级工|中级工|高级工|技师|百分比|权重|合计|职业编码/.test(name)) continue;
+    items.push({
+      category,
+      name,
+      weights: Object.fromEntries(
+        levels.map((level, index) => [level, parseWeight(cells[index])]),
+      ) as TheoryWeightItem["weights"],
+    });
   }
   return items;
 }
@@ -277,22 +312,73 @@ function getTheoryWeightSection(text: string): string {
 }
 
 function getWeightCells(line: string): string[] | null {
-  const tokens = [...line.matchAll(/(?:—|--|-|\d+(?:\.\d+)?%?)/g)].map((token) => token[0]);
+  const tokens = [...line.matchAll(/(?:—|－|--|-|\d+(?:\.\d+)?[%％]?)/g)].map((token) => token[0]);
 
   // Some PDF text layers merge adjacent one-digit cells, e.g. "5 5 5 5 5" becomes "55555".
   if (tokens.length === 1 && /^\d{5}$/.test(tokens[0])) {
     return [...tokens[0]];
   }
-  if (tokens.length !== 5) return null;
+  if (tokens.length < 5) return null;
 
-  const values = tokens.map(parseWeight);
-  return values.every((value) => value === null || (value >= 0 && value <= 100)) ? tokens : null;
+  // Table rows often include an ordinal before the five grade columns.
+  const cells = tokens.slice(-5);
+  const values = cells.map(parseWeight);
+  return values.every((value) => value === null || (value >= 0 && value <= 100)) ? cells : null;
 }
 
 function parseWeight(value: string): number | null {
-  if (value === "—" || value === "-" || value === "--") return null;
-  const parsed = Number(value.replace("%", ""));
+  if (value === "—" || value === "－" || value === "-" || value === "--") return null;
+  const parsed = Number(value.replace(/[%％]/g, ""));
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getWeightRowName(line: string, cells: string[]) {
+  const tokens = [...line.matchAll(/(?:—|－|--|-|\d+(?:\.\d+)?[%％]?)/g)];
+  if (tokens.length < cells.length) {
+    const merged = line.match(/\d{5}/);
+    return merged?.index === undefined
+      ? ""
+      : line.slice(0, merged.index).replace(/[|｜、:：]/g, " ").trim();
+  }
+  const start = tokens[tokens.length - cells.length];
+  if (start.index === undefined) return "";
+  return line
+    .slice(0, start.index)
+    .replace(/^\s*\d+(?:[.．、]\s*)?/, "")
+    .replace(/[|｜、:：]/g, " ")
+    .trim();
+}
+
+function parseSplitTheoryWeightRows(lines: string[]) {
+  const items: TheoryWeightItem[] = [];
+  let category = "未分类";
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.length <= 20 && !/[。；，：]/.test(line) && !getWeightCells(line)) {
+      category = line;
+      continue;
+    }
+    if (getWeightCells(line) || !/[\u4e00-\u9fff]/.test(line)) continue;
+    const candidate = [lines[index + 1], lines[index + 2], lines[index + 3]]
+      .filter(Boolean)
+      .join(" ");
+    const cells = getWeightCells(candidate);
+    if (!cells) continue;
+    const name = line.replace(/^\s*\d+(?:[.．、]\s*)?/, "").trim();
+    if (/等级|初级工|中级工|高级工|技师|百分比|权重|合计/.test(name)) continue;
+    items.push({
+      category,
+      name,
+      weights: Object.fromEntries(
+        levels.map((level, weightIndex) => [level, parseWeight(cells[weightIndex])]),
+      ) as TheoryWeightItem["weights"],
+    });
+    index += 3;
+  }
+  if (!items.length) {
+    throw new TheoryWeightImportError("未能从文件中识别出“项目 + 五个等级权重”的完整表格。请上传含可复制文本的国家职业标准，或先完成扫描件 OCR。");
+  }
+  return items;
 }
 
 function validateWeights(items: TheoryWeightItem[]) {

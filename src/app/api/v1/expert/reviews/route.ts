@@ -62,19 +62,20 @@ export async function GET() {
         analysis_text: string | null;
         point_name: string | null;
         assigned_at: string;
+        current_status: string;
       })[]
     >(
       `SELECT ra.id AS assignment_id, q.id AS question_id, qv.id AS question_version_id, q.question_no, po.name AS occupation_name,
               q.level_code, q.assessment_mode, q.question_type, qv.stem, qv.content_json, qv.answer_json, qv.analysis_text,
-              GROUP_CONCAT(DISTINCT bn.name ORDER BY bn.ordinal SEPARATOR '、') AS point_name, ra.assigned_at
+              (SELECT GROUP_CONCAT(DISTINCT bn.name ORDER BY bn.ordinal SEPARATOR '、')
+                FROM question_assessment_points qap JOIN blueprint_nodes bn ON bn.id=qap.blueprint_node_id
+                WHERE qap.question_version_id=qv.id) AS point_name, ra.assigned_at,q.current_status
          FROM review_assignments ra
-         INNER JOIN questions q ON q.id = ra.question_id AND q.current_status = 'pending_review' AND q.archived_at IS NULL
-         INNER JOIN question_versions qv ON qv.id = ra.question_version_id
+         INNER JOIN questions q ON q.id = ra.question_id AND q.current_status IN ('pending_review','returned','approved','stored') AND q.archived_at IS NULL
+         INNER JOIN question_versions qv ON qv.id = ra.question_version_id AND qv.id=q.current_version_id
          INNER JOIN project_occupations po ON po.id = q.occupation_id
-         LEFT JOIN question_assessment_points qap ON qap.question_version_id = qv.id
-         LEFT JOIN blueprint_nodes bn ON bn.id = qap.blueprint_node_id
-        WHERE ra.expert_id = ? AND ra.status = 'assigned' AND ra.active_token = 'ACTIVE'
-        GROUP BY ra.id, q.id, qv.id, q.question_no, po.name, q.level_code, q.assessment_mode, q.question_type, qv.stem, qv.content_json, qv.answer_json, qv.analysis_text, ra.assigned_at
+        WHERE ra.expert_id = ? AND ra.status IN ('assigned','submitted')
+          AND ra.id=(SELECT latest.id FROM review_assignments latest WHERE latest.question_version_id=qv.id ORDER BY latest.assigned_at DESC,latest.id DESC LIMIT 1)
         ORDER BY ra.assigned_at ASC`,
       [session.user.id],
     );
@@ -109,6 +110,7 @@ export async function GET() {
           analysis: task.analysis_text,
           pointName: task.point_name ?? "未关联考评点",
           assignedAt: task.assigned_at,
+          status: task.current_status,
         })),
         summary: summary[0] ?? { pending: 0, returned: 0, approved: 0 },
       },
@@ -161,7 +163,7 @@ export async function POST(request: Request) {
           current_status: "pending_review";
         })[]
       >(
-        `SELECT ra.question_id, ra.question_version_id, ra.project_id, q.current_status FROM review_assignments ra INNER JOIN questions q ON q.id = ra.question_id WHERE ra.id = ? AND ra.expert_id = ? AND ra.status = 'assigned' AND ra.active_token = 'ACTIVE' FOR UPDATE`,
+        `SELECT ra.question_id, ra.question_version_id, ra.project_id, q.current_status FROM review_assignments ra INNER JOIN questions q ON q.id = ra.question_id AND q.current_version_id=ra.question_version_id WHERE ra.id = ? AND ra.expert_id = ? AND ra.status = 'assigned' AND ra.active_token = 'ACTIVE' FOR UPDATE`,
         [parsed.data.assignmentId, session.user.id],
       );
       const assignment = rows[0];
@@ -171,7 +173,7 @@ export async function POST(request: Request) {
       const nextStatus =
         parsed.data.decision === "approved" ? "approved" : "returned";
       await connection.execute(
-        `INSERT INTO review_records (id, assignment_id, question_version_id, expert_id, stage, decision, comment, alignment, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO review_records (id, assignment_id, question_version_id, expert_id, stage, decision, comment, alignment, idempotency_key, submitted_by, acting_role) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'expert')`,
         [
           recordId,
           parsed.data.assignmentId,
@@ -182,6 +184,7 @@ export async function POST(request: Request) {
           parsed.data.comment,
           parsed.data.alignment,
           `${parsed.data.assignmentId}:${parsed.data.stage}`,
+          session.user.id,
         ],
       );
       await connection.execute(

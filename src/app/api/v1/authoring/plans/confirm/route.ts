@@ -3,6 +3,8 @@ import { z } from "zod";
 import type { RowDataPacket } from "mysql2/promise";
 
 import { getVerifiedSession } from "@/auth";
+import { assertOutlineConfirmed } from "@/modules/blueprints/point-review";
+import { quotaPointSchema, validateQuota } from "@/modules/authoring/generation/contracts";
 import { createUlid } from "@/shared/database/ulid";
 import { withTransaction } from "@/shared/database/mysql";
 
@@ -27,14 +29,7 @@ const schema = z.object({
     status: z.enum(["passed", "blocked"]),
     detail: z.string().min(1).max(500)
   })).min(1),
-  points: z.array(z.object({
-    code: z.string().min(1).max(200),
-    name: z.string().min(1),
-    single: z.number().int().nonnegative(),
-    multiple: z.number().int().nonnegative(),
-    judgement: z.number().int().nonnegative(),
-    total: z.number().int().nonnegative()
-  })).min(1)
+  points: z.array(quotaPointSchema).min(1)
 });
 
 export async function POST(request: Request) {
@@ -47,6 +42,10 @@ export async function POST(request: Request) {
 
   try {
     const data = parsed.data;
+    if (data.assessmentMode !== "理论知识" || data.validations.some((item) => item.status !== "passed")) {
+      throw new Error("仅能确认通过校验的理论知识计划。");
+    }
+    validateQuota(data.points, data.levelCode);
     const result = await withTransaction(async (connection) => {
       const [projects] = await connection.execute<(RowDataPacket & { id: string })[]>(
         "SELECT id FROM projects WHERE status = 'active' ORDER BY created_at LIMIT 2 FOR UPDATE"
@@ -70,6 +69,17 @@ export async function POST(request: Request) {
       if (outlineVersionId !== data.blueprintVersions.outline.id || weightVersionId !== data.blueprintVersions.weights.id) {
         throw new Error("权重表或细目表已更新，请重新生成命题计划后确认。");
       }
+      await assertOutlineConfirmed(connection, outlineVersionId);
+      const [nodes] = await connection.execute<(RowDataPacket & { node_code: string; name: string })[]>(
+        "SELECT node_code,name FROM blueprint_nodes WHERE blueprint_version_id=? AND node_kind='assessment_point'", [outlineVersionId]
+      );
+      if (nodes.length !== data.points.length || data.points.some((point) => !nodes.some((node) => node.node_code === point.code))) {
+        throw new Error("计划考评点与当前细目表不一致，请重新生成计划。");
+      }
+      const points = data.points.map((point) => ({
+        ...point, name: nodes.find((node) => node.node_code === point.code)!.name,
+        total: point.single + point.multiple + point.judgement
+      }));
 
       const planId = createUlid();
       const scope = {
@@ -80,8 +90,8 @@ export async function POST(request: Request) {
         blueprintVersions: data.blueprintVersions
       };
       const quota = {
-        minimumTotal: data.minimumTotal,
-        points: data.points,
+        minimumTotal: points.reduce((sum, point) => sum + point.total, 0),
+        points,
         temporaryMinimums: data.temporaryMinimums,
         qualityRequirements: data.qualityRequirements,
         validations: data.validations

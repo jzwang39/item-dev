@@ -3,8 +3,11 @@ import type { RowDataPacket } from "mysql2/promise";
 import { z } from "zod";
 
 import { getVerifiedSession } from "@/auth";
+import { getGenerationState } from "@/modules/authoring/generation/service";
+import { getPlanQuestionRows } from "@/modules/authoring/generation/results";
+import { validateQuota, type Scope } from "@/modules/authoring/generation/contracts";
 import { createUlid } from "@/shared/database/ulid";
-import { query, withTransaction } from "@/shared/database/mysql";
+import { withTransaction } from "@/shared/database/mysql";
 
 const schema = z.object({
   points: z.array(z.object({
@@ -23,30 +26,7 @@ export async function GET(_: Request, { params }: Readonly<{ params: { planId: s
   if (session.user.role !== "admin") return NextResponse.json({ error: { code: "FORBIDDEN", message: "仅管理员可查看命题成果。" } }, { status: 403 });
 
   try {
-    type QuestionRow = RowDataPacket & {
-      id: string;
-      question_no: string;
-      question_type: string;
-      stem: string;
-      content_json: string | { options?: Array<{ key: string; content: string }> };
-      answer_json: string | { answers?: string[] };
-      analysis_text: string | null;
-      point_name: string | null;
-      current_status: string;
-    };
-    const rows = await query<QuestionRow[]>(
-      `SELECT q.id, q.question_no, q.question_type, q.current_status, qv.stem, qv.content_json, qv.answer_json, qv.analysis_text,
-              MIN(bn.name) AS point_name
-         FROM questions q
-         INNER JOIN question_versions qv ON qv.question_id = q.id
-         LEFT JOIN question_assessment_points qap ON qap.question_version_id = qv.id
-         LEFT JOIN blueprint_nodes bn ON bn.id = qap.blueprint_node_id
-        WHERE q.project_id = (SELECT project_id FROM authoring_plans WHERE id = ?)
-          AND JSON_UNQUOTE(JSON_EXTRACT(qv.source_snapshot_json, '$.planId')) = ?
-        GROUP BY qv.id
-        ORDER BY q.question_no`,
-      [params.planId, params.planId]
-    );
+    const rows = await getPlanQuestionRows(params.planId);
     const questions = rows.map((row) => {
       const content = typeof row.content_json === "string" ? JSON.parse(row.content_json) as { options?: Array<{ key: string; content: string }> } : row.content_json;
       const answer = typeof row.answer_json === "string" ? JSON.parse(row.answer_json) as { answers?: string[] } : row.answer_json;
@@ -63,7 +43,7 @@ export async function GET(_: Request, { params }: Readonly<{ params: { planId: s
         status: row.current_status
       };
     });
-    return NextResponse.json({ data: { questions } });
+    return NextResponse.json({ data: { questions, ...await getGenerationState(params.planId) } });
   } catch (error) {
     return NextResponse.json({ error: { code: "PLAN_RESULTS_LOAD_FAILED", message: error instanceof Error ? error.message : "命题成果加载失败。" } }, { status: 500 });
   }
@@ -79,15 +59,25 @@ export async function PATCH(request: Request, { params }: Readonly<{ params: { p
 
   try {
     const result = await withTransaction(async (connection) => {
-      const [rows] = await connection.execute<(RowDataPacket & { project_id: string; quota_json: string | Record<string, unknown>; status: string })[]>(
-        "SELECT project_id, quota_json, status FROM authoring_plans WHERE id = ? FOR UPDATE",
+      const [rows] = await connection.execute<(RowDataPacket & { project_id: string; quota_json: string | Record<string, unknown>; scope_json: string | Scope; status: string })[]>(
+        "SELECT project_id, quota_json, scope_json, status FROM authoring_plans WHERE id = ? FOR UPDATE",
         [params.planId]
       );
       const plan = rows[0];
       if (!plan || plan.status !== "confirmed") throw new Error("仅可修改已确认且尚未归档的命题计划。");
+      const [jobs] = await connection.execute<RowDataPacket[]>("SELECT id FROM authoring_generation_jobs WHERE plan_id=? LIMIT 1", [params.planId]);
+      if (jobs.length) throw new Error("计划已开始执行，题量与版本已锁定；调整需求请新建计划。");
+      const scope = typeof plan.scope_json === "string" ? JSON.parse(plan.scope_json) as Scope : plan.scope_json;
+      validateQuota(parsed.data.points, scope.levelCode);
+      const [nodes] = await connection.execute<(RowDataPacket & { node_code: string; name: string })[]>(
+        "SELECT node_code,name FROM blueprint_nodes WHERE blueprint_version_id=? AND node_kind='assessment_point'", [scope.blueprintVersions.outline.id]);
+      if (nodes.length !== parsed.data.points.length || parsed.data.points.some((point) => !nodes.some((node) => node.node_code === point.code))) {
+        throw new Error("计划考评点与冻结细目表不一致。");
+      }
       const quota = typeof plan.quota_json === "string" ? JSON.parse(plan.quota_json) as Record<string, unknown> : plan.quota_json;
       const points = parsed.data.points.map((point) => ({
         ...point,
+        name: nodes.find((node) => node.node_code === point.code)!.name,
         total: point.single + point.multiple + point.judgement
       }));
       const minimumTotal = points.reduce((sum, point) => sum + point.total, 0);
@@ -98,7 +88,7 @@ export async function PATCH(request: Request, { params }: Readonly<{ params: { p
       await connection.execute(
         `INSERT INTO audit_logs (id, project_id, actor_id, action, object_type, object_id, after_json, result)
          VALUES (?, ?, ?, 'authoring.plan.quota_updated', 'authoring_plan', ?, ?, 'success')`,
-        [createUlid(), plan.project_id, session.user.id, params.planId, JSON.stringify({ minimumTotal, points }), "success"]
+        [createUlid(), plan.project_id, session.user.id, params.planId, JSON.stringify({ minimumTotal, points })]
       );
       return { minimumTotal, points };
     });

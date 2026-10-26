@@ -82,20 +82,28 @@ export async function GET() {
           content_json: unknown;
           answer_json: unknown;
           analysis_text: string | null;
+          current_status: string;
+          current_version_id: string;
+          reviewer_role: string | null;
+          confirmed_at: string | null;
+          review_opinion: string | null;
         })[]
       >(
         `SELECT q.id, q.project_id, q.question_no, po.name AS occupation_name, q.level_code, q.assessment_mode, q.question_type,
                 qv.stem, qv.content_json, qv.answer_json, qv.analysis_text, ra.id AS assignment_id, ra.assigned_at,
-                assigned.display_name AS assigned_expert_name
+                assigned.display_name AS assigned_expert_name,q.current_status,q.current_version_id,assigned.role AS reviewer_role,qrc.confirmed_at,
+                (SELECT rr.comment FROM review_records rr WHERE rr.question_version_id=qv.id ORDER BY rr.submitted_at DESC,rr.id DESC LIMIT 1) AS review_opinion
            FROM questions q
            INNER JOIN projects p ON p.id = q.project_id AND p.status = 'active'
            INNER JOIN project_occupations po ON po.id = q.occupation_id AND po.status = 'active'
            INNER JOIN question_versions qv ON qv.id = q.current_version_id
-           LEFT JOIN review_assignments ra ON ra.question_version_id = qv.id AND ra.status = 'assigned' AND ra.active_token = 'ACTIVE'
+           LEFT JOIN review_assignments ra ON ra.id = (
+             SELECT latest.id FROM review_assignments latest WHERE latest.question_version_id=qv.id
+             ORDER BY (latest.status='assigned') DESC,latest.assigned_at DESC,latest.id DESC LIMIT 1)
            LEFT JOIN accounts assigned ON assigned.id = ra.expert_id
-          WHERE q.current_status = 'pending_review' AND q.archived_at IS NULL
-          ORDER BY po.name, q.level_code, q.created_at DESC
-          LIMIT 300`,
+           LEFT JOIN question_review_confirmations qrc ON qrc.question_version_id=qv.id
+          WHERE q.current_status IN ('pending_review','returned','approved','stored') AND q.archived_at IS NULL
+          ORDER BY FIELD(q.current_status,'pending_review','returned','approved','stored'),po.name, q.level_code, q.created_at DESC`,
       ),
       query<
         (RowDataPacket & {
@@ -138,9 +146,9 @@ export async function GET() {
           questionType: question.question_type,
           stem: question.stem,
           assignedExpertName: question.assigned_expert_name,
-        })),
+          status: question.current_status,
+        })).filter((question) => question.status === "pending_review"),
         reviewTasks: questions
-          .filter((question) => question.assigned_expert_name)
           .map((question) => ({
             id: question.id,
             questionNo: question.question_no,
@@ -149,12 +157,17 @@ export async function GET() {
             assessmentMode: question.assessment_mode,
             questionType: question.question_type,
             stem: question.stem,
-            expertName: question.assigned_expert_name,
+            expertName: question.assigned_expert_name ?? "未分配",
+            canAdminReview: question.reviewer_role !== "expert",
+            confirmedAt: question.confirmed_at,
+            reviewOpinion: question.review_opinion,
             assignedAt: question.assigned_at,
             assignmentId: question.assignment_id,
             content: decode(question.content_json),
             answer: decode(question.answer_json),
             analysis: question.analysis_text,
+            status: question.current_status,
+            versionId: question.current_version_id,
           })),
         summary: {
           pending: Number(summary.pending),

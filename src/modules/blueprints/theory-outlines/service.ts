@@ -21,11 +21,15 @@ export type TheoryAssessmentPoint = {
   name: string;
   primaryNo: string;
   primaryName: string;
+  primaryWeight?: number | null;
   secondaryNo: string;
   secondaryName: string;
+  secondaryWeight?: number | null;
   tertiaryNo: string;
   tertiaryName: string;
+  tertiaryWeight?: number | null;
   importance: "low" | "medium" | "high" | "critical" | null;
+  importanceCode?: "X" | "Y" | "Z";
   remark: string;
   textbookPage: string;
 };
@@ -67,7 +71,52 @@ export async function getCurrentTheoryOutline(
     const snapshot = typeof current.snapshot_json === "string"
       ? JSON.parse(current.snapshot_json) as Snapshot
       : current.snapshot_json;
-    return { ...snapshot, versionId: current.id, versionNo: current.version_no, importedAt: current.created_at.toISOString() };
+    const points = await readGeneratedPoints(connection, current.id, snapshot.points);
+    return { ...snapshot, points, versionId: current.id, versionNo: current.version_no, importedAt: current.created_at.toISOString() };
+  });
+}
+
+async function readGeneratedPoints(
+  connection: PoolConnection,
+  versionId: string,
+  fallback: TheoryAssessmentPoint[],
+) {
+  if (!fallback.length || fallback[0]?.code) return fallback;
+  const [rows] = await connection.execute<(RowDataPacket & {
+    node_code: string;
+    name: string;
+    importance: TheoryAssessmentPoint["importance"];
+    requirement_json: string | Record<string, unknown> | null;
+  })[]>(
+    `SELECT node_code, name, importance, requirement_json
+       FROM blueprint_nodes
+      WHERE blueprint_version_id = ? AND node_kind = 'assessment_point'
+      ORDER BY ordinal`,
+    [versionId],
+  );
+  return rows.map((row) => {
+    const requirement = typeof row.requirement_json === "string"
+      ? JSON.parse(row.requirement_json) as Record<string, unknown>
+      : row.requirement_json ?? {};
+    return {
+      code: row.node_code,
+      name: row.name,
+      primaryNo: String(requirement.primaryNo ?? ""),
+      primaryName: String(requirement.primaryName ?? ""),
+      primaryWeight: Number(requirement.primaryWeight ?? 0),
+      secondaryNo: String(requirement.secondaryNo ?? ""),
+      secondaryName: String(requirement.secondaryName ?? ""),
+      secondaryWeight: Number(requirement.secondaryWeight ?? 0),
+      tertiaryNo: String(requirement.tertiaryNo ?? ""),
+      tertiaryName: String(requirement.tertiaryName ?? ""),
+      tertiaryWeight: Number(requirement.tertiaryWeight ?? 0),
+      importance: row.importance,
+      importanceCode: requirement.importanceCode === "X" || requirement.importanceCode === "Y" || requirement.importanceCode === "Z"
+        ? requirement.importanceCode
+        : undefined,
+      remark: "",
+      textbookPage: "",
+    } satisfies TheoryAssessmentPoint;
   });
 }
 

@@ -6,6 +6,7 @@ import { z } from "zod";
 import { getVerifiedSession } from "@/auth";
 import { createUlid } from "@/shared/database/ulid";
 import { query, withTransaction } from "@/shared/database/mysql";
+import { assertQuestionConfirmed } from "@/modules/authoring/question-confirmation";
 
 const levelCodes = [
   "level_5",
@@ -579,6 +580,7 @@ export async function PATCH(request: Request) {
         question.current_status !== "approved"
       )
         throw new Error("仅已审定状态的试题可以终审入库。");
+      await assertQuestionConfirmed(connection, question.current_version_id);
       await connection.execute(
         "UPDATE questions SET current_status = 'stored', row_version = row_version + 1 WHERE id = ?",
         [question.id],
