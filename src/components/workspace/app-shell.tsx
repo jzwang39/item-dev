@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -33,7 +34,7 @@ export function AppShell({
       <header className="border-b border-[#e7eaf0] bg-white">
         <div className="mx-auto flex min-h-[74px] max-w-brand items-center justify-between px-9">
           <Link className="flex items-center gap-3 no-underline" href="/workspace">
-            <div className="grid h-9 w-9 place-items-center rounded-xl bg-[#3f60e8] text-sm font-bold text-white">题</div>
+            <Image alt="网站 Logo" className="h-9 w-9 shrink-0 object-contain" height={36} src="/logo.svg" unoptimized width={36} />
             <div>
               <p className="m-0 text-[15px] font-semibold text-[#293242]">技能人才评价国家题库智能命题平台</p>
               <span className="mt-1 inline-block rounded bg-[#f1f3f8] px-1.5 py-0.5 text-[10px] text-[#768091]">

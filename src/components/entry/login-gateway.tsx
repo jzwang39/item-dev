@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { signIn } from "next-auth/react";
 import { FormEvent, useEffect, useRef, useState } from "react";
 
@@ -128,9 +129,7 @@ export function LoginGateway() {
         <header className="entry-header">
           <div className="entry-header-inner">
             <div className="entry-brand">
-              <div aria-hidden className="entry-brand-mark">
-                <span>职</span>
-              </div>
+              <Image alt="网站 Logo" className="h-10 w-10 shrink-0 object-contain" height={40} src="/logo.svg" unoptimized width={40} />
               <strong>技能人才评价国家题库智能命题平台</strong>
             </div>
           </div>
