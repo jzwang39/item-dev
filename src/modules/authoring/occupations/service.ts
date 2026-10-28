@@ -2,6 +2,16 @@ import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 
 import { createUlid } from "@/shared/database/ulid";
 import { query, withTransaction } from "@/shared/database/mysql";
+import {
+  OccupationOperationError,
+  planOccupationDirections,
+  toOccupationDirection,
+  type OccupationDirection,
+  type OccupationDirectionInput,
+  type StoredOccupationDirection,
+} from "./directions";
+
+export { OccupationOperationError } from "./directions";
 
 type ProjectRow = RowDataPacket & { id: string };
 type OccupationRow = RowDataPacket & {
@@ -11,26 +21,44 @@ type OccupationRow = RowDataPacket & {
   status: "active" | "archived";
 };
 
-export type Occupation = Pick<OccupationRow, "id" | "name" | "code" | "status">;
-
-export class OccupationOperationError extends Error {}
+type DirectionRow = RowDataPacket & StoredOccupationDirection & { occupation_id: string };
+type OccupationInput = Readonly<{ name: string; code: string; directions?: OccupationDirectionInput[] }>;
+export type Occupation = Pick<OccupationRow, "id" | "name" | "code" | "status"> & {
+  directions: OccupationDirection[];
+  nextDirectionNumber: number;
+};
 
 export async function listActiveOccupations(): Promise<Occupation[]> {
   const projectId = await getActiveProjectId();
   if (!projectId) {
     return [];
   }
-  return query<OccupationRow[]>(
+  const occupations = await query<OccupationRow[]>(
     `SELECT id, name, code, status
        FROM project_occupations
       WHERE project_id = ? AND status = 'active'
       ORDER BY created_at DESC`,
     [projectId]
   );
+  const directions = await query<DirectionRow[]>(
+    `SELECT d.id, d.occupation_id, d.name, d.ordinal, d.status
+       FROM project_occupation_directions d
+       JOIN project_occupations o ON o.id = d.occupation_id
+      WHERE o.project_id = ? AND o.status = 'active'
+      ORDER BY d.ordinal`,
+    [projectId],
+  );
+  const byOccupation = new Map<string, DirectionRow[]>();
+  for (const direction of directions) {
+    const items = byOccupation.get(direction.occupation_id) ?? [];
+    items.push(direction);
+    byOccupation.set(direction.occupation_id, items);
+  }
+  return occupations.map((occupation) => withDirections(occupation, byOccupation.get(occupation.id) ?? []));
 }
 
 export async function createOccupation(
-  input: Readonly<{ name: string; code: string }>,
+  input: OccupationInput,
   actorId: string
 ): Promise<Occupation> {
   const name = input.name.trim();
@@ -45,7 +73,7 @@ export async function createOccupation(
 
   return withTransaction(async (connection) => {
     const projectId = await getOrCreateDefaultProject(connection, actorId);
-    const occupation: Occupation = { id: createUlid(), name, code, status: "active" };
+    const occupation: Occupation = { id: createUlid(), name, code, status: "active", directions: [], nextDirectionNumber: 1 };
 
     try {
       await connection.execute(
@@ -60,6 +88,8 @@ export async function createOccupation(
       throw error;
     }
 
+    const directions = await saveDirections(connection, occupation.id, input.directions ?? [], []);
+    const created = withDirections(occupation, directions);
     await connection.execute(
       `INSERT INTO audit_logs (
         id, project_id, actor_id, action, object_type, object_id, after_json, result
@@ -69,17 +99,17 @@ export async function createOccupation(
         projectId,
         actorId,
         occupation.id,
-        JSON.stringify({ name: occupation.name, code: occupation.code, status: occupation.status })
+        JSON.stringify(created)
       ]
     );
 
-    return occupation;
+    return created;
   });
 }
 
 export async function updateOccupation(
   occupationId: string,
-  input: Readonly<{ name: string; code: string }>,
+  input: OccupationInput,
   actorId: string
 ): Promise<Occupation> {
   const name = input.name.trim();
@@ -109,6 +139,12 @@ export async function updateOccupation(
     if (!existing) {
       throw new OccupationOperationError("职业不存在或已归档。");
     }
+    const [existingDirections] = await connection.execute<DirectionRow[]>(
+      `SELECT id, occupation_id, name, ordinal, status
+         FROM project_occupation_directions WHERE occupation_id = ? ORDER BY ordinal FOR UPDATE`,
+      [occupationId],
+    );
+    const before = withDirections(existing, existingDirections);
 
     try {
       await connection.execute(
@@ -124,7 +160,10 @@ export async function updateOccupation(
       throw error;
     }
 
-    const updated: Occupation = { id: existing.id, name, code, status: existing.status };
+    const directions = input.directions === undefined
+      ? existingDirections
+      : await saveDirections(connection, occupationId, input.directions, existingDirections);
+    const updated = withDirections({ id: existing.id, name, code, status: existing.status }, directions);
     await connection.execute(
       `INSERT INTO audit_logs (
         id, project_id, actor_id, action, object_type, object_id, before_json, after_json, result
@@ -134,13 +173,77 @@ export async function updateOccupation(
         projectId,
         actorId,
         occupationId,
-        JSON.stringify({ name: existing.name, code: existing.code, status: existing.status }),
-        JSON.stringify({ name: updated.name, code: updated.code, status: updated.status })
+        JSON.stringify(before),
+        JSON.stringify(updated)
       ]
     );
 
     return updated;
   });
+}
+
+function withDirections(
+  occupation: Pick<OccupationRow, "id" | "name" | "code" | "status">,
+  directions: readonly StoredOccupationDirection[],
+): Occupation {
+  return {
+    id: occupation.id, name: occupation.name, code: occupation.code, status: occupation.status,
+    directions: directions.filter((direction) => direction.status === "active")
+      .sort((a, b) => a.ordinal - b.ordinal)
+      .map((direction) => toOccupationDirection(direction, occupation.code)),
+    nextDirectionNumber: Math.max(0, ...directions.map((direction) => direction.ordinal)) + 1,
+  };
+}
+
+async function saveDirections(
+  connection: PoolConnection,
+  occupationId: string,
+  input: readonly OccupationDirectionInput[],
+  existing: readonly StoredOccupationDirection[],
+): Promise<StoredOccupationDirection[]> {
+  const plan = planOccupationDirections(input, existing);
+  try {
+    // Temporarily free active names so renames and name swaps are atomic.
+    await connection.execute(
+      `UPDATE project_occupation_directions SET status = 'archived'
+        WHERE occupation_id = ? AND status = 'active'`,
+      [occupationId],
+    );
+    for (const direction of plan.retained) {
+      await connection.execute(
+        `UPDATE project_occupation_directions
+            SET name = ?, status = 'active', row_version = row_version + 1 WHERE id = ? AND occupation_id = ?`,
+        [direction.name, direction.id, occupationId],
+      );
+    }
+    const added: StoredOccupationDirection[] = [];
+    for (const direction of plan.added) {
+      const stored: StoredOccupationDirection = { ...direction, id: createUlid(), status: "active" };
+      await connection.execute(
+        `INSERT INTO project_occupation_directions (id, occupation_id, ordinal, name)
+         VALUES (?, ?, ?, ?)`,
+        [stored.id, occupationId, stored.ordinal, stored.name],
+      );
+      added.push(stored);
+    }
+    for (const id of plan.archivedIds) {
+      await connection.execute(
+        `UPDATE project_occupation_directions SET row_version = row_version + 1 WHERE id = ? AND occupation_id = ?`,
+        [id, occupationId],
+      );
+    }
+    return [
+      ...existing.filter((direction) => direction.status === "archived" || plan.archivedIds.includes(direction.id))
+        .map((direction) => ({ ...direction, status: "archived" as const })),
+      ...plan.retained,
+      ...added,
+    ];
+  } catch (error) {
+    if (isDuplicateError(error)) {
+      throw new OccupationOperationError("职业方向名称不能重复。");
+    }
+    throw error;
+  }
 }
 
 async function getActiveProjectId(): Promise<string | null> {

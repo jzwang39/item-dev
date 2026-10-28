@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { GeneratedSkillPoint } from "@/modules/blueprints/skill-outline-generation";
+import { isSkillGenerationLevel } from "@/modules/blueprints/skill-generation-policy";
 
 const levels = [
   ["level_5", "五级 / 初级工"], ["level_4", "四级 / 中级工"], ["level_3", "三级 / 高级工"], ["level_2", "二级 / 技师"], ["level_1", "一级 / 高级技师"],
@@ -12,9 +13,9 @@ type Job = { id: string; status: string; totalBatches: number; completedBatches:
 type State = { textbooks: Textbook[]; versions: Version[]; jobs: Job[] };
 const primaryButton = "rounded-lg bg-[#3f60e8] px-4 py-3 text-sm text-white disabled:opacity-50";
 
-export function SkillOutlinePanel({ occupationId, occupationName, level, onLevelChange, standardReady, onGenerated, refreshVersion, onEdit }: {
+export function SkillOutlinePanel({ occupationId, occupationName, level, onLevelChange, standardReady, standardError, onGenerated, refreshVersion, onEdit }: {
   occupationId: string; occupationName: string; level: string; onLevelChange: (value: string) => void;
-  standardReady: boolean; onGenerated: () => void;
+  standardReady: boolean | null; standardError?: string; onGenerated: () => void;
   refreshVersion: number; onEdit: (point: GeneratedSkillPoint) => void;
 }) {
   const [mode, setMode] = useState<"textbook" | "model">("textbook");
@@ -112,11 +113,15 @@ export function SkillOutlinePanel({ occupationId, occupationName, level, onLevel
       <input aria-label="每等级目标题量" className="w-20 rounded-lg border p-2" type="number" min={30} max={50} value={target} disabled={!!busy || !!running} onChange={(event) => setTarget(Number(event.target.value))} />
       <span className="text-[#8390a5]">30～50题</span>
     </label>
-    <button type="button" className={primaryButton} disabled={!!busy || !!running || !standardReady || (mode === "textbook" && !state.textbooks.length) || !Number.isInteger(target) || target < 30 || target > 50} onClick={() => void start()}>
+    <button type="button" className={primaryButton} disabled={!!busy || !!running || !standardReady || !!standardError || (mode === "textbook" && !state.textbooks.length) || !Number.isInteger(target) || target < 30 || target > 50} onClick={() => void start()}>
       {busy === "start" ? "创建任务中..." : running ? "生成中..." : mode === "textbook" ? "生成细目表" : "AI大模型生成"}
     </button>
-    <p className="text-xs text-[#8390a5]">一次处理全部适用方向和等级；{mode === "textbook" ? "教材独立知识点" : "标准技能要求条目"}与鉴定点1:1对应，不按权重扩充数量。每等级题量均匀分配，鉴定点多于题量时部分为0题。</p>
-    {!standardReady ? <p className="text-orange-600">请先上传并确认国家职业标准。</p> : null}
+    <p className="text-xs text-[#8390a5]">仅生成五级、四级、三级的全部适用方向；{mode === "textbook"
+      ? "每个教材独立知识点生成1个鉴定点"
+      : "每条三级技能要求保留1个鉴定点，每项二级工作内容、一级职业功能各增加1个综合鉴定点"}。每等级题量均匀分配，鉴定点多于题量时部分为0题。</p>
+    {standardReady === null && !standardError ? <p role="status" className="text-[#60708a]">正在读取本职业共用的国家职业标准...</p> : null}
+    {standardError ? <p role="alert" className="text-red-600">职业标准读取或同步失败，请查看第一步错误信息。已上传的原件无需重复上传。</p> : null}
+    {standardReady === false && !standardError ? <p className="text-orange-600">本职业尚无已确认的国家职业标准，可在理论知识或操作技能任一流程上传并确认。</p> : null}
     {running ? <div role="status" className="space-y-2 text-[#60708a]"><p>已完成 {running.completedBatches}/{running.totalBatches} 批，生成 {running.generatedPointCount} 个鉴定点</p><progress className="w-full" max={running.totalBatches || 1} value={running.completedBatches} /></div> : null}
     {state.jobs[0]?.status === "failed" ? <p role="alert" className="text-red-600">最近一次生成失败，未发布任何不完整版本：{state.jobs[0].errorMessage}</p> : null}
     {error ? <p role="alert" className="text-red-600">{error}</p> : null}
@@ -147,10 +152,15 @@ export function SkillOutlinePanel({ occupationId, occupationName, level, onLevel
             <td rowSpan={secondary.length} className="p-4">{point.level2Name}</td><td rowSpan={secondary.length} className="p-4">{point.level2Weight ?? point.weight}%</td><td rowSpan={secondary.length} className="p-4">{point.selection || "待核对"}</td>
           </> : null}
           <td className="p-4">{String(point.ordinal).padStart(3, "0")}<p className="mt-1 text-xs text-[#8390a5]">{point.level1Code}-{point.level2Code}-{String(point.ordinal).padStart(3, "0")}</p></td>
-          <td className="p-4" title={point.sourceKnowledgePoint ? `${point.sourceKnowledgePoint.locator}\n知识点：${point.sourceKnowledgePoint.name}\n原文：${point.sourceKnowledgePoint.evidence}` : undefined}>{point.name}</td><td className="p-4">{point.importanceCode ?? (point.importance === "critical" ? "X" : point.importance === "high" ? "Y" : "Z")}</td><td className="p-4">{point.targetCount}</td>
+          <td className="p-4" title={point.sourceKnowledgePoint ? `${point.sourceKnowledgePoint.locator}\n来源条目：${point.sourceKnowledgePoint.name}\n原文：${point.sourceKnowledgePoint.evidence}` : undefined}>{point.name}
+            {point.sourceStandardRequirement?.nodeKind === "work_content" ? <p className="mt-1 text-xs text-[#8390a5]">二级工作内容综合</p> : null}
+            {point.sourceStandardRequirement?.nodeKind === "occupational_function" ? <p className="mt-1 text-xs text-[#8390a5]">一级职业功能综合</p> : null}
+          </td><td className="p-4">{point.importanceCode ?? (point.importance === "critical" ? "X" : point.importance === "high" ? "Y" : "Z")}</td><td className="p-4">{point.targetCount}</td>
           <td className="p-4">{current?.versionId === versions[0]?.versionId ? <button type="button" className="rounded-lg border px-3 py-2 text-xs" disabled={!!running} onClick={() => onEdit(point)}>编辑</button> : "只读"}</td>
         </tr>;
-      }) : <tr><td colSpan={12} className="p-6 text-[#8390a5]">当前等级、方向尚无细目表，请选择教材模式后生成。</td></tr>}</tbody>
+      }) : <tr><td colSpan={12} className="p-6 text-[#8390a5]">{isSkillGenerationLevel(level)
+        ? "当前等级、方向尚无细目表，请选择有教材或无教材模式后生成。"
+        : "当前等级、方向尚无历史细目表，本次不生成该技能等级。"}</td></tr>}</tbody>
     </table></div>
     <div className="flex items-center justify-between text-[#60708a]"><span>共 {points.length} 个鉴定点 · 目标 {points.reduce((sum, point) => sum + point.targetCount, 0)} 题 · 每页20条</span><div className="flex items-center gap-3"><button type="button" disabled={actualPage <= 1} onClick={() => setPage(actualPage - 1)}>上一页</button><span>{actualPage}/{pages}</span><button type="button" disabled={actualPage >= pages} onClick={() => setPage(actualPage + 1)}>下一页</button></div></div>
   </div>;

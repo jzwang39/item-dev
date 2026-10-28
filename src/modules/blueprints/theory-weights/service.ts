@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
@@ -7,9 +7,14 @@ import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { extractDocxText, extractPdfText } from "@/modules/documents/extraction/service";
 import { createUlid } from "@/shared/database/ulid";
 import { withTransaction } from "@/shared/database/mysql";
+import { toOccupationDirection, type OccupationDirection, type StoredOccupationDirection } from "@/modules/authoring/occupations/directions";
+import { parseDirectionalTheoryWeights, parseStandardRequirements, TheoryWeightImportError, type StandardRequirementScope, type TheoryWeightScope } from "./standard";
+import { readPdfWeightColumns } from "./pdf-columns";
+import type { PdfTextRun } from "@/modules/documents/extraction/service";
+import { parseSkillStandard } from "../skill-standard";
+import { publishSkillStandard } from "../skill-standard-import";
 
 const levels = ["level_5", "level_4", "level_3", "level_2", "level_1"] as const;
-const uploadDirectory = "/tmp/itembank-blueprint-imports";
 
 type LevelCode = (typeof levels)[number];
 type ProjectRow = RowDataPacket & { id: string };
@@ -30,15 +35,17 @@ export type TheoryWeightSnapshot = {
   usedOcr: boolean;
   importedAt: string;
   items: TheoryWeightItem[];
+  scopes?: TheoryWeightScope[];
+  requirementScopeCount?: number;
 };
 
-export class TheoryWeightImportError extends Error {}
+export { TheoryWeightImportError } from "./standard";
 
 export async function listOccupationStandards(occupationId: string): Promise<SourceRow[]> {
   return withTransaction(async (connection) => {
     const projectId = await getProjectForOccupation(connection, occupationId);
     const [rows] = await connection.execute<SourceRow[]>(
-      `SELECT sv.id, s.name, fo.original_name
+      `SELECT DISTINCT sv.id, s.name, fo.original_name, sv.created_at
          FROM sources s
          INNER JOIN source_versions sv ON sv.id = s.current_version_id
          INNER JOIN file_objects fo ON fo.id = sv.file_object_id
@@ -105,15 +112,48 @@ export async function importTheoryWeights(
 
   const extracted = input.file
     ? await extractUploadedText(input.file)
-    : await extractSourceText(input.sourceVersionId!);
-  const items = parseTheoryWeights(extracted.text);
-  validateWeights(items);
+    : await extractSourceText(input.sourceVersionId!, occupationId);
 
-  return withTransaction(async (connection) => {
-    const projectId = await getProjectForOccupation(connection, occupationId);
-    const source = input.file
-      ? await saveImportFile(connection, projectId, input.file, actorId)
-      : await getSourceFile(connection, input.sourceVersionId!, projectId, occupationId);
+  let storedPath: string | undefined;
+  try {
+    return await withTransaction(async (connection) => {
+      const projectId = await getProjectForOccupation(connection, occupationId);
+      const source = input.file
+        ? await saveImportFile(connection, projectId, input.file, actorId, (path) => { storedPath = path; })
+        : await getSourceFile(connection, input.sourceVersionId!, projectId, occupationId);
+      return publishSharedOccupationStandard(connection, projectId, occupationId, extracted, {
+        ...source, sourceVersionId: input.sourceVersionId ?? null,
+      }, actorId);
+    });
+  } catch (error) {
+    if (storedPath) await unlink(storedPath).catch(() => undefined);
+    throw error;
+  }
+}
+
+export async function publishSharedOccupationStandard(
+  connection: PoolConnection,
+  projectId: string,
+  occupationId: string,
+  extracted: { text: string; usedOcr: boolean; layout?: PdfTextRun[][] },
+  source: { name: string; fileObjectId: string; sourceVersionId: string | null },
+  actorId: string,
+): Promise<TheoryWeightSnapshot> {
+    const [occupationRows] = await connection.execute<(RowDataPacket & { name: string; code: string })[]>(
+      "SELECT name, code FROM project_occupations WHERE id = ? FOR UPDATE", [occupationId],
+    );
+    const [directionRows] = await connection.execute<(RowDataPacket & StoredOccupationDirection)[]>(
+      "SELECT id, name, ordinal, status FROM project_occupation_directions WHERE occupation_id = ? AND status = 'active' ORDER BY ordinal FOR UPDATE",
+      [occupationId],
+    );
+    const directions: OccupationDirection[] = directionRows.map((direction) => toOccupationDirection(direction, occupationRows[0].code));
+    const scopes = parseDirectionalTheoryWeights(extracted.text, { ...occupationRows[0], directions },
+      extracted.layout ? readPdfWeightColumns(extracted.layout, directions) : undefined);
+    const requirements = parseStandardRequirements(extracted.text, scopes);
+    const skillData = parseSkillStandard(extracted.text);
+    source = { ...source, sourceVersionId: await ensureSharedStandardSource(connection, projectId, occupationId, source, extracted.text, actorId) };
+    // Keep the legacy single-scope shape only when it is unambiguous.
+    const items = scopes.length === 1 ? scopes[0].items : [];
     const blueprintId = await getOrCreateTheoryWeightBlueprint(connection, projectId, occupationId);
     const [versionRows] = await connection.execute<(RowDataPacket & { version_no: number })[]>(
       "SELECT COALESCE(MAX(version_no), 0) AS version_no FROM blueprint_versions WHERE blueprint_id = ? FOR UPDATE",
@@ -123,8 +163,12 @@ export async function importTheoryWeights(
     const versionId = createUlid();
     const snapshot = {
       sourceName: source.name,
+      fileObjectId: source.fileObjectId,
+      sourceVersionId: source.sourceVersionId,
       usedOcr: extracted.usedOcr,
-      items
+      items,
+      scopes,
+      requirementScopeCount: requirements.length,
     };
     const contentHash = createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
 
@@ -135,7 +179,8 @@ export async function importTheoryWeights(
       [versionId, blueprintId, versionNo, contentHash, JSON.stringify(snapshot), actorId]
     );
 
-    for (const [index, item] of items.entries()) {
+    for (const scope of scopes) {
+    for (const [index, item] of scope.items.entries()) {
       await connection.execute(
         `INSERT INTO blueprint_nodes (
           id, blueprint_version_id, parent_id, node_kind, node_code, name, ordinal, weight, requirement_json, source_ref_json
@@ -143,14 +188,16 @@ export async function importTheoryWeights(
         [
           createUlid(),
           versionId,
-          `theory-weight-${String(index + 1).padStart(3, "0")}`,
+          `${scope.directionCode ?? "occupation"}-weight-${String(index + 1).padStart(3, "0")}`,
           item.name,
           index + 1,
-          JSON.stringify({ category: item.category, weights: item.weights }),
+          JSON.stringify({ category: item.category, weights: item.weights, directionId: scope.directionId, directionName: scope.directionName }),
           JSON.stringify({ sourceName: source.name, usedOcr: extracted.usedOcr })
         ]
       );
     }
+    }
+    await saveStandardRequirements(connection, occupationId, versionId, source.fileObjectId, source.sourceVersionId, requirements);
 
     await connection.execute(
       `UPDATE blueprints
@@ -166,23 +213,27 @@ export async function importTheoryWeights(
         createUlid(),
         projectId,
         source.fileObjectId,
-        JSON.stringify({ occupationId, assessmentMode: "theory", levelCodes: levels }),
-        JSON.stringify({ usedOcr: extracted.usedOcr, itemCount: items.length, totals: calculateTotals(items) }),
+        JSON.stringify({ occupationId, assessmentMode: "theory", levelCodes: levels, directions: scopes.map((scope) => ({ id: scope.directionId, name: scope.directionName, code: scope.occupationCode })) }),
+        JSON.stringify({ usedOcr: extracted.usedOcr, scopes: scopes.map((scope) => ({ directionId: scope.directionId, itemCount: scope.items.length, totals: calculateTotals(scope.items) })), requirementScopeCount: requirements.length }),
         actorId
       ]
     );
-    if (input.sourceVersionId) {
+    if (source.sourceVersionId) {
       await connection.execute(
         "INSERT INTO blueprint_version_sources (blueprint_version_id, source_version_id) VALUES (?, ?)",
-        [versionId, input.sourceVersionId]
+        [versionId, source.sourceVersionId]
       );
     }
     await connection.execute(
       `INSERT INTO audit_logs (
         id, project_id, actor_id, action, object_type, object_id, after_json, result
       ) VALUES (?, ?, ?, 'blueprint.theory_weight.import', 'blueprint_version', ?, ?, 'success')`,
-      [createUlid(), projectId, actorId, versionId, JSON.stringify({ versionNo, itemCount: items.length, sourceName: source.name })]
+      [createUlid(), projectId, actorId, versionId, JSON.stringify({ versionNo, scopeCount: scopes.length, requirementScopeCount: requirements.length, sourceName: source.name })]
     );
+    await publishSkillStandard(connection, projectId, occupationId, skillData, {
+      sourceName: source.name, fileObjectId: source.fileObjectId,
+      sourceVersionId: source.sourceVersionId, usedOcr: extracted.usedOcr,
+    }, actorId);
 
     return {
       ...snapshot,
@@ -190,10 +241,9 @@ export async function importTheoryWeights(
       versionNo,
       importedAt: new Date().toISOString()
     };
-  });
 }
 
-async function extractUploadedText(file: File): Promise<{ text: string; usedOcr: boolean }> {
+async function extractUploadedText(file: File): Promise<{ text: string; usedOcr: boolean; layout?: PdfTextRun[][] }> {
   const extension = extname(file.name).toLowerCase();
   if (![".pdf", ".docx", ".txt"].includes(extension)) {
     throw new TheoryWeightImportError("仅支持 PDF、DOCX 或 TXT 格式的国家职业标准。");
@@ -211,25 +261,38 @@ async function extractUploadedText(file: File): Promise<{ text: string; usedOcr:
   }
 
   try {
-    const result = await extractPdfText(bytes);
-    return { text: result.text, usedOcr: result.usedOcr };
+    const result = await extractPdfText(bytes, { includeLayout: true });
+    return { text: result.text, usedOcr: result.usedOcr, layout: result.layout };
   } catch (error) {
     throw new TheoryWeightImportError(`PDF 文本提取或 OCR 失败：${error instanceof Error ? error.message : "未知错误"}`);
   }
 }
 
-async function extractSourceText(sourceVersionId: string): Promise<{ text: string; usedOcr: boolean }> {
+async function extractSourceText(sourceVersionId: string, occupationId: string): Promise<{ text: string; usedOcr: boolean; layout?: PdfTextRun[][] }> {
   return withTransaction(async (connection) => {
-    const [rows] = await connection.execute<SourceTextRow[]>(
-      `SELECT content_excerpt
-         FROM source_segments
-        WHERE source_version_id = ?
-        ORDER BY ordinal`,
-      [sourceVersionId]
+    const projectId = await getProjectForOccupation(connection, occupationId);
+    const [rows] = await connection.execute<(SourceTextRow & { object_key: string; original_name: string; storage_provider: string })[]>(
+      `SELECT DISTINCT seg.ordinal, seg.content_excerpt, fo.object_key, fo.original_name, fo.storage_provider
+         FROM source_segments seg
+         JOIN source_versions sv ON sv.id = seg.source_version_id AND sv.parse_status = 'succeeded'
+         JOIN sources s ON s.id = sv.source_id AND s.status = 'active' AND s.source_type = 'occupation_standard'
+         JOIN source_scopes ss ON ss.source_version_id = sv.id
+         JOIN file_objects fo ON fo.id = sv.file_object_id
+        WHERE sv.id = ? AND s.project_id = ? AND ss.occupation_id = ?
+        ORDER BY seg.ordinal`,
+      [sourceVersionId, projectId, occupationId]
     );
     const text = rows.map((row) => row.content_excerpt).join("\n");
     if (!text.trim()) {
       throw new TheoryWeightImportError("该资料尚无可用解析文本，请重新解析或使用本地文件上传。");
+    }
+    if (rows[0]?.storage_provider === "local" && extname(rows[0].original_name).toLowerCase() === ".pdf") {
+      try {
+        const parsed = await extractPdfText(await readFile(rows[0].object_key), { includeLayout: true });
+        return { text: parsed.text, usedOcr: parsed.usedOcr, layout: parsed.layout };
+      } catch (error) {
+        if (!(typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")) throw error;
+      }
     }
     return { text, usedOcr: false };
   });
@@ -263,6 +326,51 @@ export function parseTheoryWeights(text: string): TheoryWeightItem[] {
 
   if (!items.length) return parseSplitTheoryWeightRows(lines);
   return items;
+}
+
+async function ensureSharedStandardSource(
+  connection: PoolConnection,
+  projectId: string,
+  occupationId: string,
+  source: { name: string; fileObjectId: string; sourceVersionId: string | null },
+  text: string,
+  actorId: string,
+) {
+  const [existing] = await connection.execute<(RowDataPacket & { id: string })[]>(
+    `SELECT sv.id FROM source_versions sv JOIN sources s ON s.id=sv.source_id AND s.current_version_id=sv.id
+     WHERE sv.file_object_id=? AND s.project_id=? AND s.source_type='occupation_standard' AND s.status='active'
+       AND sv.parse_status='succeeded' LIMIT 1`, [source.fileObjectId, projectId],
+  );
+  const sourceVersionId = existing[0]?.id ?? createUlid();
+  if (!existing.length) {
+    const sourceId = createUlid();
+    await connection.execute(
+      `INSERT INTO sources(id,project_id,name,source_type,remark,current_version_id,created_by)
+       VALUES(?,?,?,'occupation_standard','理论知识与操作技能共用国家职业标准',?,?)`,
+      [sourceId, projectId, source.name, sourceVersionId, actorId],
+    );
+    await connection.execute(
+      `INSERT INTO source_versions(id,source_id,version_no,file_object_id,parse_status,parser_version,content_hash,created_by)
+       VALUES(?,?,1,?,'succeeded','shared-standard-v1',?,?)`,
+      [sourceVersionId, sourceId, source.fileObjectId, createHash("sha256").update(text).digest("hex"), actorId],
+    );
+    for (let offset = 0, ordinal = 1; offset < text.length; offset += 12000, ordinal++) {
+      const excerpt = text.slice(offset, offset + 12000);
+      await connection.execute(
+        `INSERT INTO source_segments(id,source_version_id,ordinal,locator,content_excerpt,content_hash)
+         VALUES(?,?,?,?,?,?)`,
+        [createUlid(), sourceVersionId, ordinal, `职业标准原文片段${ordinal}`, excerpt,
+          createHash("sha256").update(excerpt).digest("hex")],
+      );
+    }
+  }
+  for (const level of levels) for (const mode of ["theory", "skill"]) {
+    await connection.execute(
+      `INSERT IGNORE INTO source_scopes(id,source_version_id,occupation_id,level_code,assessment_mode)
+       VALUES(?,?,?,?,?)`, [createUlid(), sourceVersionId, occupationId, level, mode],
+    );
+  }
+  return sourceVersionId;
 }
 
 function parseFlatTheoryWeightRows(section: string) {
@@ -381,15 +489,6 @@ function parseSplitTheoryWeightRows(lines: string[]) {
   return items;
 }
 
-function validateWeights(items: TheoryWeightItem[]) {
-  const totals = calculateTotals(items);
-  for (const level of levels) {
-    if (Math.abs(totals[level] - 100) > 0.0001) {
-      throw new TheoryWeightImportError(`${level} 的权重合计为 ${totals[level]}%，不等于 100%，本次不会覆盖已有权重表。`);
-    }
-  }
-}
-
 function calculateTotals(items: TheoryWeightItem[]): Record<LevelCode, number> {
   return Object.fromEntries(
     levels.map((level) => [level, items.reduce((total, item) => total + (item.weights[level] ?? 0), 0)])
@@ -409,13 +508,56 @@ async function getProjectForOccupation(connection: PoolConnection, occupationId:
   return rows[0].id;
 }
 
-async function saveImportFile(connection: PoolConnection, projectId: string, file: File, actorId: string) {
+async function saveStandardRequirements(
+  connection: PoolConnection,
+  occupationId: string,
+  blueprintVersionId: string,
+  fileObjectId: string,
+  sourceVersionId: string | null,
+  scopes: readonly StandardRequirementScope[],
+) {
+  for (const scope of scopes) {
+    const scopeId = createUlid();
+    await connection.execute(
+      `INSERT INTO occupation_standard_requirement_scopes (
+        id, occupation_id, direction_id, direction_name, level_code, blueprint_version_id, file_object_id, source_version_id, scope_key
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [scopeId, occupationId, scope.directionId, scope.directionName, scope.levelCode, blueprintVersionId, fileObjectId, sourceVersionId,
+        `${scope.directionId ?? "occupation"}:${scope.levelCode}`],
+    );
+    const insertNode = async (parentId: string | null, kind: string, key: string, code: string, name: string, ordinal: number, evidence: string) => {
+      const id = createUlid();
+      await connection.execute(
+        `INSERT INTO occupation_standard_requirement_nodes (
+          id, scope_id, parent_id, node_kind, node_key, source_code, name, ordinal, evidence_text
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, scopeId, parentId, kind, key, code, name, ordinal, evidence],
+      );
+      return id;
+    };
+    for (const [functionIndex, fn] of scope.functions.entries()) {
+      const functionKey = `F${functionIndex + 1}`;
+      const functionId = await insertNode(null, "occupational_function", functionKey, fn.code, fn.name, functionIndex + 1, `${fn.code} ${fn.name}`);
+      for (const [contentIndex, content] of fn.contents.entries()) {
+        const contentKey = `${functionKey}-C${contentIndex + 1}`;
+        const contentId = await insertNode(functionId, "work_content", contentKey, content.code, content.name, contentIndex + 1, `${content.code} ${content.name}`);
+        for (const [index, requirement] of content.requirements.entries()) {
+          await insertNode(contentId, requirement.kind, `${contentKey}-R${index + 1}`, requirement.code, requirement.name, index + 1, requirement.evidence);
+        }
+      }
+    }
+  }
+}
+
+async function saveImportFile(connection: PoolConnection, projectId: string, file: File, actorId: string, onStored: (path: string) => void) {
   const bytes = Buffer.from(await file.arrayBuffer());
   const id = createUlid();
   const extension = extname(file.name).toLowerCase();
+  const uploadDirectory = process.env.UPLOAD_DIR || join(process.cwd(), ".data", "uploads", "blueprint-imports");
   const objectPath = join(uploadDirectory, `${id}${extension}`);
   await mkdir(uploadDirectory, { recursive: true });
   await writeFile(objectPath, bytes);
+  onStored(objectPath);
   await connection.execute(
     `INSERT INTO file_objects (
       id, project_id, storage_provider, bucket, object_key, original_name, mime_type, size_bytes, sha256, purpose, created_by

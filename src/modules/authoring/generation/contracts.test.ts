@@ -38,11 +38,24 @@ test("单点超过100题仍严格满足业务批次及模型请求上限", () =>
 test("数量由实际题型配额推算，不信任传入total", () => {
   assert.equal(buildBatches([{ ...points(1)[0], total: 1200 }])[0].target, 6);
 });
-test("拒绝重复代码、不足配额和不支持的等级", () => {
+test("拒绝重复代码、零题量和不支持的等级", () => {
   assert.throws(() => validateQuota([points(1)[0], points(1)[0]], "level_4"));
-  assert.throws(() => validateQuota([{ ...points(1)[0], single: 3 }], "level_4"));
+  assert.throws(() => validateQuota([{ ...points(1)[0], single: 0, judgement: 0, total: 0 }], "level_4"));
   assert.throws(() => validateQuota(points(1), "level_1"));
   assert.throws(() => validateQuota([], "level_4"));
+});
+test("200个考评点各1单选1判断，通过执行校验并拆为4批共400题", () => {
+  const requested = points(200).map((point) => ({ ...point, single: 1, judgement: 1, total: 2 }));
+  assert.doesNotThrow(() => validateQuota(requested, "level_4"));
+  assert.doesNotThrow(() => validateQuota(requested, "level_3"));
+  const batches = buildBatches(requested);
+  assert.deepEqual(batches.map((batch) => batch.target), [100, 100, 100, 100]);
+  const units = batches.flatMap((batch) => batch.units);
+  assert.equal(units.length, 200);
+  assert.ok(units.every((unit) => unit.slotTypes.join(",") === "single,judgement"));
+  const ordinals = units.flatMap((unit) => unit.ordinals);
+  assert.equal(new Set(ordinals).size, 400);
+  assert.deepEqual(ordinals, Array.from({ length: 400 }, (_, index) => index + 1));
 });
 test("部分无效响应保留有效条目", () => {
   const output = parseQuestions(JSON.stringify({ questions: [question(), question({ stem: "短" })] }), "A", "single");

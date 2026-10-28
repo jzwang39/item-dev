@@ -3,6 +3,10 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { SkillStandardUpload, SkillWeightMatrix, SkillStructureMatrix, type ImportedSkillStandard } from "./skill-standard-upload";
 import { SkillOutlinePanel } from "./skill-outline-panel";
+import { ScoreRubric } from "@/components/questions/score-rubric";
+import { formatDirectionCode, type OccupationDirection } from "@/modules/authoring/occupations/directions";
+import type { TheoryWeightScope } from "@/modules/blueprints/theory-weights/standard";
+import { isTheoryOutlineGenerationLevel } from "@/modules/blueprints/theory-outline-generation/policy";
 
 const tabs = ["考评蓝图", "命题任务", "资料依据", "质量检查"] as const;
 
@@ -31,7 +35,11 @@ type Profession = {
   name: string;
   code: string;
   status: "active" | "archived";
+  directions: OccupationDirection[];
+  nextDirectionNumber: number;
 };
+
+type DirectionDraft = { key: string; id?: string; name: string; directionCode?: string };
 
 type TheoryWeightItem = {
   category: string;
@@ -46,6 +54,8 @@ type TheoryWeightSnapshot = {
   usedOcr: boolean;
   importedAt: string;
   items: TheoryWeightItem[];
+  scopes?: TheoryWeightScope[];
+  requirementScopeCount?: number;
 };
 
 type TheoryAssessmentPoint = {
@@ -294,6 +304,7 @@ function TheoryCompilationWorkspace({
   const [standards, setStandards] = useState<OccupationStandard[]>([]);
   const [weightSnapshot, setWeightSnapshot] =
     useState<TheoryWeightSnapshot | null>(null);
+  const [weightDirectionId, setWeightDirectionId] = useState("");
   const [outlineSnapshot, setOutlineSnapshot] =
     useState<TheoryOutlineSnapshot | null>(null);
   const [isLoadingWeights, setIsLoadingWeights] = useState(true);
@@ -311,12 +322,19 @@ function TheoryCompilationWorkspace({
     TheoryOutlineGenerationJob[]
   >([]);
   const [isUploadingTextbook, setIsUploadingTextbook] = useState(false);
+  const [isLoadingGenerationState, setIsLoadingGenerationState] = useState(true);
   const [isStartingGeneration, setIsStartingGeneration] = useState(false);
   const [outlinePage, setOutlinePage] = useState(1);
   const currentLevel =
     theoryLevels.find((item) => item.value === level) ?? theoryLevels[1];
-  const displayRows =
-    weightSnapshot?.items ??
+  const weightScopes = weightSnapshot?.scopes ?? [];
+  const directionTabs = weightScopes.some((scope) => scope.directionId)
+    ? weightScopes.map((scope) => ({ id: scope.directionId!, name: scope.directionName }))
+    : (profession.directions ?? []).map((direction) => ({ id: direction.id, name: direction.name }));
+  const selectedWeightScope = weightScopes.find((scope) => scope.directionId === (weightDirectionId || directionTabs[0]?.id));
+  const displayRows: TheoryWeightItem[] = directionTabs.length
+    ? selectedWeightScope?.items ?? []
+    : weightSnapshot?.items ??
     theoryWeightRows.map((row) => ({
       category: row.category,
       name: row.item,
@@ -327,6 +345,11 @@ function TheoryCompilationWorkspace({
         ]),
       ),
     }));
+  const weightTotals = Object.fromEntries(theoryLevels.map((weightLevel) => [
+    weightLevel.value, displayRows.some((row) => row.weights[weightLevel.value] !== null)
+      ? displayRows.reduce((sum, row) => sum + (row.weights[weightLevel.value] ?? 0), 0)
+      : null,
+  ]));
   const categorySpans = displayRows.reduce<Record<string, number>>(
     (result, row) => {
       result[row.category] = (result[row.category] ?? 0) + 1;
@@ -334,6 +357,12 @@ function TheoryCompilationWorkspace({
     },
     {},
   );
+
+  useEffect(() => {
+    const ids = weightSnapshot?.scopes?.filter((scope) => scope.directionId).map((scope) => scope.directionId!) ??
+      (profession.directions ?? []).map((direction) => direction.id);
+    setWeightDirectionId((current) => ids.includes(current) ? current : ids[0] ?? "");
+  }, [weightSnapshot, profession.directions]);
 
   useEffect(() => {
     let active = true;
@@ -407,6 +436,7 @@ function TheoryCompilationWorkspace({
   const refreshGenerationState = useCallback(async () => {
     const response = await fetch(
       `/api/v1/authoring/occupations/${profession.id}/theory-outline-generation?levelCode=${encodeURIComponent(level)}`,
+      { cache: "no-store" },
     );
     const body = (await response.json()) as {
       data?: { textbooks: Textbook[]; jobs: TheoryOutlineGenerationJob[] };
@@ -422,6 +452,7 @@ function TheoryCompilationWorkspace({
 
   useEffect(() => {
     let active = true;
+    setIsLoadingGenerationState(true);
     void refreshGenerationState()
       .catch((error: unknown) => {
         if (active) {
@@ -429,6 +460,9 @@ function TheoryCompilationWorkspace({
             error instanceof Error ? error.message : "教材与生成任务加载失败。",
           );
         }
+      })
+      .finally(() => {
+        if (active) setIsLoadingGenerationState(false);
       });
     return () => {
       active = false;
@@ -440,7 +474,7 @@ function TheoryCompilationWorkspace({
   }, [level, outlineSnapshot?.versionId]);
 
   async function importWeightTable() {
-    if (!pendingWeightFile && !sourceVersionId) return;
+    if (isImportingWeights || (!pendingWeightFile && !sourceVersionId)) return;
     setWeightError("");
     setIsImportingWeights(true);
     try {
@@ -505,7 +539,7 @@ function TheoryCompilationWorkspace({
   }
 
   async function uploadTextbook() {
-    if (!pendingTextbook) return;
+    if (!pendingTextbook || isUploadingTextbook) return;
     setOutlineError("");
     setIsUploadingTextbook(true);
     try {
@@ -528,6 +562,7 @@ function TheoryCompilationWorkspace({
   }
 
   async function startOutlineGeneration() {
+    if (isStartingGeneration || isUploadingTextbook || isLoadingGenerationState || (textbookMode === "textbook" && pendingTextbook)) return;
     setOutlineError("");
     setIsStartingGeneration(true);
     try {
@@ -625,17 +660,40 @@ function TheoryCompilationWorkspace({
               setWeightError("");
               setIsWeightImportOpen(true);
             }}
+            disabled={isImportingWeights}
             type="button"
           >
             ▣ 上传文件读取权重表
           </button>
         </div>
+        {directionTabs.length ? (
+          <div aria-label="职业方向权重" className="flex flex-wrap gap-2 border-b border-[#e8ecf3] px-8 py-3" role="tablist">
+            {directionTabs.map((direction) => (
+              <button
+                aria-selected={direction.id === weightDirectionId}
+                aria-controls={`theory-weight-panel-${profession.id}`}
+                className={`rounded-lg border px-4 py-2 text-sm font-medium ${direction.id === weightDirectionId
+                  ? "border-[#3f60e8] bg-[#3f60e8] text-white"
+                  : "border-[#d9e2ef] bg-white text-[#536178] hover:border-[#8ca6ee]"}`}
+                id={`theory-weight-tab-${direction.id}`}
+                key={direction.id}
+                onClick={() => setWeightDirectionId(direction.id)}
+                role="tab"
+                type="button"
+              >
+                {direction.name}
+              </button>
+            ))}
+          </div>
+        ) : null}
         <p className="m-0 bg-[#f2f6ff] px-8 py-3 text-sm text-[#55729a]">
           {isLoadingWeights
             ? "正在读取当前职业的理论知识权重表与可用职业标准..."
             : weightSnapshot
               ? `当前为第 ${weightSnapshot.versionNo} 版，来源：${weightSnapshot.sourceName}${weightSnapshot.usedOcr ? "（已完成 OCR）" : ""}。导入新标准将创建新版本并全量替换当前项目。`
-              : `【离线示例数据 · 非国家职业标准原文】${profession.name}理论知识权重表示例，仅界面体验；上传并成功识别职业国家职业标准后，自动以真实数据替换。`}
+              : directionTabs.length
+                ? "请上传完整国家职业标准，按已配置职业方向匹配权重并保存工作要求层级。"
+                : `【离线示例数据 · 非国家职业标准原文】${profession.name}理论知识权重表示例，仅界面体验；上传并成功识别职业国家职业标准后，自动以真实数据替换。`}
         </p>
         {weightFileName ? (
           <p className="m-0 border-b border-[#e8ecf3] px-8 py-3 text-sm text-[#25886a]">
@@ -648,7 +706,8 @@ function TheoryCompilationWorkspace({
             {weightError}
           </p>
         ) : null}
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto" id={`theory-weight-panel-${profession.id}`} role={directionTabs.length ? "tabpanel" : undefined}
+          aria-labelledby={directionTabs.length && weightDirectionId ? `theory-weight-tab-${weightDirectionId}` : undefined}>
           <table className="min-w-[1000px] w-full border-collapse text-center text-sm">
             <thead className="bg-[#fafbfe] text-[#8a98ae]">
               <tr>
@@ -662,6 +721,11 @@ function TheoryCompilationWorkspace({
               </tr>
             </thead>
             <tbody className="text-[#344157]">
+              {!displayRows.length ? (
+                <tr><td className="px-6 py-10 text-[#8a98ae]" colSpan={7}>
+                  {isLoadingWeights ? "正在读取权重..." : "该方向暂无匹配权重，请重新上传包含该职业方向的完整标准。"}
+                </td></tr>
+              ) : null}
               {displayRows.map((row, index) => (
                 <tr
                   className="border-t border-[#e8ecf3]"
@@ -693,7 +757,7 @@ function TheoryCompilationWorkspace({
                 </td>
                 {theoryLevels.map((item) => (
                   <td className="px-5 py-4" key={item.value}>
-                    100%
+                    {weightTotals[item.value] === null ? "—" : `${weightTotals[item.value]}%`}
                   </td>
                 ))}
               </tr>
@@ -709,14 +773,25 @@ function TheoryCompilationWorkspace({
               第二步 · 理论知识考评要素细目表
             </h2>
             <p className="m-0 mt-2 text-sm text-[#6f7f96]">
-              沿用理论知识权重表，选择是否有教材后生成完整细目表。
+              选择是否有教材后生成完整细目表。
             </p>
           </div>
         </div>
         <div className="space-y-5 px-8 py-6">
           <p className="m-0 text-sm text-[#607694]">
-            一次生成五级、四级、三级、二级、一级的完整细目表；下方 Tab 用于切换查看。
+            本次仅生成五级、四级、三级的完整细目表；下方 Tab 用于切换查看。
           </p>
+            {textbookMode === "textbook" ? (
+              <p className="m-0 text-sm text-[#607694]">
+                基本要求：每条已存储教材章节生成 2 个考评点，三个等级共用。
+                相关知识要求：对应等级职业标准每个三级条目生成 2 个考评点，不使用教材；总数按实际章节和条目计算。
+              </p>
+            ) : (
+              <p className="m-0 text-sm text-[#607694]">
+                从职业标准提取基本要求／基本知识／基本信息／基础知识，每个编号末级条目生成 2 个公共考评点，三个等级共用。
+                再按对应等级的相关知识要求，每个三级条目生成 2 个考评点；不读取教材，不限制每级 200 个。
+              </p>
+            )}
           <div className="flex flex-wrap items-center gap-7 text-sm text-[#536178]">
             <label className="flex cursor-pointer items-center gap-2">
               <input
@@ -735,13 +810,18 @@ function TheoryCompilationWorkspace({
               无教材
             </label>
           </div>
-          {textbookMode === "textbook" ? (
-            <div className="flex flex-wrap items-center gap-3">
+          {textbookMode === "textbook" && !isLoadingGenerationState ? (
+            <details open={!textbooks.length}>
+              <summary className="cursor-pointer text-sm text-[#3f60e8]">
+                {textbooks.length ? "更新教材（可选）" : "首次上传教材"}
+              </summary>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
               <label className="cursor-pointer rounded-lg border border-[#d5e0ef] bg-white px-4 py-2.5 text-sm font-medium text-[#4e6484] hover:border-[#8daaf1]">
                 上传教材
                 <input
                   accept=".pdf,.docx,.txt"
                   className="sr-only"
+                  disabled={isUploadingTextbook || isStartingGeneration || Boolean(activeGeneration)}
                   onChange={(event) =>
                     setPendingTextbook(event.target.files?.[0] ?? null)
                   }
@@ -760,10 +840,15 @@ function TheoryCompilationWorkspace({
                 {isUploadingTextbook ? "教材解析中..." : "确认上传"}
               </button>
             </div>
+            </details>
           ) : null}
-          {textbooks.length ? (
+          {textbookMode === "textbook" && isLoadingGenerationState ? (
+            <p className="m-0 text-sm text-[#7b8da7]">正在读取最新教材...</p>
+          ) : null}
+          {textbookMode === "textbook" && textbooks.length ? (
             <div className="rounded-lg bg-[#f7f9fd] px-4 py-3 text-sm text-[#526b91]">
               最新教材：{textbooks[0].originalName}，已拆分 {textbooks[0].chapterCount} 个章/节。
+              {textbookMode === "textbook" ? <span> 生成时自动使用，无需重复上传。</span> : null}
               <a
                 className="ml-3 text-[#3f60e8] underline"
                 href={`/api/v1/authoring/sources/${textbooks[0].sourceId}/content?mode=download`}
@@ -792,20 +877,30 @@ function TheoryCompilationWorkspace({
           ) : null}
           <button
             className="rounded-lg bg-[#3f60e8] px-5 py-3 text-sm font-medium text-white shadow-[0_8px_16px_rgba(63,96,232,0.18)] transition hover:bg-[#3354d8] disabled:cursor-not-allowed disabled:bg-[#aab8eb]"
-            disabled={Boolean(activeGeneration) || isStartingGeneration || (textbookMode === "textbook" && !textbooks.length)}
+            disabled={weightScopes.length > 1 || Boolean(activeGeneration) || isStartingGeneration || isLoadingGenerationState || isUploadingTextbook || (textbookMode === "textbook" && (Boolean(pendingTextbook) || !textbooks.length))}
             onClick={() => void startOutlineGeneration()}
             type="button"
           >
             {activeGeneration
-              ? "正在生成全部等级细目表..."
-              : textbookMode === "model"
-                ? "AI大模型生成"
-                : "生成细目表"}
+              ? "正在生成五级、四级、三级细目表..."
+              : isStartingGeneration
+                ? "创建任务中..."
+                : textbookMode === "model"
+                  ? "AI大模型生成"
+                  : "生成细目表"}
           </button>
+          {textbookMode === "textbook" && pendingTextbook ? (
+            <p className="m-0 text-sm text-[#607694]">请先确认上传所选教材，解析完成后即可生成。</p>
+          ) : null}
+          {weightScopes.length > 1 ? (
+            <p className="m-0 text-sm text-[#607694]">
+              权重已按职业方向分别保存。当前细目表生成仅支持职业级，多方向细目表需后续按方向分别接入。
+            </p>
+          ) : null}
           {activeGeneration ? (
             <div className="max-w-[620px]">
               <div className="flex justify-between text-sm text-[#526b91]">
-                <span>正在按章节和权重分批生成考评点（批次）</span>
+                  <span>{activeGeneration.mode === "textbook" ? "正在按教材章节和标准三级条目生成考评点（批次）" : "正在按标准公共基本条目和分等级知识要求生成考评点（批次）"}</span>
                 <span>{activeGeneration.completedBatches} / {activeGeneration.totalBatches || "?"} 批</span>
               </div>
               <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#e5ebf6]">
@@ -817,7 +912,7 @@ function TheoryCompilationWorkspace({
             </div>
           ) : null}
           <div className="flex flex-wrap gap-2 border-t border-[#e8ecf3] pt-5">
-            {theoryLevels.map((item) => (
+            {theoryLevels.filter((item) => isTheoryOutlineGenerationLevel(item.value)).map((item) => (
               <button
                 className={`rounded-lg border px-4 py-2 text-sm font-medium ${
                   level === item.value
@@ -887,7 +982,10 @@ function TheoryCompilationWorkspace({
                     <td className="px-5 py-4 font-semibold text-[#294f99]">{point.primaryWeight ?? "—"}</td>
                     <td className="px-5 py-4">{point.secondaryName}<small className="block text-[#7587a1]">{point.secondaryNo}</small></td>
                     <td className="px-5 py-4 font-semibold text-[#294f99]">{point.secondaryWeight ?? "—"}</td>
-                    <td className="px-5 py-4">{point.tertiaryName}<small className="block text-[#7587a1]">{point.tertiaryNo}</small></td>
+                    <td className="px-5 py-4">
+                      {point.tertiaryName}<small className="block text-[#7587a1]">{point.tertiaryNo}</small>
+                      {point.remark ? <small className="mt-1 block text-amber-700">{point.remark}</small> : null}
+                    </td>
                     <td className="px-5 py-4 font-semibold text-[#294f99]">{point.tertiaryWeight ?? "—"}</td>
                     <td className="px-5 py-4 font-medium text-[#3f60e8]">
                       {point.code}
@@ -1015,6 +1113,7 @@ function TheoryCompilationWorkspace({
                 aria-label="关闭"
                 className="grid h-9 w-9 place-items-center rounded-lg border-0 bg-transparent text-[30px] font-light leading-none text-[#718098] hover:bg-[#f5f7fb]"
                 onClick={() => setIsWeightImportOpen(false)}
+                disabled={isImportingWeights}
                 type="button"
               >
                 ×
@@ -1027,7 +1126,7 @@ function TheoryCompilationWorkspace({
                   直接上传国家职业标准（PDF / DOCX / TXT）
                 </h3>
                 <p className="m-0 mt-1">
-                  本地选择文件后自动提取理论知识权重表，并展示只读识别结果。
+                  本地选择文件后按职业方向匹配权重表，同时保存各等级的职业功能、工作内容和技能要求。
                 </p>
                 <label className="mt-3 inline-flex cursor-pointer items-center gap-3 text-base text-[#293242]">
                   <span className="rounded border border-[#8e98a9] bg-[#f6f7f9] px-2 py-0.5">
@@ -1037,6 +1136,7 @@ function TheoryCompilationWorkspace({
                   <input
                     accept=".pdf,.docx,.txt"
                     className="sr-only"
+                    disabled={isImportingWeights}
                     onChange={(event) => {
                       setPendingWeightFile(event.target.files?.[0] ?? null);
                       setSourceVersionId("");
@@ -1062,6 +1162,7 @@ function TheoryCompilationWorkspace({
                   <span>国家职业标准文件</span>
                   <select
                     className="h-12 min-w-[230px] rounded-lg border border-[#d8e1ee] bg-white px-3 text-[#526a90] outline-none"
+                    disabled={isImportingWeights}
                     onChange={(event) => {
                       setSourceVersionId(event.target.value);
                       setPendingWeightFile(null);
@@ -1088,13 +1189,11 @@ function TheoryCompilationWorkspace({
                   第二步 · 识别与核对
                 </h3>
                 <p className="m-0 mt-1">
-                  点击“识别权重表”后展示结构化结果，校验后确认保存（不允许人工修改）。扫描件需先完成
-                  OCR；无法识别时不会编造权重。
+                  点击“识别权重表”后匹配职业方向，并同步提取工作要求层级；全部校验通过后保存新版本。无法识别时不会覆盖已有数据。
                 </p>
                 <p className="m-0 mt-1 text-sm text-[#8491a4]">
                   说明：PDF 优先提取原文字层；扫描件会调用
-                  OCR。系统仅在识别出完整的五等级权重且每级合计为 100%
-                  时创建新版本。
+                  OCR。各职业方向的适用等级权重须合计为 100%，技能要求层级须完整。
                 </p>
               </div>
               {weightError ? (
@@ -1106,6 +1205,7 @@ function TheoryCompilationWorkspace({
               <button
                 className="rounded-lg border border-[#dce3ee] bg-white px-6 py-3 text-base text-[#536178] hover:border-[#aabcf5] hover:text-[#3f60e8]"
                 onClick={() => setIsWeightImportOpen(false)}
+                disabled={isImportingWeights}
                 type="button"
               >
                 取消
@@ -1137,6 +1237,8 @@ function SkillCompilationWorkspace({
 }>) {
   const [level, setLevel] = useState("level_4");
   const [importedStandard, setImportedStandard] = useState<ImportedSkillStandard | null>(null);
+  const [isLoadingStandard, setIsLoadingStandard] = useState(true);
+  const [standardLoadError, setStandardLoadError] = useState("");
   const [skillWeightSnapshot, setSkillWeightSnapshot] =
     useState<SkillWeightSnapshot | null>(null);
   const [editableSkillWeights, setEditableSkillWeights] = useState<
@@ -1601,14 +1703,14 @@ function SkillCompilationWorkspace({
             </p>
           </div>
           <div className="flex items-center gap-3">
-          <SkillStandardUpload occupationId={profession.id} onChange={setImportedStandard} />
+          <SkillStandardUpload occupationId={profession.id} onChange={setImportedStandard} onLoadingChange={setIsLoadingStandard} onLoadError={setStandardLoadError} />
           </div>
         </div>
         <p className="m-0 bg-[#f2f6ff] px-8 py-3 text-sm text-[#55729a]">
           {importedStandard
             ? `当前为第 ${importedStandard.versionNo} 版，来源：${importedStandard.sourceName}。`
-            : isLoadingSkillWeights
-            ? "正在读取职业技能要求权重表..."
+            : isLoadingStandard || isLoadingSkillWeights
+            ? "正在读取本职业共用的国家职业标准..."
             : skillWeightSnapshot
               ? `当前为第 ${skillWeightSnapshot.versionNo} 版，来源：${skillWeightSnapshot.sourceName}。`
               : "尚未上传国家职业标准，可上传识别权重表和内容结构。"}
@@ -1740,7 +1842,7 @@ function SkillCompilationWorkspace({
               第三步 · 操作技能考评要素细目表
             </h2>
             <p className="m-0 mt-2 text-sm text-[#6f7f96]">
-              沿用国家职业标准和内容结构，选择有教材或无教材生成全部方向、等级细目表。
+              沿用国家职业标准和内容结构，选择有教材或无教材生成五级、四级、三级各适用方向细目表。
             </p>
             {blueprintApproval ? (
               <p className="m-0 mt-2 text-sm text-[#27805b]">
@@ -1754,7 +1856,7 @@ function SkillCompilationWorkspace({
               </p>
             ) : (
               <p className="m-0 mt-2 text-sm text-[#a5783d]">
-                当前版本尚未登记蓝图通过。
+                当前细目表尚未审定通过，职业标准确认与细目表审定分别进行。
               </p>
             )}
           </div>
@@ -1764,7 +1866,8 @@ function SkillCompilationWorkspace({
           occupationName={profession.name}
           level={level}
           onLevelChange={setLevel}
-          standardReady={!!importedStandard}
+          standardReady={isLoadingStandard ? null : !!importedStandard}
+          standardError={standardLoadError}
           onGenerated={refreshSkillPoints}
           refreshVersion={skillRefreshVersion}
           onEdit={(point) => {
@@ -2939,6 +3042,8 @@ function BlueprintPanel() {
     useState<Profession | null>(null);
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
+  const [directions, setDirections] = useState<DirectionDraft[]>([]);
+  const directionKey = useRef(0);
   const [formError, setFormError] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const filteredProfessions = professions.filter((profession) =>
@@ -2987,6 +3092,7 @@ function BlueprintPanel() {
   function openCreateModal() {
     setName("");
     setCode("");
+    setDirections([{ key: `new-${++directionKey.current}`, name: "" }]);
     setFormError("");
     setEditingProfession(null);
     setIsCreateModalOpen(true);
@@ -2995,6 +3101,9 @@ function BlueprintPanel() {
   function openEditModal(profession: Profession) {
     setName(profession.name);
     setCode(profession.code);
+    setDirections(profession.directions?.length
+      ? profession.directions.map((direction) => ({ ...direction, key: direction.id }))
+      : [{ key: `new-${++directionKey.current}`, name: "" }]);
     setFormError("");
     setEditingProfession(profession);
     setIsCreateModalOpen(true);
@@ -3002,10 +3111,22 @@ function BlueprintPanel() {
 
   async function saveProfession(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (isSaving) return;
     setFormError("");
 
     if (!name.trim() || !code.trim()) {
       setFormError("请填写职业名称和职业代码。");
+      return;
+    }
+    const submittedDirections = directions.every((direction) => !direction.id && !direction.name.trim())
+      ? []
+      : directions.map((direction) => ({ id: direction.id, name: direction.name.trim() }));
+    if (submittedDirections.some((direction) => !direction.name)) {
+      setFormError("请填写职业方向名称，或移除空白方向。");
+      return;
+    }
+    if (new Set(submittedDirections.map((direction) => direction.name.toLowerCase())).size !== submittedDirections.length) {
+      setFormError("职业方向名称不能重复。");
       return;
     }
 
@@ -3018,7 +3139,7 @@ function BlueprintPanel() {
         {
           method: editingProfession ? "PUT" : "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name, code }),
+          body: JSON.stringify({ name, code, directions: submittedDirections }),
         },
       );
       const body = (await response.json()) as {
@@ -3236,7 +3357,7 @@ function BlueprintPanel() {
           aria-labelledby="profession-editor-title"
         >
           <form
-            className="w-full max-w-[812px] overflow-hidden rounded-[20px] bg-white shadow-[0_22px_55px_rgba(29,42,59,0.24)]"
+            className="flex max-h-[90vh] w-full max-w-[812px] flex-col overflow-hidden rounded-[20px] bg-white shadow-[0_22px_55px_rgba(29,42,59,0.24)]"
             onSubmit={saveProfession}
           >
             <div className="flex items-center justify-between border-b border-[#e5e9f0] px-9 py-7">
@@ -3250,18 +3371,20 @@ function BlueprintPanel() {
                 aria-label="关闭"
                 className="grid h-9 w-9 place-items-center rounded-lg border-0 bg-transparent text-[30px] font-light leading-none text-[#718098] hover:bg-[#f5f7fb]"
                 onClick={() => setIsCreateModalOpen(false)}
+                disabled={isSaving}
                 type="button"
               >
                 ×
               </button>
             </div>
-            <div className="grid gap-5 px-9 py-8 sm:grid-cols-2">
+            <div className="grid gap-5 overflow-y-auto px-9 py-8 sm:grid-cols-2">
               <label className="block text-base text-[#71809a]">
                 职业名称
                 <input
                   autoFocus
                   className="mt-2 block h-14 w-full rounded-lg border border-[#d8e1ee] px-4 text-base text-[#293242] outline-none transition focus:border-[#7691ee] focus:ring-2 focus:ring-[#e8eeff]"
                   maxLength={200}
+                  disabled={isSaving}
                   onChange={(event) => setName(event.target.value)}
                   value={name}
                 />
@@ -3271,10 +3394,60 @@ function BlueprintPanel() {
                 <input
                   className="mt-2 block h-14 w-full rounded-lg border border-[#d8e1ee] px-4 text-base text-[#293242] outline-none transition focus:border-[#7691ee] focus:ring-2 focus:ring-[#e8eeff]"
                   maxLength={64}
+                  disabled={isSaving}
                   onChange={(event) => setCode(event.target.value)}
                   value={code}
                 />
               </label>
+              <div className="min-w-0 sm:col-span-2">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-base text-[#71809a]">职业方向</span>
+                  <button
+                    className="rounded-lg border border-[#dce3ee] px-3 py-2 text-sm text-[#3f60e8] disabled:opacity-50"
+                    disabled={isSaving}
+                    onClick={() => {
+                      const direction = { key: `new-${++directionKey.current}`, name: "" };
+                      setDirections((current) => [...current, direction]);
+                    }}
+                    type="button"
+                  >
+                    添加方向
+                  </button>
+                </div>
+                <div className="grid gap-3">
+                  {directions.map((direction, index) => {
+                    const directionCode = direction.directionCode ?? formatDirectionCode(
+                      (editingProfession?.nextDirectionNumber ?? 1) +
+                      directions.slice(0, index).filter((item) => !item.id).length,
+                    );
+                    return (
+                      <div className="flex flex-wrap items-center gap-3" key={direction.key}>
+                        <input
+                          aria-label={`职业方向 ${index + 1}`}
+                          className="h-12 min-w-0 flex-1 rounded-lg border border-[#d8e1ee] px-4 text-base text-[#293242] outline-none focus:border-[#7691ee] focus:ring-2 focus:ring-[#e8eeff]"
+                          disabled={isSaving}
+                          maxLength={200}
+                          onChange={(event) => setDirections((current) => current.map((item) =>
+                            item.key === direction.key ? { ...item, name: event.target.value } : item))}
+                          value={direction.name}
+                        />
+                        <span className="max-w-full break-all text-sm text-[#71809a]" aria-label={`职业方向 ${index + 1} 编码`}>
+                          {code.trim() ? `${code.trim()}-${directionCode}` : directionCode}
+                        </span>
+                        <button
+                          aria-label={`移除职业方向 ${index + 1}`}
+                          className="rounded-lg px-2 py-2 text-sm text-[#71809a] hover:text-[#c6474e] disabled:opacity-50"
+                          disabled={isSaving}
+                          onClick={() => setDirections((current) => current.filter((item) => item.key !== direction.key))}
+                          type="button"
+                        >
+                          移除
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
               <p className="m-0 sm:col-span-2 text-base text-[#748197]">
                 职业为权重表的管理单位，细目表按职业及技能等级分别编制。职业代码请按国家职业标准填写。
               </p>
@@ -3288,6 +3461,7 @@ function BlueprintPanel() {
               <button
                 className="rounded-lg border border-[#dce3ee] bg-white px-6 py-3 text-base text-[#536178] hover:border-[#aabcf5] hover:text-[#3f60e8]"
                 onClick={() => setIsCreateModalOpen(false)}
+                disabled={isSaving}
                 type="button"
               >
                 取消
@@ -4479,13 +4653,14 @@ type GeneratedPlan = {
   blueprintVersions: {
     outline: { id: string; versionNo: number } | null;
     weights: { id: string; versionNo: number } | null;
+    structure?: { id: string; versionNo: number };
   };
   validations: Array<{
     name: string;
     status: "passed" | "blocked";
     detail: string;
   }>;
-  temporaryMinimums: { single: number; multiple: number; judgement: number };
+  temporaryMinimums: { single: number; multiple: number; judgement: number; practical?: number };
   qualityRequirements: string[];
   points: Array<{
     code: string;
@@ -4493,6 +4668,7 @@ type GeneratedPlan = {
     single: number;
     multiple: number;
     judgement: number;
+    practical?: number;
     total: number;
   }>;
   minimumTotal: number;
@@ -4544,6 +4720,7 @@ type GeneratedQuestion = {
   options: Array<{ key: string; content: string }>;
   answers: string[];
   analysis: string;
+  scoreRubric?: unknown;
   autoCheck: "通过基础检查" | "需人工复核";
   status?: "draft" | "pending_review" | "returned" | "approved" | "archived";
 };
@@ -4817,7 +4994,7 @@ function AuthoringTaskPanel() {
   };
   const updatePlanPointQuota = (
     pointCode: string,
-    field: "single" | "multiple" | "judgement",
+    field: "single" | "multiple" | "judgement" | "practical",
     value: string,
   ) => {
     const quantity = Math.max(
@@ -4829,7 +5006,7 @@ function AuthoringTaskPanel() {
       const points = current.points.map((point) => {
         if (point.code !== pointCode) return point;
         const next = { ...point, [field]: quantity };
-        return { ...next, total: next.single + next.multiple + next.judgement };
+        return { ...next, total: next.single + next.multiple + next.judgement + (next.practical ?? 0) };
       });
       return {
         ...current,
@@ -5424,9 +5601,11 @@ function AuthoringTaskPanel() {
                 <thead className="bg-[#f4f7fc] text-sm font-medium text-[#7185a5]">
                   <tr>
                     <th className="px-5 py-4">考评点名称</th>
-                    <th className="px-5 py-4 text-center">单选题</th>
-                    <th className="px-5 py-4 text-center">多选题</th>
-                    <th className="px-5 py-4 text-center">判断题</th>
+                    {generatedPlan.assessmentMode === "操作技能" ? <th className="px-5 py-4 text-center">实操题</th> : <>
+                      <th className="px-5 py-4 text-center">单选题</th>
+                      <th className="px-5 py-4 text-center">多选题</th>
+                      <th className="px-5 py-4 text-center">判断题</th>
+                    </>}
                     <th className="px-5 py-4 text-center">合计</th>
                   </tr>
                 </thead>
@@ -5434,7 +5613,7 @@ function AuthoringTaskPanel() {
                   {generatedPlan.points.map((point) => (
                     <tr className="border-t border-[#e4eaf3]" key={point.code}>
                       <td className="px-5 py-4 text-[#34445d]">{point.name}</td>
-                      {(["single", "multiple", "judgement"] as const).map(
+                      {(generatedPlan.assessmentMode === "操作技能" ? ["practical"] as const : ["single", "multiple", "judgement"] as const).map(
                         (field) => (
                           <td className="px-5 py-3 text-center" key={field}>
                             <input
@@ -5450,7 +5629,7 @@ function AuthoringTaskPanel() {
                                 )
                               }
                               type="number"
-                              value={point[field]}
+                              value={point[field] ?? 0}
                             />
                           </td>
                         ),
@@ -5471,6 +5650,9 @@ function AuthoringTaskPanel() {
               : ""}
             {generatedPlan.blueprintVersions.weights
               ? ` 当前权重表版本：V${generatedPlan.blueprintVersions.weights.versionNo}。`
+              : ""}
+            {generatedPlan.blueprintVersions.structure
+              ? ` 当前内容结构版本：V${generatedPlan.blueprintVersions.structure.versionNo}。`
               : ""}
           </p>
           {executionError ? (
@@ -5633,10 +5815,11 @@ function AuthoringTaskPanel() {
                     </div>
                   ) : null}
                   <details className="mt-4 text-[#2e66dd]">
-                    <summary className="cursor-pointer">查看答案及解析</summary>
+                    <summary className="cursor-pointer">查看答案、解析及评分标准</summary>
                     <p className="m-0 mt-2 text-sm text-[#50627e]">
                       答案：{item.answers.join("、")}；解析：{item.analysis}
                     </p>
+                    <ScoreRubric value={item.scoreRubric} />
                   </details>
                   <label className="ml-5 text-sm text-[#7185a5]">
                     人工核查{" "}
@@ -5942,7 +6125,7 @@ function AuthoringTaskPanel() {
                 </p>
               ) : null}
               <p className="m-0 mt-6 text-[15px] text-[#7185a5]">
-                系统内置模板不可修改或删除；自定义模板可在“管理提示词”中维护。用户可调整填入的需求文本，职业、等级、题型和最低题量仍以系统规则校验为准。
+                系统内置模板不可修改或删除；自定义模板可在“管理提示词”中维护。用户可调整填入的需求文本，明确指定题量时按本次需求执行，未指定时使用默认配额；职业、等级与试题质量仍需通过系统校验。
               </p>
             </div>
           </div>

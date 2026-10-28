@@ -10,6 +10,7 @@ type QuestionRow = RowDataPacket & {
   content_json: string | { options?: Array<{ key: string; content: string }> };
   answer_json: string | { answers?: string[] };
   analysis_text: string | null;
+  score_rubric_json: unknown;
   point_name: string | null;
   current_status: string;
 };
@@ -19,7 +20,7 @@ export async function getPlanQuestionRows(planId: string) {
   // questions, and the outer query stays compatible with ONLY_FULL_GROUP_BY.
   return query<QuestionRow[]>(
     `SELECT q.id, q.question_no, q.question_type, q.current_status,
-            qv.stem, qv.content_json, qv.answer_json, qv.analysis_text,
+            qv.stem, qv.content_json, qv.answer_json, qv.analysis_text, qv.score_rubric_json,
             (SELECT MIN(bn.name)
                FROM question_assessment_points qap
                INNER JOIN blueprint_nodes bn ON bn.id = qap.blueprint_node_id

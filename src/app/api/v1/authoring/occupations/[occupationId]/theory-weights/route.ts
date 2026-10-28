@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getVerifiedSession } from "@/auth";
+import { ensureSharedOccupationStandard } from "@/modules/blueprints/shared-standard";
 import {
   getCurrentTheoryWeights,
   importTheoryWeights,
@@ -27,6 +28,7 @@ export async function GET(
   if (rejection) return rejection;
 
   try {
+    await ensureSharedOccupationStandard(params.occupationId, session!.user.id);
     const [current, standards] = await Promise.all([
       getCurrentTheoryWeights(params.occupationId),
       listOccupationStandards(params.occupationId)
@@ -36,7 +38,7 @@ export async function GET(
     if (error instanceof TheoryWeightImportError) {
       return NextResponse.json({ error: { code: "THEORY_WEIGHT_READ_FAILED", message: error.message } }, { status: 422 });
     }
-    throw error;
+    return NextResponse.json({ error: { code: "STANDARD_SYNC_FAILED", message: error instanceof Error ? error.message : "职业标准同步失败。" } }, { status: 422 });
   }
 }
 

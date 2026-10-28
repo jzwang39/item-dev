@@ -6,6 +6,8 @@ import { getVerifiedSession } from "@/auth";
 import { withTransaction } from "@/shared/database/mysql";
 import { createUlid } from "@/shared/database/ulid";
 import { assertQuestionConfirmed } from "@/modules/authoring/question-confirmation";
+import { bulkQuestionConfirmSchema, bulkQuestionReviewSchema } from "@/modules/authoring/bulk-question-review";
+import { confirmQuestionBatch } from "@/modules/authoring/bulk-question-confirmation";
 
 const schema = z.object({
   assignmentId: z.string().length(26).nullish(), questionId: z.string().length(26),
@@ -22,15 +24,42 @@ const decode = (value: unknown): Record<string, unknown> => typeof value === "st
 export async function POST(request: Request) {
   const session = await getVerifiedSession();
   if (!session?.user?.id) return NextResponse.json({ error: { message: "登录已失效。" } }, { status: 401 });
-  const parsed = schema.safeParse(await request.json());
+  const body = await request.json();
+  if (body?.action === "bulk_confirm") {
+    if (session.user.role !== "admin") return NextResponse.json({ error: { message: "仅管理员可批量确认试题。" } }, { status: 403 });
+    const confirmation = bulkQuestionConfirmSchema.safeParse(body);
+    if (!confirmation.success) return NextResponse.json({ error: { message: confirmation.error.issues[0]?.message ?? "批量确认参数无效。" } }, { status: 400 });
+    try {
+      const data = await withTransaction((db) => confirmQuestionBatch(
+        db, confirmation.data.questions, session.user.id, confirmation.data.opinion,
+      ));
+      return NextResponse.json({ data });
+    } catch (error) {
+      return NextResponse.json({ error: { message: error instanceof Error ? error.message : "批量确认失败。" } }, { status: 422 });
+    }
+  }
+  const bulk = body?.action === "bulk_approve";
+  if (bulk && session.user.role !== "admin") return NextResponse.json({ error: { message: "仅管理员可批量审核试题。" } }, { status: 403 });
+  const batch = bulk ? bulkQuestionReviewSchema.safeParse(body) : null;
+  if (batch && !batch.success) return NextResponse.json({ error: { message: batch.error.issues[0]?.message ?? "批量审核参数无效。" } }, { status: 400 });
+  const parsed = schema.safeParse(bulk && batch?.success
+    ? { ...batch.data.questions[0], action: "review", opinion: batch.data.opinion, decision: "approved" }
+    : body);
   if (!parsed.success) return NextResponse.json({ error: { message: "请完整填写题目及审定意见。" } }, { status: 400 });
   const input = parsed.data;
   const expert = session.user.role === "expert";
   if (expert && input.action === "confirm") return NextResponse.json({ error: { message: "仅管理员可确认入库。" } }, { status: 403 });
   if (expert && input.action !== "revise") return NextResponse.json({ error: { message: "请通过专家审核入口提交审定结论。" } }, { status: 403 });
   if (!expert && input.action === "revise") return NextResponse.json({ error: { message: "管理员请使用修订并审定。" } }, { status: 403 });
+  const inputs: z.infer<typeof schema>[] = bulk && batch?.success
+    ? batch.data.questions.map((question) => ({ ...question, action: "review" as const, decision: "approved" as const, opinion: batch.data.opinion }))
+      .sort((a, b) => a.questionId.localeCompare(b.questionId))
+    : [input];
   try {
     const data = await withTransaction(async (db) => {
+      const results: Array<{ current_version_id: string; current_status: string }> = [];
+      for (const originalInput of inputs) {
+      let input = originalInput;
       const [rows] = await db.execute<(RowDataPacket & {
         project_id: string; current_status: string; current_version_id: string; question_type: string;
         expert_id: string | null; reviewer_role: string | null; assignment_status: string | null; assignment_id: string | null; stem: string; content_json: unknown;
@@ -40,12 +69,25 @@ export async function POST(request: Request) {
           v.stem,v.content_json,v.answer_json,v.analysis_text,v.version_no,v.source_snapshot_json,v.score_rubric_json
          FROM questions q JOIN question_versions v ON v.id=q.current_version_id
          LEFT JOIN review_assignments ra ON ra.id=(SELECT latest.id FROM review_assignments latest
-           WHERE latest.question_id=q.id AND latest.question_version_id=v.id ORDER BY latest.assigned_at DESC,latest.id DESC LIMIT 1)
+           WHERE latest.question_id=q.id AND latest.question_version_id=v.id
+           ORDER BY (latest.status='assigned') DESC,latest.assigned_at DESC,latest.id DESC LIMIT 1)
          LEFT JOIN accounts reviewer ON reviewer.id=ra.expert_id
          WHERE q.id=? AND q.archived_at IS NULL FOR UPDATE`, [input.questionId],
       );
       const row = rows[0];
       if (!row || row.current_version_id !== input.versionId) throw new Error("试题或审定版本已变化，请刷新后重试。");
+      // Bulk approval uses the locked current content, never client-supplied edits.
+      if (bulk) {
+        input = {
+          ...input, stem: row.stem,
+          options: (decode(row.content_json).options ?? []) as z.infer<typeof schema>["options"],
+          answers: decode(row.answer_json).answers as string[],
+          analysis: row.analysis_text,
+        };
+        const validated = schema.safeParse(input);
+        if (!validated.success) throw new Error("所选试题内容不完整，请先编辑修订后再审核。");
+        input = validated.data;
+      }
       if (expert && (row.expert_id !== session.user.id || row.assignment_id !== input.assignmentId ||
           !["assigned", "submitted"].includes(row.assignment_status ?? ""))) throw new Error("仅能修订本人当前分配的试题。");
       if (input.action === "confirm" || input.action === "store") {
@@ -127,7 +169,9 @@ export async function POST(request: Request) {
       await db.execute("INSERT INTO audit_logs(id,project_id,actor_id,action,object_type,object_id,before_json,after_json,result) VALUES(?,?,?,?,'question',?,?,?,'success')",
         [createUlid(), row.project_id, session.user.id, expert ? "review.expert_revision" : "review.admin_action", input.questionId, JSON.stringify({ versionId: row.current_version_id, status: row.current_status }),
           JSON.stringify({ ...input, actingRole: session.user.role, assignedExpertId: row.expert_id, actualActorId: session.user.id, ...current[0] })]);
-      return current[0];
+      results.push(current[0]);
+      }
+      return bulk ? { reviewed: results.length, results } : results[0];
     });
     return NextResponse.json({ data });
   } catch (error) {

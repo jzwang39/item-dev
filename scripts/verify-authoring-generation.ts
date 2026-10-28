@@ -33,6 +33,7 @@ async function main() {
       .replace(/CONSTRAINT \w+/g, () => `CONSTRAINT ${prefix}c${++constraint}`);
     await rawQuery(migration);
     await rawQuery(rewrite(await readFile(join(process.cwd(), "database/migrations/0010_authoring_mixed_requests.sql"), "utf8")));
+    await rawQuery(rewrite(await readFile(join(process.cwd(), "database/migrations/0017_skill_question_generation.sql"), "utf8")));
     const execute = admin.execute.bind(admin);
     admin.execute = ((sql: string, values?: Parameters<typeof admin.execute>[1]) => execute(rewrite(sql), values)) as typeof admin.execute;
     process.env.AUTHORING_GENERATION_WORKER_DISABLED = "1";
@@ -203,6 +204,84 @@ async function main() {
     assert.equal(withoutPoint[0].point_name, null);
     await startGeneration(planId, actorId);
     assert.equal(await runGenerationTick(), false);
+    const { loadSkillPlanBasis } = await import("../src/modules/authoring/skill-plan");
+    const skillPlanId = createUlid();
+    const skillVersions = { outline: { id: createUlid(), versionNo: 1 }, weights: { id: createUlid(), versionNo: 1 }, structure: { id: createUlid(), versionNo: 1 } };
+    const skillStructure = { totalMinutes: null, standardScopes: [{
+      column: { levelCode: "level_4", direction: "通用" },
+      rows: [{ name: "资料准备", score: 100, minutes: null, selection: null, method: null }],
+    }] };
+    for (const [kind, version, snapshot] of [
+      ["skill_outline", skillVersions.outline, {}],
+      ["theory_weight", skillVersions.weights, { items: [{ weights: { level_4: 100 } }] }],
+      ["skill_structure", skillVersions.structure, skillStructure],
+    ] as const) {
+      const blueprintId = createUlid();
+      await admin.execute("INSERT INTO blueprints(id,project_id,name,blueprint_kind,occupation_id,level_code,assessment_mode) VALUES(?,?,'技能验证',?,?,'level_4','skill')", [blueprintId, projectId, kind, occupationId]);
+      await admin.execute("INSERT INTO blueprint_versions(id,blueprint_id,version_no,snapshot_json) VALUES(?,?,1,?)", [version.id, blueprintId, JSON.stringify(snapshot)]);
+      await admin.execute("UPDATE blueprints SET current_version_id=? WHERE id=?", [version.id, blueprintId]);
+    }
+    const skillPoints = ["skill_requirement", "work_content", "occupational_function"].map((kind, index) => ({
+      code: `SK-${index}`, name: `资料准备${index}`, single: 0, multiple: 0, judgement: 0, practical: 2, total: 2, kind,
+    }));
+    const skillNodeIds: string[] = [];
+    for (const [index, point] of skillPoints.entries()) {
+      const nodeId = createUlid(); skillNodeIds.push(nodeId);
+      await admin.execute("INSERT INTO blueprint_nodes(id,blueprint_version_id,node_kind,node_code,name,ordinal,requirement_json,source_ref_json) VALUES(?,?,'assessment_point',?,?,?,?,'{}')",
+        [nodeId, skillVersions.outline.id, point.code, point.name, index + 1, JSON.stringify({
+          direction: "通用", level2Name: "资料准备", standardText: "真实技能原文依据",
+          sourceStandardRequirement: { nodeKind: point.kind, functionName: "资料准备", evidence: "真实技能原文依据" },
+        })]);
+    }
+    const skillScope = { occupationId, occupation: "测试职业", levelCode: "level_4" as const, assessmentMode: "操作技能" as const, blueprintVersions: skillVersions };
+    await admin.execute("INSERT INTO authoring_plans(id,project_id,name,raw_requirement,scope_json,quota_json,status,created_by) VALUES(?,?,'技能隔离验证','每鉴定点2道实操题',?,?,'confirmed',?)",
+      [skillPlanId, projectId, JSON.stringify(skillScope), JSON.stringify({ points: skillPoints, qualityRequirements: [] }), actorId]);
+    await assert.rejects(() => startGeneration(skillPlanId, actorId), /尚未全部审核/);
+    for (const nodeId of skillNodeIds) await admin.execute("INSERT INTO outline_point_reviews(node_id,status) VALUES(?,'confirmed')", [nodeId]);
+    const validationConnection = await pool.getConnection();
+    try {
+      const basis = await loadSkillPlanBasis(validationConnection, occupationId, "level_4");
+      assert.equal(basis.needsReview, true, "Missing times must remain pending verification, not be fabricated.");
+      assert.equal(basis.nodes.length, 3);
+      await assert.rejects(() => loadSkillPlanBasis(validationConnection, occupationId, "level_3"), /尚无可用/);
+      await assert.rejects(() => loadSkillPlanBasis(validationConnection, occupationId, "level_4", { ...skillVersions, structure: { id: createUlid(), versionNo: 1 } }), /内容结构表/);
+    } finally { validationConnection.release(); }
+    const skillCalls = new Map<string, number>();
+    globalThis.fetch = async (_, init) => {
+      const body = JSON.parse(String(init?.body));
+      assert.match(body.messages[0].content, /实操题/);
+      const prompt = JSON.parse(body.messages[1].content);
+      assert.equal(prompt.冻结内容结构.totalMinutes, null);
+      const code = prompt.鉴定点.code;
+      const attempt = (skillCalls.get(code) ?? 0) + 1; skillCalls.set(code, attempt);
+      const count = code === "SK-0" && attempt === 1 ? 1 : prompt.本次实操题数;
+      const questions = Array.from({ length: count }, (_, index) => ({
+        assessmentPointCode: code, questionType: "practical", options: [],
+        stem: `请依据模拟资料完成${code}第${attempt}次第${index + 1}项宣传资料准备任务，提交分类清单和完整成果。`,
+        answers: ["核对模拟资料的内容和完整性。", "整理资料并提交分类清单。"], analysis: "根据技能原文要求评价准备工作的成果。",
+        scoreRubric: { totalScore: 100, criteria: [{ item: "核对与准备", score: 100, standard: "资料完整，分类清晰，成果与题设要求一致。" }] },
+      }));
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ questions }) } }] });
+    };
+    const skillStarted = await startGeneration(skillPlanId, actorId);
+    assert.equal(skillStarted.job?.target, 6);
+    assert.equal((await startGeneration(skillPlanId, actorId)).jobId, skillStarted.jobId);
+    for (let iteration = 0; iteration < 10; iteration++) {
+      await admin.execute("UPDATE authoring_generation_units SET next_attempt_at=UTC_TIMESTAMP(3) WHERE job_id=? AND status='queued'", [skillStarted.jobId]);
+      if (!await runGenerationTick()) break;
+    }
+    assert.equal((await getGenerationState(skillPlanId)).job?.generated, 6);
+    assert.equal(skillCalls.get("SK-0"), 2, "Only the missing practical slot should be retried.");
+    const skillResults = await getPlanQuestionRows(skillPlanId);
+    assert.ok(skillResults.every((row) => row.question_type === "实操题" && row.current_status === "pending_review"));
+    assert.ok(skillResults.every((row) => !!row.score_rubric_json));
+    const [skillSaved] = await admin.execute<(RowDataPacket & { assessment_mode: string; source_snapshot_json: unknown; score_rubric_json: unknown })[]>(
+      "SELECT q.assessment_mode,v.source_snapshot_json,v.score_rubric_json FROM questions q JOIN question_versions v ON v.id=q.current_version_id WHERE q.id=?", [skillResults[0].id]);
+    assert.equal(skillSaved[0].assessment_mode, "skill");
+    const savedSource = typeof skillSaved[0].source_snapshot_json === "string" ? JSON.parse(skillSaved[0].source_snapshot_json) : skillSaved[0].source_snapshot_json;
+    assert.equal(savedSource.structureVersionId, skillVersions.structure.id);
+    assert.equal(savedSource.skillContext.point.sourceStandardRequirement.nodeKind, "skill_requirement");
+    console.info("操作技能隔离验证通过：三个工作要求层级、仅已确认细目表可执行、内容结构及方向校验、实操配额6题、缺额补齐、重复启动幂等、评分标准保存、待审核状态和来源冻结。");
     console.info("隔离验证通过：1200题/13批、部分保存、失败后继续、仅补失败4题、重复启动幂等、过期租约恢复、旧令牌迟到结果拦截、1200个唯一题目。");
     console.info("成果读取验证通过：ONLY_FULL_GROUP_BY、空计划、执行中草稿、多考评点关联、历史版本隔离、无考评点关联。");
     console.info("并发验证通过：两路同时执行、第三路被数据库全局容量拒绝、混合题型按槽位配额保存。");

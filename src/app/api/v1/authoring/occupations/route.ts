@@ -1,17 +1,12 @@
 import { NextResponse } from "next/server";
-import { z } from "zod";
 
 import { getVerifiedSession } from "@/auth";
+import { occupationInputSchema } from "@/modules/authoring/occupations/input";
 import {
   createOccupation,
   listActiveOccupations,
   OccupationOperationError
 } from "@/modules/authoring/occupations/service";
-
-const createOccupationSchema = z.object({
-  name: z.string(),
-  code: z.string()
-});
 
 function rejectUnauthorized(session: Awaited<ReturnType<typeof getVerifiedSession>>) {
   if (!session?.user?.id) {
@@ -47,9 +42,9 @@ export async function POST(request: Request) {
     return rejection;
   }
 
-  const parsed = createOccupationSchema.safeParse(await request.json());
+  const parsed = occupationInputSchema.safeParse(await request.json());
   if (!parsed.success) {
-    return NextResponse.json({ error: { code: "VALIDATION_FAILED", message: "请输入职业名称和职业代码。" } }, { status: 400 });
+    return NextResponse.json({ error: { code: "VALIDATION_FAILED", message: "请检查职业名称、职业代码及职业方向，名称最多 200 字，职业代码最多 64 字。" } }, { status: 400 });
   }
 
   try {

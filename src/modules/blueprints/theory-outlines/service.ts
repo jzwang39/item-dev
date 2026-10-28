@@ -103,18 +103,18 @@ async function readGeneratedPoints(
       name: row.name,
       primaryNo: String(requirement.primaryNo ?? ""),
       primaryName: String(requirement.primaryName ?? ""),
-      primaryWeight: Number(requirement.primaryWeight ?? 0),
+      primaryWeight: requirement.primaryWeight == null ? null : Number(requirement.primaryWeight),
       secondaryNo: String(requirement.secondaryNo ?? ""),
       secondaryName: String(requirement.secondaryName ?? ""),
-      secondaryWeight: Number(requirement.secondaryWeight ?? 0),
+      secondaryWeight: requirement.secondaryWeight == null ? null : Number(requirement.secondaryWeight),
       tertiaryNo: String(requirement.tertiaryNo ?? ""),
       tertiaryName: String(requirement.tertiaryName ?? ""),
-      tertiaryWeight: Number(requirement.tertiaryWeight ?? 0),
+      tertiaryWeight: requirement.tertiaryWeight == null ? null : Number(requirement.tertiaryWeight),
       importance: row.importance,
       importanceCode: requirement.importanceCode === "X" || requirement.importanceCode === "Y" || requirement.importanceCode === "Z"
         ? requirement.importanceCode
         : undefined,
-      remark: "",
+      remark: String(requirement.remark ?? ""),
       textbookPage: "",
     } satisfies TheoryAssessmentPoint;
   });

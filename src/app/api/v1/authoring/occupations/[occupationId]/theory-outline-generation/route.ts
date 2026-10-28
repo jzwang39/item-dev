@@ -2,16 +2,18 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getVerifiedSession } from "@/auth";
+import { theoryOutlineGenerationLevels } from "@/modules/blueprints/theory-outline-generation/policy";
 import {
   getTheoryOutlineGenerationState,
-  startTheoryOutlineGeneration,
+  startStandardOutlineGeneration,
+  startTextbookOutlineGeneration,
   TheoryOutlineGenerationError,
   uploadTextbook,
 } from "@/modules/blueprints/theory-outline-generation/service";
 
 const startSchema = z.object({
   action: z.literal("generate"),
-  levelCode: z.enum(["level_5", "level_4", "level_3", "level_2", "level_1", "all"]),
+  levelCode: z.enum([...theoryOutlineGenerationLevels, "all"]),
   mode: z.enum(["textbook", "model"]),
 });
 
@@ -52,13 +54,11 @@ export async function POST(request: Request, { params }: Readonly<{ params: { oc
     const payload = startSchema.safeParse(await request.json());
     if (!payload.success) return NextResponse.json({ error: { code: "VALIDATION_FAILED", message: "生成参数无效。" } }, { status: 400 });
     const levels = payload.data.levelCode === "all"
-      ? ["level_5", "level_4", "level_3", "level_2", "level_1"] as const
+      ? theoryOutlineGenerationLevels
       : [payload.data.levelCode];
-    const jobs = await Promise.all(
-      levels.map((levelCode) =>
-        startTheoryOutlineGeneration(params.occupationId, levelCode, payload.data.mode, session!.user.id),
-      ),
-    );
+    const jobs = payload.data.mode === "textbook"
+      ? await startTextbookOutlineGeneration(params.occupationId, levels, session!.user.id)
+      : await startStandardOutlineGeneration(params.occupationId, levels, session!.user.id);
     return NextResponse.json({ data: { jobs } }, { status: 202 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "细目表任务创建失败。";

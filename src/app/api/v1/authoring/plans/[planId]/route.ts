@@ -5,19 +5,13 @@ import { z } from "zod";
 import { getVerifiedSession } from "@/auth";
 import { getGenerationState } from "@/modules/authoring/generation/service";
 import { getPlanQuestionRows } from "@/modules/authoring/generation/results";
-import { validateQuota, type Scope } from "@/modules/authoring/generation/contracts";
+import { quotaPointSchema, quotaTotal, validateQuota, type Scope } from "@/modules/authoring/generation/contracts";
+import { isLegalPoint } from "@/modules/authoring/legal-topics";
 import { createUlid } from "@/shared/database/ulid";
 import { withTransaction } from "@/shared/database/mysql";
 
 const schema = z.object({
-  points: z.array(z.object({
-    code: z.string().min(1).max(200),
-    name: z.string().min(1),
-    single: z.number().int().min(0).max(100),
-    multiple: z.number().int().min(0).max(100),
-    judgement: z.number().int().min(0).max(100),
-    total: z.number().int().min(0).max(300)
-  })).min(1)
+  points: z.array(quotaPointSchema).min(1)
 });
 
 export async function GET(_: Request, { params }: Readonly<{ params: { planId: string } }>) {
@@ -39,6 +33,7 @@ export async function GET(_: Request, { params }: Readonly<{ params: { planId: s
         options: content.options ?? [],
         answers: answer.answers ?? [],
         analysis: row.analysis_text ?? "",
+        scoreRubric: typeof row.score_rubric_json === "string" ? JSON.parse(row.score_rubric_json) : row.score_rubric_json,
         autoCheck: "通过基础检查" as const,
         status: row.current_status
       };
@@ -68,9 +63,10 @@ export async function PATCH(request: Request, { params }: Readonly<{ params: { p
       const [jobs] = await connection.execute<RowDataPacket[]>("SELECT id FROM authoring_generation_jobs WHERE plan_id=? LIMIT 1", [params.planId]);
       if (jobs.length) throw new Error("计划已开始执行，题量与版本已锁定；调整需求请新建计划。");
       const scope = typeof plan.scope_json === "string" ? JSON.parse(plan.scope_json) as Scope : plan.scope_json;
-      validateQuota(parsed.data.points, scope.levelCode);
-      const [nodes] = await connection.execute<(RowDataPacket & { node_code: string; name: string })[]>(
-        "SELECT node_code,name FROM blueprint_nodes WHERE blueprint_version_id=? AND node_kind='assessment_point'", [scope.blueprintVersions.outline.id]);
+      validateQuota(parsed.data.points, scope.levelCode, scope.assessmentMode);
+      const [allNodes] = await connection.execute<(RowDataPacket & { node_code: string; name: string; requirement_json: unknown; source_ref_json: unknown })[]>(
+        "SELECT node_code,name,requirement_json,source_ref_json FROM blueprint_nodes WHERE blueprint_version_id=? AND node_kind='assessment_point'", [scope.blueprintVersions.outline.id]);
+      const nodes = allNodes.filter((node) => !isLegalPoint(node));
       if (nodes.length !== parsed.data.points.length || parsed.data.points.some((point) => !nodes.some((node) => node.node_code === point.code))) {
         throw new Error("计划考评点与冻结细目表不一致。");
       }
@@ -78,7 +74,7 @@ export async function PATCH(request: Request, { params }: Readonly<{ params: { p
       const points = parsed.data.points.map((point) => ({
         ...point,
         name: nodes.find((node) => node.node_code === point.code)!.name,
-        total: point.single + point.multiple + point.judgement
+        total: quotaTotal(point)
       }));
       const minimumTotal = points.reduce((sum, point) => sum + point.total, 0);
       await connection.execute(

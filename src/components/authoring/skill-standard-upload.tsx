@@ -7,8 +7,10 @@ export type ImportedSkillStandard = SkillStandardData & { sourceName: string; ve
 type StandardSource = { id: string; name: string; original_name: string };
 const button = "rounded-lg bg-[#3f60e8] px-4 py-3 text-sm font-medium text-white disabled:opacity-50";
 
-export function SkillStandardUpload({ occupationId, onChange }: {
+export function SkillStandardUpload({ occupationId, onChange, onLoadingChange, onLoadError }: {
   occupationId: string; onChange: (data: ImportedSkillStandard | null) => void;
+  onLoadingChange?: (loading: boolean) => void;
+  onLoadError?: (message: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [sources, setSources] = useState<StandardSource[]>([]);
@@ -19,15 +21,20 @@ export function SkillStandardUpload({ occupationId, onChange }: {
   const [preview, setPreview] = useState<ImportedSkillStandard | null>(null);
   useEffect(() => {
     const controller = new AbortController();
+    onLoadingChange?.(true);
+    onLoadError?.(""); setError("");
     onChange(null); setSources([]); setOpen(false); setPreview(null); setFile(null); setSourceId("");
     fetch(`/api/v1/authoring/occupations/${occupationId}/skill-standard`, { signal: controller.signal })
       .then(async (response) => {
         const body = await response.json();
         if (!response.ok) throw new Error(body.error?.message || "标准加载失败。");
         onChange(body.data.current); setSources(body.data.standards);
-      }).catch((cause) => { if (!controller.signal.aborted) setError(cause.message); });
+      }).catch((cause) => {
+        if (!controller.signal.aborted) { setError(cause.message); onLoadError?.(cause.message); }
+      })
+      .finally(() => { if (!controller.signal.aborted) onLoadingChange?.(false); });
     return () => controller.abort();
-  }, [occupationId, onChange]);
+  }, [occupationId, onChange, onLoadingChange, onLoadError]);
 
   async function submit(save: boolean) {
     setBusy(true); setError("");
@@ -39,7 +46,7 @@ export function SkillStandardUpload({ occupationId, onChange }: {
       const response = await fetch(`/api/v1/authoring/occupations/${occupationId}/skill-standard`, { method: "POST", body: form });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error?.message || "标准识别失败。");
-      if (save) { onChange(body.data); setOpen(false); }
+      if (save) { onChange(body.data); onLoadError?.(""); setOpen(false); }
       else setPreview(body.data);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "标准识别失败。");
@@ -71,7 +78,7 @@ export function SkillStandardUpload({ occupationId, onChange }: {
           {file ? <button className="text-[#3f60e8]" disabled={busy} type="button" onClick={() => { setFile(null); setPreview(null); }}>改用资料依据</button> : null}
           {!sources.length ? <p className="text-orange-600">当前职业没有已解析的国家职业标准，可直接上传或前往“资料依据”上传解析。</p> : null}
           <h3 className="font-semibold">第二步 · 识别与核对</h3>
-          <p>识别后展示只读结果，确认保存后同步更新第一步和第二步。无法可靠识别的字段显示“待核对”。</p>
+          <p>识别后展示只读结果，确认保存后，同一职业的理论知识和操作技能共用该标准。无法可靠识别的字段显示“待核对”。</p>
           {error ? <p role="alert" className="text-red-600">{error}</p> : null}
           {preview ? <div className="space-y-4">
             <SkillWeightMatrix data={preview} />

@@ -5,6 +5,9 @@ import { OutlineReviewTasks } from "./outline-review-tasks";
 import { AdminQuestionReview } from "./admin-question-review";
 import { ReviewConfirmations } from "./review-confirmations";
 import { OutlineAssignmentModal } from "./outline-assignment-modal";
+import { BulkQuestionReview } from "./bulk-question-review";
+import { ScoreRubric } from "@/components/questions/score-rubric";
+import { canBulkConfirmQuestion, canBulkReviewQuestion } from "@/modules/authoring/bulk-question-review";
 
 type ReviewTask = {
   questionId: string;
@@ -29,6 +32,7 @@ type ReviewTask = {
   };
   answer?: unknown;
   analysis?: string | null;
+  scoreRubric?: unknown;
   code: string;
   level: string;
   type: string;
@@ -322,10 +326,14 @@ type AdminReviewTask = Omit<AssignableQuestion, "assignedExpertName"> & {
   content?: ReviewTask["content"];
   answer?: unknown;
   analysis?: string | null;
+  scoreRubric?: unknown;
   versionId: string;
   status: string;
   canAdminReview: boolean;
+  confirmedAt: string | null;
 };
+
+const canSelectAdminTask = (task: AdminReviewTask) => canBulkReviewQuestion(task) || canBulkConfirmQuestion(task);
 
 function AdminReviewWorkspace() {
   const [tab, setTab] = useState<"tasks" | "assign" | "confirm">("tasks");
@@ -333,6 +341,11 @@ function AdminReviewWorkspace() {
   const [editing, setEditing] = useState<AdminReviewTask | null>(null);
   const [page, setPage] = useState(1);
   const [tasks, setTasks] = useState<AdminReviewTask[]>([]);
+  const [selectedReviewIds, setSelectedReviewIds] = useState<string[]>([]);
+  const [bulkReviewBusy, setBulkReviewBusy] = useState(false);
+  const visibleTasks = tasks.slice((page - 1) * 20, page * 20);
+  const selectablePageTasks = visibleTasks.filter(canSelectAdminTask);
+  const allPageSelected = selectablePageTasks.length > 0 && selectablePageTasks.every((task) => selectedReviewIds.includes(task.id));
   const [summary, setSummary] = useState({
     pending: 0,
     returned: 0,
@@ -343,7 +356,7 @@ function AdminReviewWorkspace() {
   const [selected, setSelected] = useState<AdminReviewTask | null>(null);
 
   const load = async () => {
-    const response = await fetch("/api/v1/review/assignments");
+    const response = await fetch("/api/v1/review/assignments", { cache: "no-store" });
     const payload = await readJson<{
       reviewTasks?: AdminReviewTask[];
       summary?: { pending: number; returned: number; approved: number; expertCount: number };
@@ -352,7 +365,10 @@ function AdminReviewWorkspace() {
       setNotice(payload.error?.message ?? "审核任务加载失败。");
       return;
     }
-    setTasks(payload.data?.reviewTasks ?? []);
+    const nextTasks = payload.data?.reviewTasks ?? [];
+    setTasks(nextTasks);
+    setSelectedReviewIds((ids) => ids.filter((id) => nextTasks.some((task) => task.id === id && canSelectAdminTask(task))));
+    setPage((current) => Math.min(current, Math.max(1, Math.ceil(nextTasks.length / 20))));
     setSummary(
       payload.data?.summary ?? {
         pending: 0,
@@ -441,10 +457,31 @@ function AdminReviewWorkspace() {
                 {tasks.length}道
               </span>
             </div>
+            <BulkQuestionReview
+              tasks={tasks}
+              selectedIds={selectedReviewIds}
+              onSelection={setSelectedReviewIds}
+              onBusy={setBulkReviewBusy}
+              onCompleted={async (message) => {
+                setNotice(message);
+                try { await load(); } catch { setNotice(`${message} 列表刷新失败，请手动刷新。`); }
+              }}
+            />
             <div className="overflow-x-auto">
               <table className="min-w-[1080px] w-full text-left">
                 <thead className="bg-[#f7f9fc] text-[#8b99ad]">
                   <tr>
+                    <th className="px-6 py-5">
+                      <input
+                        type="checkbox"
+                        aria-label="全选当前页可审核或待确认试题"
+                        checked={allPageSelected}
+                        disabled={bulkReviewBusy || !selectablePageTasks.length}
+                        onChange={(event) => setSelectedReviewIds((ids) => event.target.checked
+                          ? [...new Set([...ids, ...selectablePageTasks.map((task) => task.id)])]
+                          : ids.filter((id) => !selectablePageTasks.some((task) => task.id === id)))}
+                      />
+                    </th>
                     {[
                       "试题编号",
                       "职业名称",
@@ -461,8 +498,18 @@ function AdminReviewWorkspace() {
                   </tr>
                 </thead>
                 <tbody>
-                  {tasks.slice((page - 1) * 20, page * 20).map((task) => (
+                  {visibleTasks.map((task) => (
                     <tr className="border-t border-[#e6ebf3]" key={task.id}>
+                      <td className="px-6 py-5">
+                        <input
+                          type="checkbox"
+                          aria-label={`选择试题 ${task.questionNo}`}
+                          checked={selectedReviewIds.includes(task.id)}
+                          disabled={bulkReviewBusy || !canSelectAdminTask(task)}
+                          title={!canSelectAdminTask(task) ? "未完成专家审核或已经确认，不可选择" : canBulkConfirmQuestion(task) ? "待管理员确认" : "可管理员审核"}
+                          onChange={(event) => setSelectedReviewIds((ids) => event.target.checked ? [...ids, task.id] : ids.filter((id) => id !== task.id))}
+                        />
+                      </td>
                       <td className="px-6 py-5 text-[#6689b6]">
                         {task.questionNo}
                       </td>
@@ -482,7 +529,7 @@ function AdminReviewWorkspace() {
                       </td>
                       <td className="px-6 py-5">
                         <span className="rounded bg-[#fff4df] px-2.5 py-1.5 text-sm text-[#a96f13]">
-                          {task.status === "approved" ? "待管理员确认" : task.status === "returned" ? "退回修订" : task.status === "stored" ? "已确认入库" : "待审定"}
+                          {task.status === "approved" ? task.confirmedAt ? "已确认，待入库" : "待管理员确认" : task.status === "returned" ? "退回修订" : task.status === "stored" ? "已确认入库" : "待审定"}
                         </span>
                       </td>
                       <td className="px-6 py-5">
@@ -502,7 +549,7 @@ function AdminReviewWorkspace() {
                     <tr>
                       <td
                         className="px-6 py-14 text-center text-[#7185a5]"
-                        colSpan={7}
+                        colSpan={8}
                       >
                         当前没有已分配的试题审核任务。
                       </td>
@@ -1200,6 +1247,7 @@ function AdminReviewPreviewModal({
               <p className="mb-0 mt-2 leading-7">
                 {task.analysis || "当前版本未填写答案解析。"}
               </p>
+              <ScoreRubric value={task.scoreRubric} />
             </div>
           </article>
           <p className="mt-5 rounded-xl border border-[#d7e5fb] bg-[#f2f7ff] px-5 py-4 leading-7 text-[#6687b6]">
@@ -1339,6 +1387,7 @@ function ReviewModal({
               <p className="mb-0 mt-2 leading-7">
                 {task.analysis || "当前版本未填写答案解析。"}
               </p>
+              <ScoreRubric value={task.scoreRubric} />
             </div>
           </article>
           <p className="mt-5 rounded-xl border border-[#d7e5fb] bg-[#f2f7ff] px-5 py-4 leading-7 text-[#6687b6]">

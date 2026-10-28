@@ -1,9 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdir, writeFile, unlink } from "node:fs/promises";
-import { basename, extname, join } from "node:path";
+import { basename, extname } from "node:path";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { extractDocxText, extractPdfText } from "@/modules/documents/extraction/service";
-import { query, withTransaction } from "@/shared/database/mysql";
+import { query } from "@/shared/database/mysql";
 import { createUlid } from "@/shared/database/ulid";
 import { parseSkillStandard, skillLevels, type SkillStandardData } from "./skill-standard";
 
@@ -34,7 +33,7 @@ export async function getSkillStandard(occupationId: string) {
 
 export async function importSkillStandard(occupationId: string, input: { file?: File; sourceVersionId?: string; preview?: boolean }, actorId: string) {
   if (!!input.file === !!input.sourceVersionId) throw new Error("请选择一种来源：本地标准文件或已解析资料。");
-  let bytes: Buffer | undefined, text = "", name = "", fileObjectId = "", usedOcr = false;
+  let bytes: Buffer | undefined, text = "", name = "", usedOcr = false;
   if (input.file) {
     const extension = extname(input.file.name).toLowerCase();
     if (![".pdf", ".docx", ".txt"].includes(extension) || !input.file.size || input.file.size > 30 * 1024 * 1024) throw new Error("请选择30MB以内的PDF、DOCX或TXT标准文件。");
@@ -53,50 +52,36 @@ export async function importSkillStandard(occupationId: string, input: { file?: 
        GROUP BY seg.id,fo.original_name,fo.id,seg.content_excerpt,seg.ordinal ORDER BY seg.ordinal`, [occupationId, input.sourceVersionId!, occupationId],
     );
     if (!rows.length) throw new Error("所选资料没有可用解析文本或不属于当前职业操作技能范围。");
-    text = rows.map((row) => row.text).join("\n"); name = rows[0].original_name; fileObjectId = rows[0].file_object_id;
+    text = rows.map((row) => row.text).join("\n"); name = rows[0].original_name;
   }
   const data = parseSkillStandard(text);
   if (input.preview) return { ...data, sourceName: name, usedOcr, versionNo: 0 };
-  let objectPath: string | undefined;
-  try {
-    return await withTransaction(async (db) => {
-      const [projects] = await db.execute<(RowDataPacket & { id: string })[]>(
-        `SELECT p.id FROM projects p JOIN project_occupations po ON po.project_id=p.id
-         WHERE po.id=? AND p.status='active' AND po.status='active' FOR UPDATE`, [occupationId],
-      );
-      if (!projects.length) throw new Error("职业不存在或已停用。");
-      const projectId = projects[0].id;
-      if (bytes) {
-        fileObjectId = createUlid();
-        const directory = process.env.UPLOAD_DIR || join(process.cwd(), ".data", "uploads", "blueprint-imports");
-        await mkdir(directory, { recursive: true });
-        objectPath = join(directory, `${fileObjectId}${extname(name).toLowerCase()}`);
-        await writeFile(objectPath, bytes);
-        await db.execute(`INSERT INTO file_objects(id,project_id,storage_provider,bucket,object_key,original_name,mime_type,size_bytes,sha256,purpose,created_by)
-          VALUES(?,?,'local','itembank-local',?,?,?,?,?,'blueprint_import',?)`,
-        [fileObjectId, projectId, objectPath, name, input.file!.type || "application/octet-stream", bytes.length, createHash("sha256").update(bytes).digest("hex"), actorId]);
-      }
-      const source = { sourceName: name, fileObjectId, sourceVersionId: input.sourceVersionId ?? null, usedOcr };
-      const versionNo = await publish(db, projectId, occupationId, "theory_weight", "level_5", { ...data, ...source }, actorId);
-      for (const levelCode of skillLevels) {
-        const scopes = data.scopes.filter((scope) => scope.column.levelCode === levelCode);
-        // Publish empty scopes too, so old levels cannot retain a structure
-        // linked to a different standard after the weight version changes.
-        await publish(db, projectId, occupationId, "skill_structure", levelCode, {
-          ...source, name: "操作技能考评内容结构表", levelCode, ruleBasis: name,
-          pathway: scopes[0]?.column.direction ?? "不适用", totalMinutes: scopes[0]?.totalMinutes ?? null,
-          rows: scopes[0]?.rows ?? [], standardScopes: scopes,
-        }, actorId);
-      }
-      await db.execute(`INSERT INTO audit_logs(id,project_id,actor_id,action,object_type,object_id,after_json,result)
-        VALUES(?,?,?,'blueprint.skill_standard.import','occupation',?,?,'success')`,
-      [createUlid(), projectId, actorId, occupationId, JSON.stringify({ ...source, versionNo, scopeCount: data.scopes.length })]);
-      return { ...data, ...source, versionNo };
-    });
-  } catch (error) {
-    if (objectPath) await unlink(objectPath).catch(() => undefined);
-    throw error;
+  const { importTheoryWeights } = await import("./theory-weights/service");
+  await importTheoryWeights(occupationId, input, actorId);
+  return getSkillStandard(occupationId);
+}
+
+export async function publishSkillStandard(
+  db: PoolConnection,
+  projectId: string,
+  occupationId: string,
+  data: SkillStandardData,
+  source: { sourceName: string; fileObjectId: string; sourceVersionId: string | null; usedOcr: boolean },
+  actorId: string,
+) {
+  const versionNo = await publish(db, projectId, occupationId, "theory_weight", "level_5", { ...data, ...source }, actorId);
+  for (const levelCode of skillLevels) {
+    const scopes = data.scopes.filter((scope) => scope.column.levelCode === levelCode);
+    // Empty scopes replace obsolete structures from previous standards too.
+    await publish(db, projectId, occupationId, "skill_structure", levelCode, {
+      ...source, name: "操作技能考评内容结构表", levelCode, ruleBasis: source.sourceName,
+      pathway: scopes[0]?.column.direction ?? "不适用", totalMinutes: scopes[0]?.totalMinutes ?? null,
+      rows: scopes[0]?.rows ?? [], standardScopes: scopes,
+    }, actorId);
   }
+  await db.execute(`INSERT INTO audit_logs(id,project_id,actor_id,action,object_type,object_id,after_json,result)
+    VALUES(?,?,?,'blueprint.skill_standard.import','occupation',?,?,'success')`,
+  [createUlid(), projectId, actorId, occupationId, JSON.stringify({ ...source, versionNo, scopeCount: data.scopes.length })]);
 }
 
 async function publish(db: PoolConnection, projectId: string, occupationId: string, kind: string, level: string, snapshot: Record<string, unknown>, actorId: string) {

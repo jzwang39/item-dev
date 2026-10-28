@@ -5,20 +5,27 @@ import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { getPool, query, withTransaction } from "@/shared/database/mysql";
 import { createUlid } from "@/shared/database/ulid";
 import { getSkillStandard } from "./skill-standard-import";
-import { skillLevels, type StandardScope } from "./skill-standard";
+import { ensureSharedOccupationStandard } from "./shared-standard";
+import type { StandardScope } from "./skill-standard";
+import { isSkillGenerationLevel, skillGenerationLevels, skillGenerationRule, skillOutlineWorkerVersion } from "./skill-generation-policy";
 import { listTextbooks, callModel } from "./theory-outline-generation/service";
 import type { ModelCaller } from "./theory-outline-generation/generation-batch";
 import { codeFor } from "./theory-outline-generation/node-code";
 import { extractSkillKnowledge, knowledgeEntryKey, splitKnowledgeText } from "./skill-knowledge-extraction";
 import type { SkillAssessmentPoint } from "./skill-outlines/service";
 import { extractDocxText, extractPdfText } from "@/modules/documents/extraction/service";
+import {
+  bindStandardSkillRequirements, expandStandardSkillHierarchy, generateStandardSkillEntries, standardSkillBatches,
+  type BoundSkillRequirement, type StandardSkillRequirement, type StandardSkillEntry,
+} from "./skill-standard-generation";
 
 export type GeneratedSkillPoint = SkillAssessmentPoint & {
   direction: string; scopeKey: string; levelCode: string; importanceCode: "X" | "Y" | "Z";
   level1Weight: number; level2Weight: number; sourceChapterIds: string[];
   sourceKnowledgePoint?: { id: string; name: string; evidence: string; locator: string };
+  sourceStandardRequirement?: BoundSkillRequirement;
 };
-type Basis = { versionId: string; sourceName: string; fileObjectId?: string; standardText?: string; scopes: StandardScope[]; generationRule?: string };
+type Basis = { versionId: string; sourceName: string; fileObjectId?: string; standardText?: string; scopes: StandardScope[]; generationRule?: string; standardRequirements?: BoundSkillRequirement[] };
 type Job = RowDataPacket & {
   id: string; project_id: string; occupation_id: string; created_by: string; occupation_name: string;
   generation_mode: "textbook" | "model"; target_questions: number; status: string;
@@ -28,6 +35,30 @@ type Job = RowDataPacket & {
   error_message: string | null; result_versions_json: unknown;
 };
 const json = <T,>(value: T | string): T => typeof value === "string" ? JSON.parse(value) : value;
+const generatedPointKey = (point: GeneratedSkillPoint) => point.sourceStandardRequirement?.id ??
+  knowledgeEntryKey({ scopeKey: point.scopeKey, knowledgeName: point.sourceKnowledgePoint?.name ?? point.name });
+
+async function loadStandardSkillRequirements(
+  db: PoolConnection, occupationId: string, fileObjectId: string, scopes: StandardScope[], original: string,
+) {
+  const [rows] = await db.execute<(RowDataPacket & StandardSkillRequirement)[]>(
+    `SELECT r.id,s.level_code AS levelCode,s.direction_name AS direction,
+       f.id AS functionId,c.id AS contentId,
+       f.source_code AS functionCode,f.name AS functionName,c.source_code AS contentCode,c.name AS contentName,
+       r.source_code AS code,r.name,r.evidence_text AS evidence,
+       s.blueprint_version_id AS blueprintVersionId,s.file_object_id AS fileObjectId,s.source_version_id AS sourceVersionId
+     FROM blueprints b JOIN occupation_standard_requirement_scopes s ON s.blueprint_version_id=b.current_version_id
+     JOIN occupation_standard_requirement_nodes r ON r.scope_id=s.id AND r.node_kind='skill_requirement'
+     LEFT JOIN occupation_standard_requirement_nodes c ON c.id=r.parent_id AND c.scope_id=s.id AND c.node_kind='work_content'
+     LEFT JOIN occupation_standard_requirement_nodes f ON f.id=c.parent_id AND f.scope_id=s.id AND f.node_kind='occupational_function'
+     WHERE b.occupation_id=? AND s.occupation_id=? AND b.blueprint_kind='theory_weight'
+       AND b.assessment_mode='theory' AND s.file_object_id=? AND s.level_code IN ('level_5','level_4','level_3')
+     ORDER BY FIELD(s.level_code,'level_5','level_4','level_3','level_2','level_1'),s.direction_name,f.ordinal,c.ordinal,r.ordinal`,
+    [occupationId, occupationId, fileObjectId],
+  );
+  if (rows.some((row) => !row.functionName || !row.contentName)) throw new Error("标准技能要求的职业功能或工作内容父级缺失，无法生成。");
+  return expandStandardSkillHierarchy(bindStandardSkillRequirements(rows, scopes, original));
+}
 
 export function distributeQuestionTargets(points: GeneratedSkillPoint[], total: number) {
   if (!points.length || !Number.isInteger(total) || total < 30 || total > 50) throw new Error("每等级目标题量必须为30～50题。");
@@ -71,14 +102,17 @@ export async function getSkillGenerationState(occupationId: string) {
 
 export async function startSkillGeneration(occupationId: string, mode: "textbook" | "model", targetQuestions: number, actorId: string) {
   if (!Number.isInteger(targetQuestions) || targetQuestions < 30 || targetQuestions > 50) throw new Error("每等级目标题量必须为30～50题。");
+  await ensureSharedOccupationStandard(occupationId, actorId);
   const standard = await getSkillStandard(occupationId);
   if (!standard?.scopes?.length) throw new Error("请先上传国家职业标准并确认权重与内容结构。");
+  const selectedScopes = (standard.scopes as StandardScope[]).filter((scope) => isSkillGenerationLevel(scope.column.levelCode));
+  if (!selectedScopes.length) throw new Error("当前标准没有五级、四级、三级的可用技能要求。");
   const files = await query<RowDataPacket[]>("SELECT object_key,original_name FROM file_objects WHERE id=?", [standard.fileObjectId]);
   if (!files.length) throw new Error("国家标准原件不存在，请重新上传标准。");
   const bytes = await readFile(files[0].object_key);
   const extension = extname(files[0].original_name).toLowerCase();
   const standardText = extension === ".pdf" ? (await extractPdfText(bytes)).text : extension === ".docx" ? await extractDocxText(bytes) : bytes.toString("utf8");
-  for (const scope of standard.scopes as StandardScope[]) {
+  for (const scope of selectedScopes) {
     if (Math.abs(scope.rows.reduce((sum, row) => sum + row.score, 0) - 100) > 0.0001) throw new Error("内容结构比重合计必须为100%。");
   }
   const result = await withTransaction(async (db) => {
@@ -103,10 +137,14 @@ export async function startSkillGeneration(occupationId: string, mode: "textbook
     ) : null;
     const textbookId = textbooks?.[0][0]?.id ?? null;
     if (mode === "textbook" && !textbookId) throw new Error("请先上传操作技能教材。");
+    const standardRequirements = mode === "model"
+      ? await loadStandardSkillRequirements(db, occupationId, standard.fileObjectId, selectedScopes, standardText) : undefined;
     const id = createUlid();
     await db.execute(
       `INSERT INTO skill_outline_generation_jobs(id,project_id,occupation_id,textbook_source_version_id,generation_mode,target_questions,basis_snapshot_json,created_by)
-       VALUES(?,?,?,?,?,?,?,?)`, [id, occupations[0].project_id, occupationId, textbookId, mode, targetQuestions, JSON.stringify({ ...standard, standardText, generationRule: "knowledge_1to1" }), actorId],
+       VALUES(?,?,?,?,?,?,?,?)`, [id, occupations[0].project_id, occupationId, textbookId, mode, targetQuestions,
+        JSON.stringify({ ...standard, scopes: selectedScopes, standardText, standardRequirements,
+          generationRule: skillGenerationRule(mode), generationLevels: skillGenerationLevels }), actorId],
     );
     return { id };
   });
@@ -117,10 +155,14 @@ export async function startSkillGeneration(occupationId: string, mode: "textbook
 declare global {
   // A single timer per process survives development hot reload.
   var __skillOutlineWorker: ReturnType<typeof setInterval> | undefined;
+  var __skillOutlineWorkerVersion: string | undefined;
   var __skillOutlineTickActive: boolean | undefined;
 }
 export function ensureSkillOutlineWorker() {
-  if (globalThis.__skillOutlineWorker) return;
+  const workerVersion = skillOutlineWorkerVersion;
+  if (globalThis.__skillOutlineWorker && globalThis.__skillOutlineWorkerVersion === workerVersion) return;
+  if (globalThis.__skillOutlineWorker) clearInterval(globalThis.__skillOutlineWorker);
+  globalThis.__skillOutlineWorkerVersion = workerVersion;
   globalThis.__skillOutlineWorker = setInterval(() => void tick(), 5000);
   globalThis.__skillOutlineWorker.unref();
   void tick();
@@ -159,14 +201,19 @@ export async function runSkillGeneration(jobId: string, model: ModelCaller = cal
   if (!job || !["queued", "running"].includes(job.status)) return;
   try {
     const basis = json<Basis>(job.basis_snapshot_json);
-    if (basis.generationRule !== "knowledge_1to1") throw new Error("鉴定点生成规则已调整，请重新创建生成任务。历史完整版本不受影响。");
+    const expectedRule = skillGenerationRule(job.generation_mode);
+    if (basis.generationRule !== expectedRule) throw new Error("鉴定点生成规则已调整，请重新创建生成任务。历史完整版本不受影响。");
+    if (basis.scopes.some((scope) => !isSkillGenerationLevel(scope.column.levelCode)) ||
+      basis.standardRequirements?.some((item) => !isSkillGenerationLevel(item.levelCode))) {
+      throw new Error("当前任务只允许五级、四级、三级，不能生成二级或一级技能等级。");
+    }
     const chapters = job.textbook_source_version_id ? await query<RowDataPacket[]>(
       "SELECT id,ordinal,chapter_title,section_title,content_text FROM textbook_chapters WHERE source_version_id=? ORDER BY ordinal", [job.textbook_source_version_id],
     ) : [];
     if (job.generation_mode === "textbook" && !chapters.length) throw new Error("教材没有可用的已解析章节。");
-    const batches = job.generation_mode === "textbook"
-      ? chapters.flatMap((chapter) => splitKnowledgeText(chapter.content_text, chapter.id, [chapter.chapter_title, chapter.section_title].filter(Boolean).join(" / ")))
-      : splitKnowledgeText(basis.standardText ?? "", null, "国家职业标准技能要求");
+    const standardBatches = job.generation_mode === "model" ? standardSkillBatches(basis.standardRequirements ?? []) : null;
+    const batches = standardBatches ??
+      chapters.flatMap((chapter) => splitKnowledgeText(chapter.content_text, chapter.id, [chapter.chapter_title, chapter.section_title].filter(Boolean).join(" / ")));
     if (!batches.length) throw new Error("没有可提取知识点的正文。");
     const points: GeneratedSkillPoint[] = job.draft_snapshot_json ? json<{ points: GeneratedSkillPoint[] }>(job.draft_snapshot_json).points : [];
     await getPool().execute(
@@ -174,11 +221,15 @@ export async function runSkillGeneration(jobId: string, model: ModelCaller = cal
     );
     for (let index = job.completed_batches; index < batches.length; index++) {
       const batch = batches[index];
-      const generated = await extractSkillKnowledge(batch, basis.scopes, job.generation_mode,
-        points.map((point) => `${point.scopeKey}: ${point.sourceKnowledgePoint?.name ?? point.name}`), model);
-      const seen = new Set(points.map((point) => knowledgeEntryKey({ scopeKey: point.scopeKey, knowledgeName: point.sourceKnowledgePoint?.name ?? point.name })));
+      const standardBatch = standardBatches?.[index];
+      const generated = standardBatch
+        ? await generateStandardSkillEntries(standardBatch, model)
+        : await extractSkillKnowledge(batch, basis.scopes, job.generation_mode,
+          points.map((point) => `${point.scopeKey}: ${point.sourceKnowledgePoint?.name ?? point.name}`), model);
+      const seen = new Set(points.map(generatedPointKey));
       for (const point of generated) {
-      const key = knowledgeEntryKey(point);
+      const requirement = "requirement" in point ? (point as StandardSkillEntry).requirement : undefined;
+      const key = requirement?.id ?? knowledgeEntryKey(point);
       if (seen.has(key)) continue;
       const scope = basis.scopes.find((item) => item.column.key === point.scopeKey)!;
       const row = scope.rows.find((item) => item.name === point.rowName)!;
@@ -206,6 +257,7 @@ export async function runSkillGeneration(jobId: string, model: ModelCaller = cal
           method: row.method ?? "待核对", minutes: row.minutes ?? 0, standardText: point.evidence, citation: basis.sourceName,
           knowledgeMaterial: job.textbook_source_version_id ?? "国家职业标准", knowledgePoints: point.knowledgeName,
           direction: scope.column.direction, scopeKey: scope.column.key, levelCode: scope.column.levelCode, sourceChapterIds: batch.chapterId ? [batch.chapterId] : [],
+          sourceStandardRequirement: requirement,
           sourceKnowledgePoint: {
             id: createHash("sha256").update(`${job.textbook_source_version_id ?? basis.versionId}\u0000${key}`).digest("hex"),
             name: point.knowledgeName, evidence: point.evidence, locator: batch.locator,
@@ -219,7 +271,14 @@ export async function runSkillGeneration(jobId: string, model: ModelCaller = cal
       );
     }
     if (!points.length) throw new Error("正文未提取出可匹配当前技能范围的知识点，未发布空细目表。");
-    const allocated = skillLevels.flatMap((level) => {
+    if (job.generation_mode === "model") {
+      const expected = new Set(basis.standardRequirements!.map((item) => item.id));
+      if (points.length !== expected.size || new Set(points.map(generatedPointKey)).size !== expected.size ||
+        points.some((point) => !expected.has(point.sourceStandardRequirement?.id ?? ""))) {
+        throw new Error("鉴定点未与三级技能要求、二级工作内容和一级职业功能逐项完整对应，未发布不完整版本。");
+      }
+    }
+    const allocated = skillGenerationLevels.flatMap((level) => {
       const levelPoints = points.filter((point) => point.levelCode === level).sort((left, right) =>
         left.scopeKey.localeCompare(right.scopeKey) || left.level1Code.localeCompare(right.level1Code)
         || left.level2Code.localeCompare(right.level2Code) || left.ordinal - right.ordinal,
@@ -235,6 +294,7 @@ export async function runSkillGeneration(jobId: string, model: ModelCaller = cal
   }
 }
 async function publishSkillGeneration(job: Job, basis: Basis, points: GeneratedSkillPoint[]) {
+  if (points.some((point) => !isSkillGenerationLevel(point.levelCode))) throw new Error("只能发布五级、四级、三级的新细目表。");
   await withTransaction(async (db) => {
     const [active] = await db.execute<RowDataPacket[]>(
       `SELECT po.id FROM project_occupations po JOIN projects p ON p.id=po.project_id
@@ -246,7 +306,7 @@ async function publishSkillGeneration(job: Job, basis: Basis, points: GeneratedS
     );
     if (current[0]?.current_version_id !== basis.versionId) throw new Error("生成期间国家标准版本发生变化，未发布过期结果。");
     const results: { levelCode: string; versionId: string; versionNo: number }[] = [];
-    for (const levelCode of skillLevels) {
+    for (const levelCode of skillGenerationLevels.filter((level) => basis.scopes.some((scope) => scope.column.levelCode === level))) {
       const [blueprints] = await db.execute<RowDataPacket[]>(
         "SELECT id FROM blueprints WHERE occupation_id=? AND level_code=? AND blueprint_kind='skill_outline' AND assessment_mode='skill' FOR UPDATE", [job.occupation_id, levelCode],
       );
@@ -262,6 +322,7 @@ async function publishSkillGeneration(job: Job, basis: Basis, points: GeneratedS
         levelCode, points: levelPoints, sourceName: job.generation_mode === "textbook" ? "技能教材 AI 生成" : "AI 大模型生成",
         textbookSourceVersionId: job.textbook_source_version_id, standardVersionId: basis.versionId, targetQuestions: job.target_questions,
         generationRule: basis.generationRule,
+        generationLevels: skillGenerationLevels,
       };
       await db.execute(
         "INSERT INTO blueprint_versions(id,blueprint_id,version_no,status,content_hash,snapshot_json,published_at,created_by) VALUES(?,?,?,'published',?,?,UTC_TIMESTAMP(3),?)",
@@ -288,6 +349,7 @@ async function insertPoint(db: PoolConnection, versionId: string, point: Generat
   await db.execute(
     "INSERT INTO blueprint_nodes(id,blueprint_version_id,node_kind,node_code,name,ordinal,weight,importance,requirement_json,source_ref_json) VALUES(?,?,'assessment_point',?,?,?,?,?,?,?)",
     [createUlid(), versionId, point.code, point.name, ordinal + 1, point.weight, point.importance, JSON.stringify(point),
-      JSON.stringify({ standardVersionId: basis.versionId, fileObjectId: basis.fileObjectId ?? null, chapterIds: point.sourceChapterIds })],
+      JSON.stringify({ standardVersionId: basis.versionId, fileObjectId: basis.fileObjectId ?? null,
+        chapterIds: point.sourceChapterIds, standardRequirement: point.sourceStandardRequirement })],
   );
 }

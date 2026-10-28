@@ -1,6 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { BulkQuestionStorage } from "./bulk-question-storage";
+import { LegalAgent } from "./legal-agent";
+import { canStoreQuestion, type StorageCandidate } from "@/modules/authoring/question-storage-policy";
 
 type AssessmentMode = "theory" | "skill";
 type Question = {
@@ -13,6 +16,8 @@ type Question = {
   assessmentMode: AssessmentMode;
   questionType: string;
   status: string;
+  versionId: string | null;
+  confirmed: boolean;
   difficulty: string | null;
   createdAt: string;
   stem: string;
@@ -102,6 +107,11 @@ export function QuestionBankWorkspace({
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(true);
   const [questionPage, setQuestionPage] = useState(1);
+  const [questionTotal, setQuestionTotal] = useState(0);
+  const [storageSelection, setStorageSelection] = useState<StorageCandidate[]>([]);
+  const [bulkStorageBusy, setBulkStorageBusy] = useState(false);
+  const requestSequence = useRef(0);
+  const filterSequence = useRef("");
   const questionPageSize = 20;
 
   const queryString = useMemo(() => {
@@ -113,29 +123,42 @@ export function QuestionBankWorkspace({
     if (keyword.trim()) params.set("keyword", keyword.trim());
     return params.toString();
   }, [assessmentMode, levelCode, questionType, status, keyword]);
+  filterSequence.current = queryString;
 
   const load = useCallback(async () => {
+    const sequence = ++requestSequence.current;
     setLoading(true);
     try {
-      const response = await fetch(`/api/v1/questions?${queryString}`);
+      const response = await fetch(`/api/v1/questions?${queryString}&page=${questionPage}&pageSize=${questionPageSize}`, { cache: "no-store" });
       const body = await response.json();
+      if (sequence !== requestSequence.current) return;
       if (!response.ok)
         throw new Error(body.error?.message ?? "题库加载失败。");
       setQuestions(body.data);
       setOptions(body.options);
-      setQuestionPage(1);
+      const total = Number(body.total ?? body.data.length);
+      setQuestionTotal(total);
+      setQuestionPage((current) => Math.min(current, Math.max(1, Math.ceil(total / questionPageSize))));
+      setStorageSelection((selection) => selection.filter((candidate) => {
+        const current = (body.data as Question[]).find((question) => question.id === candidate.id);
+        return !current || (canStoreQuestion(current) && current.versionId === candidate.versionId);
+      }));
     } catch (error) {
+      if (sequence !== requestSequence.current) return;
+      setQuestions([]);
+      setQuestionTotal(0);
       setNotice(error instanceof Error ? error.message : "题库加载失败。");
     } finally {
-      setLoading(false);
+      if (sequence === requestSequence.current) setLoading(false);
     }
-  }, [queryString]);
+  }, [queryString, questionPage]);
 
   useEffect(() => {
     void load();
   }, [load]);
   useEffect(() => {
     setQuestionPage(1);
+    setStorageSelection([]);
   }, [queryString]);
   useEffect(() => {
     setLevelCode("");
@@ -178,12 +201,21 @@ export function QuestionBankWorkspace({
     : "全部考核方式，一级至五级";
   const questionPageCount = Math.max(
     1,
-    Math.ceil(questions.length / questionPageSize),
+    Math.ceil(questionTotal / questionPageSize),
   );
-  const visibleQuestions = questions.slice(
-    (questionPage - 1) * questionPageSize,
-    questionPage * questionPageSize,
-  );
+  const visibleQuestions = loading ? [] : questions;
+  const selectableQuestions = visibleQuestions.filter(canStoreQuestion);
+  const allPageSelected = selectableQuestions.length > 0 && selectableQuestions.every((question) => storageSelection.some((candidate) => candidate.id === question.id));
+  const candidateFor = (question: Question): StorageCandidate => ({ id: question.id, versionId: question.versionId!, questionNo: question.questionNo });
+  const selectAllStorage = async () => {
+    const filters = queryString;
+    const response = await fetch(`/api/v1/questions?${filters}&view=storage-candidates`, { cache: "no-store" });
+    const body = await response.json() as { data?: StorageCandidate[]; error?: { message?: string } };
+    if (filters !== filterSequence.current) return;
+    if (!response.ok || !body.data) throw new Error(body.error?.message ?? "待入库试题加载失败。");
+    setStorageSelection(body.data);
+    if (!body.data.length) setNotice("当前检索范围暂无已确认的待入库试题。");
+  };
 
   const submit = async () => {
     if (!submitTarget) return;
@@ -272,6 +304,7 @@ export function QuestionBankWorkspace({
           <p className="m-0 mt-3 text-[16px] text-[#7b879a]">
             默认展示全部职业试题；选择考核方式后，技能等级和题型按规则联动。
           </p>
+          {!readOnly ? <LegalAgent onCompleted={load} /> : null}
           {notice ? (
             <p className="mt-6 rounded-xl border border-[#d7e5fb] bg-[#f2f7ff] px-5 py-4 text-[#4265d4]">
               {notice}
@@ -329,10 +362,28 @@ export function QuestionBankWorkspace({
           </div>
           <p className="mt-7 text-[#8497b3]">检索范围：{scope}</p>
           <section className="mt-12 overflow-hidden rounded-[18px] border border-[#e0e6f0] bg-white shadow-card">
+            {!readOnly ? <BulkQuestionStorage
+              key={queryString}
+              selected={storageSelection}
+              loading={loading}
+              onSelection={setStorageSelection}
+              onSelectAll={selectAllStorage}
+              onBusy={setBulkStorageBusy}
+              onCompleted={async (message) => { setNotice(message); setResultScopes([]); await load(); }}
+            /> : null}
             <div className="overflow-x-auto">
               <table className="min-w-[1300px] w-full text-left">
                 <thead className="bg-[#f7f9fc] text-[#8b99ad]">
                   <tr>
+                    {!readOnly ? <th className="px-5 py-5">
+                      <input
+                        type="checkbox" aria-label="全选当前页可入库试题"
+                        checked={allPageSelected} disabled={loading || bulkStorageBusy || !selectableQuestions.length}
+                        onChange={(event) => setStorageSelection((selection) => event.target.checked
+                          ? [...new Map([...selection, ...selectableQuestions.map(candidateFor)].map((candidate) => [candidate.id, candidate])).values()]
+                          : selection.filter((candidate) => !selectableQuestions.some((question) => question.id === candidate.id)))}
+                      />
+                    </th> : null}
                     {[
                       "试题 / 题型",
                       "题目",
@@ -353,6 +404,17 @@ export function QuestionBankWorkspace({
                 <tbody>
                   {visibleQuestions.map((question) => (
                     <tr className="border-t border-[#e6ebf3]" key={question.id}>
+                      {!readOnly ? <td className="px-5 py-5">
+                        <input
+                          type="checkbox" aria-label={`选择入库试题 ${question.questionNo}`}
+                          checked={storageSelection.some((candidate) => candidate.id === question.id)}
+                          disabled={loading || bulkStorageBusy || !canStoreQuestion(question)}
+                          title={!canStoreQuestion(question) ? "仅已审定并经管理员确认的试题可入库" : ""}
+                          onChange={(event) => setStorageSelection((selection) => event.target.checked
+                            ? [...selection.filter((candidate) => candidate.id !== question.id), candidateFor(question)]
+                            : selection.filter((candidate) => candidate.id !== question.id))}
+                        />
+                      </td> : null}
                       <td className="px-5 py-5 align-top">
                         <span className="text-[#6689b6]">
                           {question.questionNo}
@@ -389,7 +451,7 @@ export function QuestionBankWorkspace({
                                 : "bg-[#f1f4f8] text-[#687b96]"
                           }`}
                         >
-                          {statusLabel[question.status] ?? question.status}
+                          {question.status === "approved" && !question.confirmed ? "待管理员确认" : statusLabel[question.status] ?? question.status}
                         </span>
                       </td>
                       <td className="px-5 py-5">
@@ -422,6 +484,8 @@ export function QuestionBankWorkspace({
                           {!readOnly && question.status === "approved" ? (
                             <button
                               className="rounded-xl border border-[#a6dccf] bg-[#edf9f5] px-4 py-2.5 text-sm text-[#17816a]"
+                              disabled={bulkStorageBusy || !canStoreQuestion(question)}
+                              title={!question.confirmed ? "请先在审核确定中完成管理员确认" : ""}
                               onClick={() => setStorageTarget(question)}
                               type="button"
                             >
@@ -436,7 +500,7 @@ export function QuestionBankWorkspace({
                     <tr>
                       <td
                         className="px-6 py-16 text-center text-[#7185a5]"
-                        colSpan={9}
+                        colSpan={readOnly ? 9 : 10}
                       >
                         未找到符合条件的试题。
                       </td>
@@ -446,7 +510,7 @@ export function QuestionBankWorkspace({
                     <tr>
                       <td
                         className="px-6 py-16 text-center text-[#7185a5]"
-                        colSpan={9}
+                        colSpan={readOnly ? 9 : 10}
                       >
                         正在加载题库...
                       </td>
@@ -458,7 +522,7 @@ export function QuestionBankWorkspace({
             {!loading && questions.length ? (
               <div className="flex items-center justify-between border-t border-[#e6ebf3] px-5 py-5 text-sm text-[#7185a5]">
                 <span>
-                  共 {questions.length} 道试题，当前第 {questionPage} /{" "}
+                  共 {questionTotal} 道试题，当前第 {questionPage} /{" "}
                   {questionPageCount} 页
                 </span>
                 <div className="flex gap-3">

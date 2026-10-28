@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getVerifiedSession } from "@/auth";
 import { getSkillStandard, importSkillStandard, listSkillStandards } from "@/modules/blueprints/skill-standard-import";
+import { ensureSharedOccupationStandard } from "@/modules/blueprints/shared-standard";
 
 export const runtime = "nodejs";
 
@@ -14,8 +15,13 @@ async function authorize() {
 export async function GET(_request: Request, { params }: { params: { occupationId: string } }) {
   const auth = await authorize();
   if (auth.rejection) return auth.rejection;
-  const [current, standards] = await Promise.all([getSkillStandard(params.occupationId), listSkillStandards(params.occupationId)]);
-  return NextResponse.json({ data: { current, standards } });
+  try {
+    await ensureSharedOccupationStandard(params.occupationId, auth.actorId!);
+    const [current, standards] = await Promise.all([getSkillStandard(params.occupationId), listSkillStandards(params.occupationId)]);
+    return NextResponse.json({ data: { current, standards } });
+  } catch (error) {
+    return NextResponse.json({ error: { message: error instanceof Error ? error.message : "职业标准同步失败。" } }, { status: 422 });
+  }
 }
 
 export async function POST(request: Request, { params }: { params: { occupationId: string } }) {

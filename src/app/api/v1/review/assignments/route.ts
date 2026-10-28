@@ -82,6 +82,7 @@ export async function GET() {
           content_json: unknown;
           answer_json: unknown;
           analysis_text: string | null;
+          score_rubric_json: unknown;
           current_status: string;
           current_version_id: string;
           reviewer_role: string | null;
@@ -90,7 +91,7 @@ export async function GET() {
         })[]
       >(
         `SELECT q.id, q.project_id, q.question_no, po.name AS occupation_name, q.level_code, q.assessment_mode, q.question_type,
-                qv.stem, qv.content_json, qv.answer_json, qv.analysis_text, ra.id AS assignment_id, ra.assigned_at,
+                qv.stem, qv.content_json, qv.answer_json, qv.analysis_text, qv.score_rubric_json, ra.id AS assignment_id, ra.assigned_at,
                 assigned.display_name AS assigned_expert_name,q.current_status,q.current_version_id,assigned.role AS reviewer_role,qrc.confirmed_at,
                 (SELECT rr.comment FROM review_records rr WHERE rr.question_version_id=qv.id ORDER BY rr.submitted_at DESC,rr.id DESC LIMIT 1) AS review_opinion
            FROM questions q
@@ -166,6 +167,7 @@ export async function GET() {
             content: decode(question.content_json),
             answer: decode(question.answer_json),
             analysis: question.analysis_text,
+            scoreRubric: question.score_rubric_json ? decode(question.score_rubric_json) : null,
             status: question.current_status,
             versionId: question.current_version_id,
           })),

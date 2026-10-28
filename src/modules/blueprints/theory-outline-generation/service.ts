@@ -1,15 +1,17 @@
 import { createHash } from "node:crypto";
-import { mkdir, writeFile, unlink } from "node:fs/promises";
+import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
-import { generateAssessmentBatch } from "./generation-batch";
 import { codeFor } from "./node-code";
+import { isTheoryOutlineGenerationLevel } from "./policy";
+import { generateTextbookOutlines, generateStandardOutlines, validateTextbookInputs, validateStandardInputs, type StandardKnowledge, type TextbookPoint } from "./textbook-generation";
+import { parseStandardBasicItems, type StandardBasicSource } from "./standard-basic";
 import { extractDocxText, extractPdfText } from "@/modules/documents/extraction/service";
 import { getSavedModelConnection } from "@/modules/model-connection/service";
-import { getCurrentTheoryWeights, type TheoryWeightItem } from "@/modules/blueprints/theory-weights/service";
 import { createUlid } from "@/shared/database/ulid";
 import { query, withTransaction } from "@/shared/database/mysql";
+import { ensureSharedOccupationStandard } from "../shared-standard";
 
 const levels = ["level_5", "level_4", "level_3", "level_2", "level_1"] as const;
 const uploadDirectory = join(process.cwd(), ".data", "uploads", "textbooks");
@@ -30,9 +32,14 @@ type JobRow = RowDataPacket & {
   textbook_source_version_id: string | null; result_blueprint_version_id: string | null; created_at: Date; updated_at: Date;
 };
 type GeneratedPoint = {
-  primaryName: string; primaryWeight: number; secondaryName: string; secondaryWeight: number;
-  tertiaryName: string; tertiaryWeight: number; name: string; importanceCode: "X" | "Y" | "Z";
+  primaryName: string; primaryWeight: number | null; secondaryName: string; secondaryWeight: number | null;
+  tertiaryName: string; tertiaryWeight: number | null; name: string; importanceCode: "X" | "Y" | "Z";
   sourceChapterIds: string[];
+  sectionKind?: TextbookPoint["sectionKind"];
+  sharedPointKey?: string;
+  standardSource?: StandardKnowledge;
+  standardBasicSource?: StandardBasicSource;
+  sourceWarning?: string;
 };
 export class TheoryOutlineGenerationError extends Error {}
 
@@ -51,7 +58,7 @@ export async function listTextbooks(occupationId: string, levelCode: string, ass
         WHERE s.project_id = ? AND s.source_type = 'textbook' AND s.status = 'active'
           AND ss.occupation_id = ? AND ss.assessment_mode = ?
         GROUP BY s.id, sv.id, s.name, fo.original_name, sv.created_at
-        ORDER BY sv.created_at DESC`,
+        ORDER BY sv.created_at DESC, sv.id DESC`,
       [projectId, occupationId, assessmentMode],
     );
     return rows.map((row) => ({ ...row, chapterCount: Number(row.chapterCount) }));
@@ -154,118 +161,175 @@ export async function getTheoryOutlineGenerationState(occupationId: string, leve
 }
 
 export async function startTheoryOutlineGeneration(occupationId: string, levelCode: string, mode: "textbook" | "model", actorId: string) {
-  const level = validateLevel(levelCode);
-  const result = await withTransaction(async (connection) => {
-    const projectId = await getProjectForOccupation(connection, occupationId);
-    let textbookVersionId: string | null = null;
-    if (mode === "textbook") {
-      const [rows] = await connection.execute<(RowDataPacket & { id: string })[]>(
-        `SELECT sv.id FROM sources s INNER JOIN source_versions sv ON sv.id = s.current_version_id
-         INNER JOIN source_scopes ss ON ss.source_version_id = sv.id
-         WHERE s.project_id = ? AND s.source_type = 'textbook' AND s.status = 'active'
-           AND ss.occupation_id = ? AND ss.assessment_mode = 'theory'
-         ORDER BY sv.created_at DESC LIMIT 1`,
-        [projectId, occupationId],
-      );
-      textbookVersionId = rows[0]?.id ?? null;
-      if (!textbookVersionId) throw new TheoryOutlineGenerationError("请先上传该职业等级的理论知识教材。");
-    }
-    // A restarted job replaces an interrupted draft for the same grade.
-    await connection.execute(
-      `UPDATE theory_outline_generation_jobs
-       SET status = 'failed', error_message = '已按最新权重规则终止，由新的生成任务替代。',
-           finished_at = UTC_TIMESTAMP(3), draft_snapshot_json = NULL
-       WHERE occupation_id = ? AND level_code = ? AND status IN ('queued', 'running')`,
-      [occupationId, level],
-    );
-    const id = createUlid();
-    await connection.execute(
-      `INSERT INTO theory_outline_generation_jobs (id, project_id, occupation_id, level_code, textbook_source_version_id, generation_mode, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [id, projectId, occupationId, level, textbookVersionId, mode, actorId],
-    );
-    return { id, projectId, textbookVersionId };
-  });
-  void runTheoryOutlineGeneration(result.id).catch(() => undefined);
-  return { jobId: result.id };
+  const jobs = await startOutlineGeneration(occupationId, [levelCode], actorId, mode);
+  return jobs[0];
 }
 
-async function runTheoryOutlineGeneration(jobId: string) {
-  try {
-    const job = await loadJob(jobId);
-    if (!job) return;
-    const weights = await getCurrentTheoryWeights(job.occupation_id);
-    if (!weights) throw new TheoryOutlineGenerationError("请先完成理论知识权重表的识别。");
-    const weightItems = weights.items.filter((item) => Number(item.weights[job.level_code] ?? 0) > 0);
-    if (!weightItems.length) throw new TheoryOutlineGenerationError("当前等级没有可用于生成的理论知识权重。");
-    const chapters = job.textbook_source_version_id ? await loadChapters(job.textbook_source_version_id) : [];
-    if (job.generation_mode === "textbook" && !chapters.length) throw new TheoryOutlineGenerationError("最新教材没有已解析的章节，无法生成细目表。");
-    const batches = weightItems.flatMap((item) => {
-      // The stored value is a percentage point (for example 5 means 5%).
-      // Each percentage point requires two assessment points.
-      const total = Number(item.weights[job.level_code] ?? 0) * 2;
-      return Array.from({ length: Math.ceil(total / 10) }, (_, index) => ({
-        item, batchIndex: index, batchCount: Math.ceil(total / 10),
-        targetCount: Math.min(10, total - index * 10),
-      }));
-    });
-    await query(`UPDATE theory_outline_generation_jobs SET status = 'running', total_batches = ?, started_at = UTC_TIMESTAMP(3) WHERE id = ?`, [batches.length, jobId]);
+async function loadStandardKnowledge(connection: PoolConnection, occupationId: string) {
+  const [scopes] = await connection.execute<(RowDataPacket & { direction_id: string | null; total: number })[]>(
+    `SELECT s.direction_id, COUNT(r.id) AS total FROM blueprints b
+     INNER JOIN occupation_standard_requirement_scopes s ON s.blueprint_version_id = b.current_version_id
+     LEFT JOIN occupation_standard_requirement_nodes r ON r.scope_id = s.id AND r.node_kind = 'related_knowledge'
+     WHERE b.occupation_id = ? AND s.occupation_id = ? AND b.blueprint_kind = 'theory_weight' AND b.assessment_mode = 'theory'
+     GROUP BY s.direction_id`,
+    [occupationId, occupationId],
+  );
+  if (scopes.some((scope) => scope.direction_id !== null)) {
+    throw new TheoryOutlineGenerationError("当前标准包含职业方向，不能混合生成职业级细目表。");
+  }
+  const [rows] = await connection.execute<(RowDataPacket & StandardKnowledge & { directionId: string | null })[]>(
+    `SELECT r.id, s.level_code AS levelCode, s.direction_id AS directionId,
+            f.source_code AS functionCode, f.name AS functionName,
+            c.source_code AS contentCode, c.name AS contentName,
+            r.source_code AS code, r.name, r.evidence_text AS evidence,
+            s.blueprint_version_id AS blueprintVersionId, s.file_object_id AS fileObjectId,
+            s.source_version_id AS sourceVersionId
+       FROM blueprints b
+       INNER JOIN occupation_standard_requirement_scopes s ON s.blueprint_version_id = b.current_version_id
+       INNER JOIN occupation_standard_requirement_nodes r ON r.scope_id = s.id AND r.node_kind = 'related_knowledge'
+       INNER JOIN occupation_standard_requirement_nodes c ON c.id = r.parent_id AND c.scope_id = s.id AND c.node_kind = 'work_content'
+       INNER JOIN occupation_standard_requirement_nodes f ON f.id = c.parent_id AND f.scope_id = s.id AND f.node_kind = 'occupational_function'
+      WHERE b.occupation_id = ? AND s.occupation_id = ? AND b.blueprint_kind = 'theory_weight' AND b.assessment_mode = 'theory'
+      ORDER BY s.level_code, f.ordinal, c.ordinal, r.ordinal`,
+    [occupationId, occupationId],
+  );
+  if (rows.length !== scopes.reduce((sum, scope) => sum + Number(scope.total), 0)) {
+    throw new TheoryOutlineGenerationError("相关知识要求存在缺失的职业功能或工作内容父级，请重新识别职业标准。");
+  }
+  return rows;
+}
 
-    const generated: GeneratedPoint[] = [];
-    for (const [index, batch] of batches.entries()) {
-      const reservedPointKeys = new Set(
-        generated
-          .filter((point) => point.primaryName === batch.item.category && point.secondaryName === batch.item.name)
-          .map((point) => [point.tertiaryName, point.name].join("\u0000")),
-      );
-      const points = await generateForWeight(job, batch.item, chapters, batch.targetCount, reservedPointKeys, batch.batchIndex, batch.batchCount);
-      generated.push(...points);
-      await query(
-        `UPDATE theory_outline_generation_jobs SET completed_batches = ?, generated_point_count = ?, draft_snapshot_json = ? WHERE id = ?`,
-        [index + 1, generated.length, JSON.stringify(generated), jobId],
-      );
-    }
-    const pointKeys = generated.map((point) => [point.primaryName, point.secondaryName, point.tertiaryName, point.name].join("\u0000"));
-    if (new Set(pointKeys).size !== generated.length) {
-      throw new TheoryOutlineGenerationError("生成结果包含重复考评点，未发布不完整版本。");
-    }
-    const versionId = await publishGeneratedOutline(job, generated);
-    await query(
-      `UPDATE theory_outline_generation_jobs SET status = 'succeeded', result_blueprint_version_id = ?, finished_at = UTC_TIMESTAMP(3), error_message = NULL WHERE id = ?`,
-      [versionId, jobId],
+export async function startTextbookOutlineGeneration(occupationId: string, requestedLevels: readonly string[], actorId: string) {
+  return startOutlineGeneration(occupationId, requestedLevels, actorId, "textbook");
+}
+
+export async function startStandardOutlineGeneration(occupationId: string, requestedLevels: readonly string[], actorId: string) {
+  return startOutlineGeneration(occupationId, requestedLevels, actorId, "model");
+}
+
+async function loadStandardBasic(connection: PoolConnection, knowledge: StandardKnowledge[], projectId: string) {
+  const refs = new Map(knowledge.map((item) => [`${item.blueprintVersionId}:${item.fileObjectId}`, item]));
+  if (refs.size !== 1) throw new TheoryOutlineGenerationError("未找到唯一的当前职业标准版本，请先识别完整职业标准。");
+  const ref = [...refs.values()][0];
+  const [files] = await connection.execute<(RowDataPacket & { object_key: string; original_name: string })[]>(
+    "SELECT object_key, original_name FROM file_objects WHERE id = ? AND project_id = ?",
+    [ref.fileObjectId, projectId],
+  );
+  if (!files[0]) throw new TheoryOutlineGenerationError("职业标准原文件不存在，请重新上传标准。");
+  const extension = extname(files[0].original_name).toLowerCase();
+  if (![".pdf", ".docx", ".txt"].includes(extension)) throw new TheoryOutlineGenerationError("标准原文件仅支持 PDF、DOCX、TXT。");
+  try {
+    const text = await extractText(await readFile(files[0].object_key), extension);
+    return parseStandardBasicItems(text).map((item) => ({
+      ...item, blueprintVersionId: ref.blueprintVersionId, fileObjectId: ref.fileObjectId, sourceVersionId: ref.sourceVersionId,
+    }));
+  } catch (error) {
+    throw new TheoryOutlineGenerationError(`标准公共基本条目读取失败：${error instanceof Error ? error.message : "请重新上传完整标准。"}`);
+  }
+}
+
+async function startOutlineGeneration(occupationId: string, requestedLevels: readonly string[], actorId: string, mode: "textbook" | "model") {
+  const selectedLevels = Array.from(new Set(requestedLevels)).map(validateLevel);
+  if (!selectedLevels.length || selectedLevels.some((level) => !isTheoryOutlineGenerationLevel(level))) {
+    throw new TheoryOutlineGenerationError("本次仅支持五级、四级、三级。");
+  }
+  await ensureSharedOccupationStandard(occupationId, actorId);
+  const input = await withTransaction(async (connection) => {
+    const projectId = await getProjectForOccupation(connection, occupationId);
+    const [active] = await connection.execute<RowDataPacket[]>(
+      `SELECT id FROM theory_outline_generation_jobs WHERE occupation_id = ? AND status IN ('queued', 'running') LIMIT 1 FOR UPDATE`,
+      [occupationId],
     );
+    if (active.length) throw new TheoryOutlineGenerationError("当前职业已有生成任务，请等待完成后再生成。");
+    const [textbooks] = mode === "textbook" ? await connection.execute<(RowDataPacket & { id: string })[]>(
+      `SELECT DISTINCT sv.id, sv.created_at FROM sources s
+       INNER JOIN source_versions sv ON sv.id = s.current_version_id
+       INNER JOIN source_scopes ss ON ss.source_version_id = sv.id
+       WHERE s.project_id = ? AND s.source_type = 'textbook' AND s.status = 'active'
+         AND ss.occupation_id = ? AND ss.assessment_mode = 'theory'
+       ORDER BY sv.created_at DESC, sv.id DESC LIMIT 1`,
+      [projectId, occupationId],
+    ) : [[]];
+    const textbookVersionId = textbooks[0]?.id ?? null;
+    if (mode === "textbook" && !textbookVersionId) throw new TheoryOutlineGenerationError("请先上传一次基础知识教材，后续自动使用最新教材。");
+    const chapters = textbookVersionId ? await loadChapters(textbookVersionId, connection) : [];
+    const knowledge = await loadStandardKnowledge(connection, occupationId);
+    const basic = mode === "model" ? await loadStandardBasic(connection, knowledge, projectId) : [];
+    try {
+      if (mode === "textbook") validateTextbookInputs(chapters, knowledge, selectedLevels);
+      else validateStandardInputs(basic, knowledge, selectedLevels);
+    } catch (error) {
+      throw new TheoryOutlineGenerationError(error instanceof Error ? error.message : "教材或标准条目不完整。");
+    }
+    const jobs: Array<{ jobId: string; level: LevelCode }> = [];
+    for (const level of selectedLevels) {
+      const jobId = createUlid();
+      await connection.execute(
+        `INSERT INTO theory_outline_generation_jobs
+          (id, project_id, occupation_id, level_code, textbook_source_version_id, generation_mode, total_batches, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [jobId, projectId, occupationId, level, textbookVersionId, mode, (mode === "textbook" ? chapters.length : basic.length) + knowledge.filter((item) => item.levelCode === level).length, actorId],
+      );
+      jobs.push({ jobId, level });
+    }
+    return { jobs, chapters, knowledge, basic, mode };
+  });
+  void runOutlineGeneration(input).catch(() => undefined);
+  return input.jobs.map(({ jobId }) => ({ jobId }));
+}
+
+async function runOutlineGeneration(input: {
+  jobs: Array<{ jobId: string; level: LevelCode }>; chapters: Chapter[]; knowledge: StandardKnowledge[];
+  basic: StandardBasicSource[]; mode: "textbook" | "model";
+}) {
+  const ids = input.jobs.map((job) => job.jobId);
+  const placeholders = ids.map(() => "?").join(",");
+  try {
+    await query(`UPDATE theory_outline_generation_jobs SET status = 'running', started_at = UTC_TIMESTAMP(3) WHERE id IN (${placeholders})`, ids);
+    const first = await loadJob(ids[0]);
+    if (!first) throw new TheoryOutlineGenerationError("生成任务不存在。");
+    const onProgress = async (level: string, completed: number, points: TextbookPoint[]) => {
+        await query(
+          `UPDATE theory_outline_generation_jobs SET completed_batches = ?, generated_point_count = ?, draft_snapshot_json = ? WHERE id = ? AND status = 'running'`,
+          [completed, points.length, JSON.stringify(points), input.jobs.find((job) => job.level === level)!.jobId],
+        );
+    };
+    const result = input.mode === "textbook"
+      ? await generateTextbookOutlines(first.occupation_name, input.chapters, input.knowledge, input.jobs.map((job) => job.level), callModel, onProgress)
+      : await generateStandardOutlines(first.occupation_name, input.basic, input.knowledge, input.jobs.map((job) => job.level), callModel, onProgress);
+    // Publish all selected grades and their shared foundation in one transaction.
+    await withTransaction(async (connection) => {
+      await getProjectForOccupation(connection, first.occupation_id);
+      const [jobs] = await connection.execute<(RowDataPacket & { id: string; status: string })[]>(
+        `SELECT id, status FROM theory_outline_generation_jobs WHERE id IN (${placeholders}) FOR UPDATE`, ids,
+      );
+      if (jobs.length !== ids.length || jobs.some((job) => job.status !== "running")) {
+        throw new TheoryOutlineGenerationError("生成任务已终止，未发布新版本。");
+      }
+      for (const { jobId, level } of input.jobs) {
+        const versionId = await saveGeneratedOutline(connection, { ...first, level_code: level }, result.get(level)!);
+        await connection.execute(
+          `UPDATE theory_outline_generation_jobs SET status = 'succeeded', result_blueprint_version_id = ?, finished_at = UTC_TIMESTAMP(3), error_message = NULL, draft_snapshot_json = NULL WHERE id = ?`,
+          [versionId, jobId],
+        );
+      }
+    });
   } catch (error) {
     await query(
-      `UPDATE theory_outline_generation_jobs SET status = 'failed', error_message = ?, finished_at = UTC_TIMESTAMP(3), draft_snapshot_json = NULL WHERE id = ?`,
-      [error instanceof Error ? error.message.slice(0, 2000) : "细目表生成失败。", jobId],
+      `UPDATE theory_outline_generation_jobs SET status = 'failed', error_message = ?, finished_at = UTC_TIMESTAMP(3), draft_snapshot_json = NULL WHERE id IN (${placeholders}) AND status IN ('queued', 'running')`,
+      [error instanceof Error ? error.message.slice(0, 2000) : "教材与标准生成失败。", ...ids],
     );
   }
 }
 
-async function generateForWeight(job: RowDataPacket & { occupation_name: string; level_code: LevelCode; generation_mode: "textbook" | "model" }, item: TheoryWeightItem, chapters: Chapter[], targetCount: number, reservedPointKeys: Set<string>, batchIndex: number, batchCount: number) {
-  const weight = Number(item.weights[job.level_code] ?? 0);
-  const accepted = await generateAssessmentBatch({
-    occupationName: job.occupation_name, levelCode: job.level_code, mode: job.generation_mode,
-    category: item.category, topic: item.name, weight, chapters, targetCount, reservedPointKeys,
-    batchIndex, batchCount,
-  }, callModel);
-  const primaryWeight = Number(item.weights[job.level_code] ?? 0);
-  return accepted.map((point) => ({
-    primaryName: item.category, primaryWeight, secondaryName: item.name, secondaryWeight: weight,
-    tertiaryName: point.tertiaryName || item.name, tertiaryWeight: weight, name: point.name,
-    importanceCode: point.importance, sourceChapterIds: point.sourceChapterIds,
-  }));
-}
-
-async function publishGeneratedOutline(job: RowDataPacket & { project_id: string; occupation_id: string; level_code: LevelCode; generation_mode: string; textbook_source_version_id: string | null; created_by: string }, points: GeneratedPoint[]) {
-  return withTransaction(async (connection) => {
+async function saveGeneratedOutline(connection: PoolConnection, job: RowDataPacket & { project_id: string; occupation_id: string; level_code: LevelCode; generation_mode: string; textbook_source_version_id: string | null; created_by: string }, points: GeneratedPoint[]) {
     const blueprintId = await getOrCreateOutlineBlueprint(connection, job.project_id, job.occupation_id, job.level_code);
     const [versions] = await connection.execute<(RowDataPacket & { version_no: number })[]>(
       "SELECT COALESCE(MAX(version_no), 0) AS version_no FROM blueprint_versions WHERE blueprint_id = ? FOR UPDATE", [blueprintId],
     );
     const versionId = createUlid();
     const versionNo = Number(versions[0].version_no) + 1;
-    const snapshot = { sourceName: job.generation_mode === "textbook" ? "最新教材 AI 生成" : "AI 大模型生成", points: points.map((point, index) => ({ ...point, ordinal: index + 1 })) };
+    const snapshot = { sourceName: job.generation_mode === "textbook" ? "教材章节公共基础知识 + 对应等级职业标准 AI 生成" : "职业标准公共基本要求 + 对应等级相关知识要求 AI 生成", points: points.map((point, index) => ({ ...point, ordinal: index + 1 })) };
     await connection.execute(
       `INSERT INTO blueprint_versions (id, blueprint_id, version_no, status, content_hash, snapshot_json, published_at, created_by)
        VALUES (?, ?, ?, 'published', ?, ?, UTC_TIMESTAMP(3), ?)`,
@@ -286,12 +350,16 @@ async function publishGeneratedOutline(job: RowDataPacket & { project_id: string
         `INSERT INTO blueprint_nodes (id, blueprint_version_id, node_kind, node_code, name, ordinal, weight, importance, requirement_json, source_ref_json)
          VALUES (?, ?, 'assessment_point', ?, ?, ?, ?, ?, ?, ?)`,
         [nodeId, versionId, `${prefix}-${String(ordinal).padStart(3, "0")}`, point.name, index + 1, point.tertiaryWeight, importance,
-          JSON.stringify({ primaryNo: primaryCode, primaryName: point.primaryName, primaryWeight: point.primaryWeight, secondaryNo: secondaryCode, secondaryName: point.secondaryName, secondaryWeight: point.secondaryWeight, tertiaryNo: tertiaryCode, tertiaryName: point.tertiaryName, tertiaryWeight: point.tertiaryWeight, importanceCode: point.importanceCode }),
-          JSON.stringify({ chapterIds: point.sourceChapterIds })],
+          JSON.stringify({ primaryNo: primaryCode, primaryName: point.primaryName, primaryWeight: point.primaryWeight, secondaryNo: secondaryCode, secondaryName: point.secondaryName, secondaryWeight: point.secondaryWeight, tertiaryNo: tertiaryCode, tertiaryName: point.tertiaryName, tertiaryWeight: point.tertiaryWeight, importanceCode: point.importanceCode, sectionKind: point.sectionKind, sharedPointKey: point.sharedPointKey, standardSource: point.standardSource, remark: point.sourceWarning }),
+          JSON.stringify({ chapterIds: point.sourceChapterIds, sharedPointKey: point.sharedPointKey, standard: point.standardSource, standardBasic: point.standardBasicSource })],
       );
       for (const [type, count] of [["single", 4], ["judgement", 2]] as const) {
         await connection.execute(`INSERT INTO theory_outline_point_quotas (id, blueprint_node_id, question_type, target_count) VALUES (?, ?, ?, ?)`, [createUlid(), nodeId, type, count]);
       }
+    }
+    const standardSourceIds = new Set(points.flatMap((point) => [point.standardSource?.sourceVersionId, point.standardBasicSource?.sourceVersionId].filter((id): id is string => Boolean(id))));
+    for (const sourceId of standardSourceIds) {
+      await connection.execute("INSERT INTO blueprint_version_sources (blueprint_version_id, source_version_id) VALUES (?, ?)", [versionId, sourceId]);
     }
     await connection.execute("UPDATE blueprints SET current_version_id = ?, status = 'published', row_version = row_version + 1 WHERE id = ?", [versionId, blueprintId]);
     if (job.textbook_source_version_id) {
@@ -302,7 +370,6 @@ async function publishGeneratedOutline(job: RowDataPacket & { project_id: string
     }
     await connection.execute(`INSERT INTO audit_logs (id, project_id, actor_id, action, object_type, object_id, after_json, result) VALUES (?, ?, ?, 'blueprint.theory_outline.generate', 'blueprint_version', ?, ?, 'success')`, [createUlid(), job.project_id, job.created_by, versionId, JSON.stringify({ versionNo, pointCount: points.length })]);
     return versionId;
-  });
 }
 
 async function loadJob(jobId: string) {
@@ -312,10 +379,12 @@ async function loadJob(jobId: string) {
   );
   return rows[0] ?? null;
 }
-async function loadChapters(sourceVersionId: string) {
-  const rows = await query<(RowDataPacket & { id: string; ordinal: number; chapter_title: string; section_title: string | null; content_text: string })[]>(
-    "SELECT id, ordinal, chapter_title, section_title, content_text FROM textbook_chapters WHERE source_version_id = ? ORDER BY ordinal", [sourceVersionId],
-  );
+async function loadChapters(sourceVersionId: string, connection?: PoolConnection) {
+  type ChapterRow = RowDataPacket & { id: string; ordinal: number; chapter_title: string; section_title: string | null; content_text: string };
+  const sql = "SELECT id, ordinal, chapter_title, section_title, content_text FROM textbook_chapters WHERE source_version_id = ? ORDER BY ordinal, id";
+  const rows = connection
+    ? (await connection.execute<ChapterRow[]>(sql, [sourceVersionId]))[0]
+    : await query<ChapterRow[]>(sql, [sourceVersionId]);
   return rows.map((row) => ({ id: row.id, ordinal: row.ordinal, chapterTitle: row.chapter_title, sectionTitle: row.section_title, content: row.content_text }));
 }
 async function extractText(bytes: Buffer, extension: string) {

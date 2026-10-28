@@ -60,13 +60,14 @@ export async function GET() {
         content_json: unknown;
         answer_json: unknown;
         analysis_text: string | null;
+        score_rubric_json: unknown;
         point_name: string | null;
         assigned_at: string;
         current_status: string;
       })[]
     >(
       `SELECT ra.id AS assignment_id, q.id AS question_id, qv.id AS question_version_id, q.question_no, po.name AS occupation_name,
-              q.level_code, q.assessment_mode, q.question_type, qv.stem, qv.content_json, qv.answer_json, qv.analysis_text,
+              q.level_code, q.assessment_mode, q.question_type, qv.stem, qv.content_json, qv.answer_json, qv.analysis_text, qv.score_rubric_json,
               (SELECT GROUP_CONCAT(DISTINCT bn.name ORDER BY bn.ordinal SEPARATOR '、')
                 FROM question_assessment_points qap JOIN blueprint_nodes bn ON bn.id=qap.blueprint_node_id
                 WHERE qap.question_version_id=qv.id) AS point_name, ra.assigned_at,q.current_status
@@ -108,6 +109,7 @@ export async function GET() {
           content: decode(task.content_json),
           answer: decode(task.answer_json),
           analysis: task.analysis_text,
+          scoreRubric: task.score_rubric_json ? decode(task.score_rubric_json) : null,
           pointName: task.point_name ?? "未关联考评点",
           assignedAt: task.assigned_at,
           status: task.current_status,

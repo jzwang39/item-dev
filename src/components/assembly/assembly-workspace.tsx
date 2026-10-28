@@ -1,6 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { WeightedSection } from "@/modules/assembly/weight-policy";
+import { paperFormat, type PaperPresentation } from "@/modules/documents/paper-presentation";
+import { PaperSamplePreview } from "./paper-sample-preview";
+
+type WeightPreview = {
+  valid: boolean; message: string; excluded: number; paperCount: number; fingerprint: string;
+  basis: { versionId: string; versionNo: number; direction: string };
+  ranges: Array<{ key: string; category: string; name: string; weight: number; targetScore: number; available: number; byType: Array<{ type: string; available: number }> }>;
+  sections: WeightedSection[]; suggestion: WeightedSection[] | null; suggestionError: string;
+};
 
 type Occupation = { id: string; name: string; code: string };
 type Structure = {
@@ -15,6 +25,7 @@ type Structure = {
   total_items: number;
   total_score: number;
   snapshot_json: { sections?: typeof initialSections };
+  updated_at: string;
 };
 type Plan = {
   id: string;
@@ -26,6 +37,7 @@ type Plan = {
   assessment_mode: string;
   structure_name: string;
   paper_count: number;
+  updated_at: string;
 };
 type PlanDetail = {
   id: string;
@@ -38,7 +50,7 @@ type PlanDetail = {
   paper_structure_version_id: string;
   total_items: number;
   total_score: number;
-  snapshot_json: { paperCount: number; structureVersionId: string };
+  snapshot_json: { paperCount: number; structureVersionId: string; weightDirection?: string };
   slots: {
     slot_no: number;
     section_no: number;
@@ -65,8 +77,15 @@ type Paper = {
   item_count: number;
 };
 type PaperDetail = Omit<Paper, "item_count"> & {
+  presentation?: PaperPresentation;
+  duration_minutes: number;
+  weightValidation?: {
+    basis: { versionNo: number; direction: string };
+    ranges: Array<{ key: string; name: string; weight: number; targetScore: number; actualScore: number }>;
+  };
   items: {
     item_no: number;
+    section_no: number;
     question_no_snapshot: string;
     question_type: string;
     stem_snapshot: string;
@@ -74,6 +93,7 @@ type PaperDetail = Omit<Paper, "item_count"> & {
       options?: { key: string; text?: string; content?: string }[];
     };
     answer_snapshot_json: unknown;
+    score_rubric_snapshot_json: unknown;
     score: number;
   }[];
 };
@@ -84,7 +104,12 @@ const labels: Record<string, string> = {
   level_2: "二级 / 技师",
   level_1: "一级 / 高级技师",
 };
-const initialSections = [
+const practicalSection = {
+  questionType: "实操题",
+  itemCount: 0,
+  scorePerItem: 100,
+};
+const initialSections: WeightedSection[] = [
   { questionType: "A 填空题", itemCount: 0, scorePerItem: 1 },
   { questionType: "B 单项选择题", itemCount: 80, scorePerItem: 1 },
   { questionType: "D 多项选择题", itemCount: 0, scorePerItem: 1 },
@@ -92,6 +117,7 @@ const initialSections = [
   { questionType: "E 简答(计算题)", itemCount: 0, scorePerItem: 5 },
   { questionType: "F 论述题", itemCount: 0, scorePerItem: 10 },
   { questionType: "I 案例分析题", itemCount: 0, scorePerItem: 10 },
+  practicalSection,
 ];
 
 export function AssemblyWorkspace() {
@@ -321,6 +347,18 @@ function StepOne({
                 {item.duration_minutes}分钟 · {item.total_items}题 /{" "}
                 {item.total_score}分
               </p>
+              <p className="mb-0 mt-2 text-sm text-[#7185a5]">
+                最后修改时间：
+                {item.updated_at ? (
+                  <time dateTime={item.updated_at}>
+                    {new Date(item.updated_at).toLocaleString("zh-CN", {
+                      year: "numeric", month: "2-digit", day: "2-digit",
+                      hour: "2-digit", minute: "2-digit", second: "2-digit",
+                      hour12: false,
+                    })}
+                  </time>
+                ) : "暂无记录"}
+              </p>
             </div>
             <div className="flex gap-3">
               <button
@@ -383,21 +421,78 @@ function StepTwo({
   onEdit: (id: string) => Promise<void>;
   onViewStructure: (id: string) => Promise<void>;
 }>) {
+  const [executingPlanId, setExecutingPlanId] = useState<string | null>(null);
+  const executionPending = useRef(false);
+  const [weightPreview, setWeightPreview] = useState<{ planId: string; data: WeightPreview } | null>(null);
+  const [checkingPlanId, setCheckingPlanId] = useState<string | null>(null);
+  const [adjusting, setAdjusting] = useState(false);
+  const checkingPending = useRef(false);
+  const checkWeights = async (id: string) => {
+    if (checkingPending.current || executionPending.current) return;
+    checkingPending.current = true;
+    setCheckingPlanId(id);
+    try {
+      const response = await fetch("/api/v1/assembly", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "weight_preview", planId: id }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error?.message ?? "权重校验失败。");
+      setWeightPreview({ planId: id, data: body.data });
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "权重校验失败。");
+    } finally {
+      checkingPending.current = false;
+      setCheckingPlanId(null);
+    }
+  };
+  const confirmAdjustment = async () => {
+    if (!weightPreview || checkingPending.current) return;
+    checkingPending.current = true;
+    setAdjusting(true);
+    try {
+      const response = await fetch("/api/v1/assembly", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "weight_adjust", planId: weightPreview.planId, fingerprint: weightPreview.data.fingerprint }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error?.message ?? "确认调整失败。");
+      onNotice(body.data.message);
+      setWeightPreview(null);
+      await onRefresh();
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "确认调整失败。");
+      setWeightPreview(null);
+    } finally {
+      checkingPending.current = false;
+      setAdjusting(false);
+    }
+  };
   const execute = async (id: string) => {
-    const response = await fetch("/api/v1/assembly", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "execute", planId: id }),
-    });
-    const body = await response.json();
-    if (response.ok && body.data.executed)
-      onNotice(`组卷完成，已生成 ${body.data.paperIds.length} 套试卷。`);
-    else if (response.ok)
-      onNotice(
-        `题库检查未通过：${body.data.gaps.map((gap: { questionType: string; shortage: number }) => `${gap.questionType}缺${gap.shortage}道`).join("；")}`,
-      );
-    else onNotice(body.error?.message ?? "执行组卷失败。");
-    await onRefresh();
+    if (executionPending.current || checkingPending.current) return;
+    executionPending.current = true;
+    setExecutingPlanId(id);
+    try {
+      const response = await fetch("/api/v1/assembly", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "execute", planId: id }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error?.message ?? "执行组卷失败。");
+      if (body.data.executed)
+        onNotice(`组卷完成，本次新增 ${body.data.paperIds.length} 套试卷${body.data.presentation ? `，已采用《${body.data.presentation.format.sampleName}》样式` : ""}，历史成果已保留。`);
+      else {
+        onNotice(body.data.message ?? "权重校验未通过，未生成试卷。");
+        if (body.data.validation) setWeightPreview({ planId: id, data: body.data.validation });
+      }
+      await onRefresh();
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "执行组卷失败，请重试。");
+    } finally {
+      executionPending.current = false;
+      setExecutingPlanId(null);
+    }
   };
   const remove = async (id: string) => {
     if (!window.confirm("确定删除该组卷计划吗？")) return;
@@ -468,7 +563,7 @@ function StepTwo({
                 {item.status === "completed"
                   ? "已完成"
                   : item.status === "incomplete"
-                    ? "题库不足"
+                    ? "校验未通过"
                     : "待完善"}
               </span>
             </div>
@@ -477,7 +572,27 @@ function StepTwo({
               {labels[item.level_code]} ·{" "}
               {item.assessment_mode === "theory" ? "理论知识" : "操作技能"}
             </p>
+            <p className="mb-3 text-sm text-[#7185a5]">
+              最后修改时间：
+              {item.updated_at ? (
+                <time dateTime={item.updated_at}>
+                  {new Date(item.updated_at).toLocaleString("zh-CN", {
+                    year: "numeric", month: "2-digit", day: "2-digit",
+                    hour: "2-digit", minute: "2-digit", second: "2-digit",
+                    hour12: false,
+                  })}
+                </time>
+              ) : "暂无记录"}
+            </p>
             <div className="flex flex-wrap gap-3">
+              <button
+                className="rounded-xl border border-[#d5e0ef] px-4 py-2 text-[#4e6484] disabled:opacity-50"
+                disabled={Boolean(executingPlanId || checkingPlanId || adjusting)}
+                onClick={() => void checkWeights(item.id)}
+                type="button"
+              >
+                {checkingPlanId === item.id ? "校验中..." : "权重校验 / 调整结构"}
+              </button>
               <button
                 className="rounded-xl border border-[#d5e0ef] px-4 py-2 text-[#4e6484]"
                 onClick={() => void onShow(item.id)}
@@ -507,11 +622,12 @@ function StepTwo({
                 ⇩ 下载计划书
               </button>
               <button
-                className="rounded-xl bg-[#405fe7] px-4 py-2 text-white"
+                className="rounded-xl bg-[#405fe7] px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={Boolean(executingPlanId || checkingPlanId || adjusting)}
                 onClick={() => void execute(item.id)}
                 type="button"
               >
-                执行组卷
+                {executingPlanId === item.id ? "组卷中..." : "执行组卷"}
               </button>
               <button
                 className="rounded-xl border border-[#f1c5c5] px-4 py-2 text-[#c85a5a]"
@@ -529,6 +645,59 @@ function StepTwo({
           </p>
         ) : null}
       </div>
+      {weightPreview ? (
+        <Dialog title="范围权重校验与结构调整" onClose={() => { if (!adjusting) setWeightPreview(null); }}>
+          <p className={`rounded-xl p-4 ${weightPreview.data.valid ? "bg-[#edf8f0] text-[#32764b]" : "bg-[#fff4df] text-[#a96f13]"}`}>
+            {weightPreview.data.message}
+          </p>
+          <p className="text-sm text-[#7185a5]">
+            权重表 V{weightPreview.data.basis.versionNo} · 方向：{weightPreview.data.basis.direction} ·
+            每套100分，共{weightPreview.data.paperCount}套。未明确归属、跨范围或评分标准无效的试题已排除{weightPreview.data.excluded}道。
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[640px] text-left text-sm">
+              <thead><tr><th className="p-3">范围</th><th>权重</th><th>每套目标分数</th><th>可用库存（全部套数共享）</th></tr></thead>
+              <tbody>{weightPreview.data.ranges.map((range) => (
+                <tr key={range.key} className="border-t border-[#e4eaf3]">
+                  <td className="p-3">{range.category} · {range.name}</td><td>{range.weight}%</td><td>{range.targetScore}分</td>
+                  <td>{range.byType.map((item) => `${item.type} ${item.available}道`).join("；")}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+          {weightPreview.data.suggestion ? (
+            <>
+              <h3 className="mt-6 font-semibold">建议调整结构（尚未保存）</h3>
+              <p className="text-sm text-[#7185a5]">
+                原结构{weightPreview.data.sections.reduce((sum, row) => sum + row.itemCount, 0)}题；
+                建议结构{weightPreview.data.suggestion.reduce((sum, row) => sum + row.itemCount, 0)}题，100分。
+                确认后新建结构并保存本计划新版本，保留旧结构和历史成果；实操评分项仅在试卷中同比换算，不修改原题。
+              </p>
+              <p className="text-sm text-[#7185a5]">原配置：{weightPreview.data.sections.map((row) => `${row.questionType} ${row.itemCount}题 × ${row.scorePerItem}分`).join("；")}</p>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[640px] text-left text-sm">
+                  <thead><tr><th className="p-3">范围</th><th>题型</th><th>题量</th><th>每题分值</th><th>配分</th></tr></thead>
+                  <tbody>{weightPreview.data.suggestion.map((row, index) => (
+                    <tr key={index} className="border-t border-[#e4eaf3]">
+                      <td className="p-3">{weightPreview.data.ranges.find((range) => range.key === row.rangeKey)?.name}</td>
+                      <td>{row.questionType}</td><td>{row.itemCount}</td><td>{row.scorePerItem}</td>
+                      <td>{Number((row.itemCount * row.scorePerItem).toFixed(2))}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </>
+          ) : weightPreview.data.suggestionError ? <p className="mt-4 text-[#c44c4c]">{weightPreview.data.suggestionError}</p> : null}
+          <div className="mt-7 flex justify-end gap-3">
+            <button type="button" disabled={adjusting} onClick={() => setWeightPreview(null)} className="rounded-xl border px-5 py-3">关闭</button>
+            {weightPreview.data.suggestion ? (
+              <button type="button" disabled={adjusting} onClick={() => void confirmAdjustment()} className="rounded-xl bg-[#405fe7] px-5 py-3 text-white disabled:opacity-50">
+                {adjusting ? "保存中..." : "确认调整并保存，暂不组卷"}
+              </button>
+            ) : null}
+          </div>
+        </Dialog>
+      ) : null}
     </section>
   );
 }
@@ -661,9 +830,12 @@ function StructureModal({
   const [durationMinutes, setDurationMinutes] = useState(
     editingStructure?.duration_minutes ?? 90,
   );
-  const [sections, setSections] = useState(
-    initialSnapshot?.sections ?? initialSections,
-  );
+  const [sections, setSections] = useState(() => {
+    const saved = initialSnapshot?.sections ?? initialSections;
+    return saved.some((row) => row.questionType === practicalSection.questionType)
+      ? saved.map((row) => ({ ...row }))
+      : [...saved.map((row) => ({ ...row })), { ...practicalSection }];
+  });
   const [error, setError] = useState("");
   const totalItems = sections.reduce((sum, row) => sum + row.itemCount, 0);
   const totalScore = sections.reduce(
@@ -812,9 +984,9 @@ function StructureModal({
               {sections.map((row, index) => (
                 <tr
                   className="border-t border-[#e4eaf3]"
-                  key={row.questionType}
+                  key={`${index}-${row.questionType}`}
                 >
-                  <td className="p-4 text-[#30415e]">{row.questionType}</td>
+                  <td className="p-4 text-[#30415e]">{row.questionType}{row.rangeKey ? <small className="block text-[#7185a5]">范围：{row.rangeKey}</small> : null}</td>
                   <td className="p-4">
                     <input
                       className="h-10 w-36 rounded-lg border border-[#cbdaf0] px-3 text-[#385578]"
@@ -830,6 +1002,7 @@ function StructureModal({
                     <input
                       className="h-10 w-36 rounded-lg border border-[#cbdaf0] px-3 text-[#385578]"
                       min={0}
+                      step="0.01"
                       onChange={(e) =>
                         update(index, "scorePerItem", Number(e.target.value))
                       }
@@ -916,12 +1089,13 @@ function StructureDetailModal({
                   <th className="border-b border-r border-[#dce5f0] p-4">
                     题型
                   </th>
-                  {sections.map((item) => (
+                  {sections.map((item, index) => (
                     <th
                       className="border-b border-r border-[#dce5f0] p-4 font-medium"
-                      key={item.questionType}
+                      key={index}
                     >
                       {item.questionType}
+                      {item.rangeKey ? <small className="block">范围：{item.rangeKey}</small> : null}
                     </th>
                   ))}
                   <th className="border-b border-[#dce5f0] p-4">合计</th>
@@ -932,10 +1106,10 @@ function StructureDetailModal({
                   <td className="border-r border-b border-[#dce5f0] bg-[#f8fafc] p-4 text-[#7185a5]">
                     题量
                   </td>
-                  {sections.map((item) => (
+                  {sections.map((item, index) => (
                     <td
                       className="border-r border-b border-[#dce5f0] p-4"
-                      key={item.questionType}
+                      key={index}
                     >
                       {item.itemCount}
                     </td>
@@ -948,10 +1122,10 @@ function StructureDetailModal({
                   <td className="border-r border-b border-[#dce5f0] bg-[#f8fafc] p-4 text-[#7185a5]">
                     每题分值
                   </td>
-                  {sections.map((item) => (
+                  {sections.map((item, index) => (
                     <td
                       className="border-r border-b border-[#dce5f0] p-4"
-                      key={item.questionType}
+                      key={index}
                     >
                       {item.scorePerItem}
                     </td>
@@ -962,12 +1136,12 @@ function StructureDetailModal({
                   <td className="border-r border-[#dce5f0] bg-[#f8fafc] p-4 text-[#7185a5]">
                     配分
                   </td>
-                  {sections.map((item) => (
+                  {sections.map((item, index) => (
                     <td
                       className="border-r border-[#dce5f0] p-4"
-                      key={item.questionType}
+                      key={index}
                     >
-                      {item.itemCount * item.scorePerItem}
+                      {Number((item.itemCount * item.scorePerItem).toFixed(2))}
                     </td>
                   ))}
                   <td className="p-4">{structure.total_score}</td>
@@ -1023,6 +1197,7 @@ function PlanModal({
   const [paperCount, setPaperCount] = useState(
     editingPlan?.snapshot_json.paperCount ?? 2,
   );
+  const [weightDirection, setWeightDirection] = useState(editingPlan?.snapshot_json.weightDirection ?? "");
   const [error, setError] = useState("");
   const save = async () => {
     const response = await fetch("/api/v1/assembly", {
@@ -1034,6 +1209,7 @@ function PlanModal({
         name,
         structureVersionId,
         paperCount,
+        weightDirection,
       }),
     });
     const body = await response.json();
@@ -1079,12 +1255,13 @@ function PlanModal({
             onChange={(value) => setPaperCount(Number(value))}
             type="number"
           />
+          <Field label="职业方向（单方向可留空）" value={weightDirection} onChange={setWeightDirection} placeholder="填写权重表中的完整方向名称" />
           <div className="rounded-lg bg-[#f2f7ff] p-4 text-[#6687b6]">
             使用范围：正式组卷，仅已审定题目。
           </div>
         </div>
         <p className="mt-6 rounded-xl border border-[#d7e5fb] bg-[#f2f7ff] p-5 text-[#6687b6]">
-          保存后按结构题型自动生成各套试卷的题量槽位。执行时会检查已审定题库，题库不足只输出缺口，不生成空白试卷。
+          每套试卷按范围分数占比严格匹配权重，仅抽取已入库且范围归属明确的试题。不满足时阻止组卷，可查看调整建议，确认保存后再执行。
         </p>
         {error ? <p className="text-[#c44c4c]">{error}</p> : null}
         <div className="mt-7 flex justify-end gap-3">
@@ -1202,6 +1379,8 @@ function PaperPreviewModal({
   paper,
   onClose,
 }: Readonly<{ paper: PaperDetail; onClose: () => void }>) {
+  const [kind, setKind] = useState<"paper" | "answers">("paper");
+  const format = paper.presentation?.format ?? paperFormat(paper.assessment_mode);
   return (
     <Dialog title={paper.title} onClose={onClose}>
       <div className="mb-6 rounded-xl bg-[#f4f7fb] px-5 py-4 text-[#526681]">
@@ -1215,39 +1394,23 @@ function PaperPreviewModal({
           {paper.plan_name}
         </p>
       </div>
-      <div className="space-y-6">
-        {paper.items.map((item) => {
-          const answer =
-            typeof item.answer_snapshot_json === "string"
-              ? item.answer_snapshot_json
-              : JSON.stringify(item.answer_snapshot_json);
-          return (
-            <article
-              className="rounded-xl border border-[#e0e6f0] p-6"
-              key={item.item_no}
-            >
-              <p className="m-0 text-sm text-[#7185a5]">
-                第 {item.item_no} 题 · {item.question_type} · {item.score} 分 ·{" "}
-                {item.question_no_snapshot}
-              </p>
-              <h3 className="mb-0 mt-3 text-lg leading-8 text-[#293242]">
-                {item.stem_snapshot}
-              </h3>
-              {(item.content_snapshot_json?.options ?? []).map((option) => (
-                <p
-                  className="mb-0 mt-3 rounded-lg border border-[#e4eaf3] px-4 py-3 text-[#40506a]"
-                  key={option.key}
-                >
-                  {option.key}. {option.text ?? option.content ?? ""}
-                </p>
-              ))}
-              <p className="mb-0 mt-4 rounded-lg bg-[#f4f7fb] px-4 py-3 text-[#526681]">
-                答案：{answer}
-              </p>
-            </article>
-          );
-        })}
+      {paper.weightValidation?.ranges ? (
+        <div className="mb-6 rounded-xl border border-[#d7e5fb] p-4 text-sm text-[#526681]">
+          <strong>范围配分核验 · 权重表V{paper.weightValidation.basis.versionNo} · {paper.weightValidation.basis.direction}</strong>
+          {paper.weightValidation.ranges.map((range) => (
+            <p key={range.key}>{range.name}：权重{range.weight}%，目标{range.targetScore}分，实际{range.actualScore}分</p>
+          ))}
+        </div>
+      ) : null}
+      <div className="mb-5 flex flex-wrap items-center gap-3">
+        {(["paper", "answers"] as const).map((value) => (
+          <button key={value} type="button" onClick={() => setKind(value)} className={`rounded-lg border px-4 py-2 ${kind === value ? "border-[#405fe7] bg-[#405fe7] text-white" : "border-[#d7e2f5] text-[#526681]"}`}>
+            {value === "paper" ? "考生试卷" : "答案及评分标准"}
+          </button>
+        ))}
+        <span className="text-sm text-[#7185a5]">样式：{format.sampleName}</span>
       </div>
+      <PaperSamplePreview paper={paper} kind={kind} />
     </Dialog>
   );
 }
@@ -1262,7 +1425,7 @@ function Dialog({
   children: React.ReactNode;
 }>) {
   return (
-    <div className="fixed inset-0 z-[200] grid place-items-center bg-[#263548]/55 p-4 backdrop-blur-[2px]">
+    <div aria-modal="true" role="dialog" aria-label={title} className="fixed inset-0 z-[200] grid place-items-center bg-[#263548]/55 p-4 backdrop-blur-[2px]">
       <div className="max-h-[94vh] w-full max-w-[1255px] overflow-y-auto rounded-[22px] bg-white p-9 shadow-[0_22px_55px_rgba(29,42,59,0.24)]">
         <div className="mb-7 flex justify-between border-b border-[#e5e9f0] pb-5">
           <h2 className="m-0 text-2xl">{title}</h2>

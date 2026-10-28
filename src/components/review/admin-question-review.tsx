@@ -1,10 +1,12 @@
 "use client";
 import { useState } from "react";
+import { ScoreRubric } from "@/components/questions/score-rubric";
 
 export type EditableReviewTask = {
   id: string; assignmentId?: string | null; versionId: string; questionNo: string;
   questionType: string; stem: string; analysis?: string | null; answer?: unknown;
   content?: { options?: Array<{ key?: string; content?: string; text?: string }> };
+  scoreRubric?: unknown;
 };
 
 export function AdminQuestionReview({ task, onClose, onSaved, role = "admin" }: Readonly<{
@@ -15,7 +17,8 @@ export function AdminQuestionReview({ task, onClose, onSaved, role = "admin" }: 
     key: option.key ?? String.fromCharCode(65 + index), content: option.content ?? option.text ?? "",
   })));
   const originalAnswers = task.answer && typeof task.answer === "object" ? (task.answer as { answers?: string[] }).answers : null;
-  const [answer, setAnswer] = useState(originalAnswers?.join("、") ?? (typeof task.answer === "string" ? task.answer : ""));
+  const practical = task.questionType === "实操题";
+  const [answer, setAnswer] = useState(originalAnswers?.join(practical ? "\n" : "、") ?? (typeof task.answer === "string" ? task.answer : ""));
   const [analysis, setAnalysis] = useState(task.analysis ?? "");
   const [opinion, setOpinion] = useState("");
   const [decision, setDecision] = useState("approved");
@@ -29,7 +32,7 @@ export function AdminQuestionReview({ task, onClose, onSaved, role = "admin" }: 
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           questionId: task.id, assignmentId: task.assignmentId, versionId: task.versionId, action: role === "expert" ? "revise" : "review",
-          stem, options, answers: answer.split(/[、,，]/).map((value) => value.trim()).filter(Boolean), analysis, opinion, decision,
+          stem, options, answers: answer.split(practical ? /\n+/ : /[、,，]/).map((value) => value.trim()).filter(Boolean), analysis, opinion, decision,
         }),
       });
       const payload = await response.json();
@@ -46,8 +49,12 @@ export function AdminQuestionReview({ task, onClose, onSaved, role = "admin" }: 
         <p className="mb-5 rounded-lg bg-[#fff7e7] p-4 text-sm text-[#a6711f]">{role === "expert" ? "仅修订本人分配试题，保存新版本后在列表重新审核。审核通过后交由管理员确认，不直接入库。" : "以当前管理员身份代审并留痕。通过后进入待管理员确认，不直接入库；修改内容将保存新版本。"}</p>
         <label className="block">题干<textarea className={`${field} h-28`} value={stem} onChange={(event) => setStem(event.target.value)} /></label>
         {options.map((option, index) => <label key={option.key} className="mt-4 block">选项 {option.key}<input className={field} value={option.content} onChange={(event) => setOptions((current) => current.map((value, i) => i === index ? { ...value, content: event.target.value } : value))} /></label>)}
-        <label className="mt-4 block">答案（多个答案以顿号分隔）<input className={field} value={answer} onChange={(event) => setAnswer(event.target.value)} /></label>
+        <label className="mt-4 block">{practical ? "参考操作步骤（每行一步）" : "答案（多个答案以顿号分隔）"}
+          {practical ? <textarea className={`${field} h-40`} value={answer} onChange={(event) => setAnswer(event.target.value)} />
+            : <input className={field} value={answer} onChange={(event) => setAnswer(event.target.value)} />}
+        </label>
         <label className="mt-4 block">解析<textarea className={`${field} h-28`} value={analysis} onChange={(event) => setAnalysis(event.target.value)} /></label>
+        <ScoreRubric value={task.scoreRubric} />
         {role === "admin" ? <label className="mt-4 block">审定结论<select className={field} value={decision} onChange={(event) => setDecision(event.target.value)}><option value="approved">同意通过，待管理员确认</option><option value="returned">退回修订</option></select></label> : null}
         <label className="mt-4 block">{role === "expert" ? "修订说明" : "审定意见"}<textarea className={`${field} h-24`} value={opinion} onChange={(event) => setOpinion(event.target.value)} /></label>
         <label className="mt-4 flex gap-3"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />{role === "expert" ? "我确认以本人专家身份据实修订" : "我确认以管理员身份据实修订并代审"}</label>

@@ -12,7 +12,10 @@ export type PdfExtractionResult = {
   text: string;
   usedOcr: boolean;
   pageCount: number;
+  layout?: PdfTextRun[][];
 };
+
+export type PdfTextRun = { text: string; x: number; y: number; width: number; height: number };
 
 export class DocumentExtractionError extends Error {
   constructor(
@@ -24,8 +27,8 @@ export class DocumentExtractionError extends Error {
   }
 }
 
-export async function extractPdfText(bytes: Buffer): Promise<PdfExtractionResult> {
-  const native = await extractNativePdfText(bytes);
+export async function extractPdfText(bytes: Buffer, options: { includeLayout?: boolean } = {}): Promise<PdfExtractionResult> {
+  const native = await extractNativePdfText(bytes, options.includeLayout);
   if (native.text.length >= nativeTextThreshold) {
     return { ...native, usedOcr: false };
   }
@@ -43,7 +46,7 @@ export async function extractDocxText(bytes: Buffer): Promise<string> {
   }
 }
 
-async function extractNativePdfText(bytes: Buffer): Promise<Omit<PdfExtractionResult, "usedOcr">> {
+async function extractNativePdfText(bytes: Buffer, includeLayout = false): Promise<Omit<PdfExtractionResult, "usedOcr">> {
   let loadingTask: ReturnType<typeof getDocument> | undefined;
   let document;
   try {
@@ -57,12 +60,16 @@ async function extractNativePdfText(bytes: Buffer): Promise<Omit<PdfExtractionRe
     loadingTask = getDocument({ data, useWorkerFetch: false });
     document = await loadingTask.promise;
     const pages: string[] = [];
+    const layout: PdfTextRun[][] = [];
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
       const content = await page.getTextContent();
       pages.push(content.items.map((item) => ("str" in item ? item.str : "")).join(" "));
+      if (includeLayout) layout.push(content.items.flatMap((item) => "str" in item ? [{
+        text: item.str, x: item.transform[4], y: item.transform[5], width: item.width, height: item.height,
+      }] : []));
     }
-    return { text: normalizeText(pages.join("\n")), pageCount: document.numPages };
+    return { text: normalizeText(pages.join("\n")), pageCount: document.numPages, ...(includeLayout ? { layout } : {}) };
   } catch (error) {
     throw new DocumentExtractionError("INVALID_PDF", `PDF 文件无法读取：${getErrorMessage(error)}`);
   } finally {

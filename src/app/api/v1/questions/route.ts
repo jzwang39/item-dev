@@ -6,7 +6,8 @@ import { z } from "zod";
 import { getVerifiedSession } from "@/auth";
 import { createUlid } from "@/shared/database/ulid";
 import { query, withTransaction } from "@/shared/database/mysql";
-import { assertQuestionConfirmed } from "@/modules/authoring/question-confirmation";
+import { bulkStorageSchema } from "@/modules/authoring/question-storage-policy";
+import { storeQuestions } from "@/modules/authoring/question-storage";
 
 const levelCodes = [
   "level_5",
@@ -35,6 +36,8 @@ type QuestionRow = RowDataPacket & {
   assessment_mode: (typeof assessmentModes)[number];
   question_type: string;
   current_status: (typeof statusCodes)[number];
+  current_version_id: string | null;
+  is_confirmed: number;
   difficulty: "easy" | "medium" | "hard" | null;
   created_at: string;
   stem: string | null;
@@ -88,6 +91,9 @@ export async function GET(request: Request) {
 
   const params = new URL(request.url).searchParams;
   const view = params.get("view");
+  if (view === "storage-candidates" && session!.user.role !== "admin") {
+    return NextResponse.json({ error: { code: "FORBIDDEN", message: "仅管理员可选择批量入库试题。" } }, { status: 403 });
+  }
 
   if (
     session!.user.role === "expert" &&
@@ -383,11 +389,39 @@ export async function GET(request: Request) {
     values.push(...Array(5).fill(`%${keyword}%`));
   }
 
+  const pagination = z.object({
+    page: z.coerce.number().int().min(1).max(1000000),
+    pageSize: z.coerce.number().int().min(1).max(100),
+  }).safeParse({ page: params.get("page") ?? 1, pageSize: params.get("pageSize") ?? 20 });
+  if (!pagination.success) {
+    return NextResponse.json({ error: { code: "VALIDATION_FAILED", message: "分页参数无效。" } }, { status: 400 });
+  }
+  const paginated = params.has("page");
+  const { page, pageSize } = pagination.data;
+  const searchJoins = `FROM questions q
+    INNER JOIN projects p ON p.id=q.project_id
+    INNER JOIN project_occupations po ON po.id=q.occupation_id
+    LEFT JOIN question_versions qv ON qv.id=q.current_version_id
+    LEFT JOIN question_assessment_points qap ON qap.question_version_id=qv.id
+    LEFT JOIN blueprint_nodes bn ON bn.id=qap.blueprint_node_id`;
+
   try {
+    if (view === "storage-candidates") {
+      const candidates = await query<(RowDataPacket & { id: string; versionId: string; questionNo: string })[]>(
+        `SELECT DISTINCT q.id, q.current_version_id AS versionId, q.question_no AS questionNo
+         ${searchJoins}
+         WHERE ${conditions.join(" AND ")} AND q.current_status='approved'
+           AND EXISTS (SELECT 1 FROM question_review_confirmations qrc WHERE qrc.question_version_id=q.current_version_id)
+         ORDER BY q.id`,
+        values,
+      );
+      return NextResponse.json({ data: candidates });
+    }
     const rows = await query<QuestionRow[]>(
       `SELECT q.id, q.question_no, po.name AS occupation_name, po.code AS occupation_code,
               q.level_code, q.assessment_mode, q.question_type, q.current_status, q.difficulty,
-              q.created_at, qv.stem, qv.content_json, qv.answer_json, qv.analysis_text,
+              q.created_at, q.current_version_id, qv.stem, qv.content_json, qv.answer_json, qv.analysis_text,
+              EXISTS (SELECT 1 FROM question_review_confirmations qrc WHERE qrc.question_version_id=q.current_version_id) AS is_confirmed,
               GROUP_CONCAT(DISTINCT bn.node_code ORDER BY bn.node_code SEPARATOR '、') AS point_codes,
               GROUP_CONCAT(DISTINCT bn.name ORDER BY bn.ordinal SEPARATOR '、') AS point_names
          FROM questions q
@@ -398,12 +432,15 @@ export async function GET(request: Request) {
          LEFT JOIN blueprint_nodes bn ON bn.id = qap.blueprint_node_id
         WHERE ${conditions.join(" AND ")}
         GROUP BY q.id, q.question_no, po.name, po.code, q.level_code, q.assessment_mode,
-                 q.question_type, q.current_status, q.difficulty, q.created_at, qv.stem,
+                 q.question_type, q.current_status, q.difficulty, q.created_at, q.updated_at, q.current_version_id, qv.stem,
                  qv.content_json, qv.answer_json, qv.analysis_text
-        ORDER BY q.updated_at DESC
-        LIMIT 200`,
+        ORDER BY q.updated_at DESC, q.id DESC
+        LIMIT ${paginated ? pageSize : 200} OFFSET ${paginated ? (page - 1) * pageSize : 0}`,
       values,
     );
+    const [count] = paginated ? await query<(RowDataPacket & { total: number })[]>(
+      `SELECT COUNT(DISTINCT q.id) AS total ${searchJoins} WHERE ${conditions.join(" AND ")}`, values,
+    ) : [{ total: rows.length }];
     const options = await query<
       (RowDataPacket & {
         level_code: (typeof levelCodes)[number];
@@ -427,6 +464,8 @@ export async function GET(request: Request) {
         assessmentMode: row.assessment_mode,
         questionType: row.question_type,
         status: row.current_status,
+        versionId: row.current_version_id,
+        confirmed: Boolean(Number(row.is_confirmed)),
         difficulty: row.difficulty,
         createdAt: row.created_at,
         stem: row.stem ?? "当前试题版本尚未写入题干。",
@@ -436,6 +475,7 @@ export async function GET(request: Request) {
         pointCodes: row.point_codes ?? "—",
         pointNames: row.point_names ?? "未关联考评点",
       })),
+      total: Number(count.total),
       options: options.map((item) => ({
         levelCode: item.level_code,
         assessmentMode: item.assessment_mode,
@@ -554,7 +594,13 @@ export async function PATCH(request: Request) {
       { status: 403 },
     );
   }
-  const parsed = submitSchema.safeParse(await request.json());
+  const body = await request.json();
+  const bulk = body?.action === "bulk_store";
+  const batch = bulk ? bulkStorageSchema.safeParse(body) : null;
+  if (batch && !batch.success) {
+    return NextResponse.json({ error: { code: "VALIDATION_FAILED", message: batch.error.issues[0]?.message ?? "批量入库参数无效。" } }, { status: 400 });
+  }
+  const parsed = submitSchema.safeParse(bulk && batch?.success ? batch.data.questions[0] : body);
   if (!parsed.success) {
     return NextResponse.json(
       { error: { code: "VALIDATION_FAILED", message: "试题标识无效。" } },
@@ -562,54 +608,13 @@ export async function PATCH(request: Request) {
     );
   }
   try {
-    await withTransaction(async (connection) => {
-      const [rows] = await connection.execute<
-        (RowDataPacket & {
-          id: string;
-          project_id: string;
-          current_version_id: string | null;
-          current_status: (typeof statusCodes)[number];
-        })[]
-      >(
-        "SELECT id, project_id, current_version_id, current_status FROM questions WHERE id = ? AND archived_at IS NULL FOR UPDATE",
-        [parsed.data.questionId],
-      );
-      const question = rows[0];
-      if (
-        !question?.current_version_id ||
-        question.current_status !== "approved"
-      )
-        throw new Error("仅已审定状态的试题可以终审入库。");
-      await assertQuestionConfirmed(connection, question.current_version_id);
-      await connection.execute(
-        "UPDATE questions SET current_status = 'stored', row_version = row_version + 1 WHERE id = ?",
-        [question.id],
-      );
-      await connection.execute(
-        "INSERT INTO question_status_events (id, question_id, question_version_id, from_status, to_status, reason, actor_id) VALUES (?, ?, ?, 'approved', 'stored', '管理员终审入库', ?)",
-        [
-          createUlid(),
-          question.id,
-          question.current_version_id,
-          session!.user.id,
-        ],
-      );
-      await connection.execute(
-        "INSERT INTO audit_logs (id, project_id, actor_id, action, object_type, object_id, before_json, after_json, result) VALUES (?, ?, ?, 'question.final_store', 'question', ?, ?, ?, 'success')",
-        [
-          createUlid(),
-          question.project_id,
-          session!.user.id,
-          question.id,
-          JSON.stringify({ status: "approved" }),
-          JSON.stringify({
-            status: "stored",
-            questionVersionId: question.current_version_id,
-          }),
-        ],
-      );
-    });
-    return NextResponse.json({ data: { stored: true } });
+    const data = await withTransaction((connection) => storeQuestions(
+      connection,
+      bulk && batch?.success ? batch.data.questions : [parsed.data],
+      session!.user.id,
+      bulk && batch?.success ? batch.data.opinion : undefined,
+    ));
+    return NextResponse.json({ data });
   } catch (error) {
     return NextResponse.json(
       {

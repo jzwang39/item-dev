@@ -1,0 +1,23 @@
+CREATE TABLE legal_agent_jobs (
+  id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  project_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  occupation_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  level_code VARCHAR(16) NOT NULL,
+  snapshot_json JSON NOT NULL,
+  status ENUM('queued','running','succeeded','failed') NOT NULL DEFAULT 'queued',
+  active_key VARCHAR(100) CHARACTER SET ascii COLLATE ascii_bin NULL,
+  target_count INT UNSIGNED NOT NULL,
+  generated_count INT UNSIGNED NOT NULL DEFAULT 0,
+  error_message VARCHAR(2000) NULL,
+  created_by CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  started_at DATETIME(3) NULL,
+  finished_at DATETIME(3) NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_legal_agent_active (active_key),
+  KEY idx_legal_agent_created (project_id, created_at),
+  CONSTRAINT fk_legal_agent_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_legal_agent_occupation FOREIGN KEY (occupation_id) REFERENCES project_occupations(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_legal_agent_actor FOREIGN KEY (created_by) REFERENCES accounts(id) ON DELETE RESTRICT
+) ENGINE=InnoDB;

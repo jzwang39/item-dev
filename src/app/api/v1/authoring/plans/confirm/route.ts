@@ -4,7 +4,9 @@ import type { RowDataPacket } from "mysql2/promise";
 
 import { getVerifiedSession } from "@/auth";
 import { assertOutlineConfirmed } from "@/modules/blueprints/point-review";
-import { quotaPointSchema, validateQuota } from "@/modules/authoring/generation/contracts";
+import { quotaPointSchema, quotaTotal, validateQuota } from "@/modules/authoring/generation/contracts";
+import { loadSkillPlanBasis } from "@/modules/authoring/skill-plan";
+import { isLegalPoint } from "@/modules/authoring/legal-topics";
 import { createUlid } from "@/shared/database/ulid";
 import { withTransaction } from "@/shared/database/mysql";
 
@@ -16,12 +18,14 @@ const schema = z.object({
   minimumTotal: z.number().int().nonnegative(),
   blueprintVersions: z.object({
     outline: z.object({ id: z.string().length(26), versionNo: z.number().int().positive() }),
-    weights: z.object({ id: z.string().length(26), versionNo: z.number().int().positive() })
+    weights: z.object({ id: z.string().length(26), versionNo: z.number().int().positive() }),
+    structure: z.object({ id: z.string().length(26), versionNo: z.number().int().positive() }).optional()
   }),
   temporaryMinimums: z.object({
     single: z.number().int().nonnegative(),
     multiple: z.number().int().nonnegative(),
-    judgement: z.number().int().nonnegative()
+    judgement: z.number().int().nonnegative(),
+    practical: z.number().int().min(0).max(100).optional()
   }),
   qualityRequirements: z.array(z.string().min(1).max(200)).max(10),
   validations: z.array(z.object({
@@ -42,10 +46,10 @@ export async function POST(request: Request) {
 
   try {
     const data = parsed.data;
-    if (data.assessmentMode !== "理论知识" || data.validations.some((item) => item.status !== "passed")) {
-      throw new Error("仅能确认通过校验的理论知识计划。");
+    if (data.validations.some((item) => item.status !== "passed")) {
+      throw new Error("仅能确认通过校验的命题计划。");
     }
-    validateQuota(data.points, data.levelCode);
+    validateQuota(data.points, data.levelCode, data.assessmentMode);
     const result = await withTransaction(async (connection) => {
       const [projects] = await connection.execute<(RowDataPacket & { id: string })[]>(
         "SELECT id FROM projects WHERE status = 'active' ORDER BY created_at LIMIT 2 FOR UPDATE"
@@ -60,25 +64,32 @@ export async function POST(request: Request) {
       const [blueprints] = await connection.execute<(RowDataPacket & { blueprint_kind: string; current_version_id: string | null })[]>(
         `SELECT blueprint_kind, current_version_id
            FROM blueprints
-          WHERE project_id = ? AND occupation_id = ? AND assessment_mode = 'theory'
-            AND (blueprint_kind = 'theory_outline' AND level_code = ? OR blueprint_kind = 'theory_weight')`,
-        [projectId, occupations[0].id, data.levelCode]
+          WHERE project_id = ? AND occupation_id = ? AND assessment_mode = ?
+            AND (blueprint_kind = ? AND level_code = ? OR blueprint_kind = 'theory_weight') FOR UPDATE`,
+        [projectId, occupations[0].id, data.assessmentMode === "操作技能" ? "skill" : "theory",
+          data.assessmentMode === "操作技能" ? "skill_outline" : "theory_outline", data.levelCode]
       );
-      const outlineVersionId = blueprints.find((item) => item.blueprint_kind === "theory_outline")?.current_version_id;
+      const outlineVersionId = blueprints.find((item) => item.blueprint_kind.endsWith("_outline"))?.current_version_id;
       const weightVersionId = blueprints.find((item) => item.blueprint_kind === "theory_weight")?.current_version_id;
       if (outlineVersionId !== data.blueprintVersions.outline.id || weightVersionId !== data.blueprintVersions.weights.id) {
         throw new Error("权重表或细目表已更新，请重新生成命题计划后确认。");
       }
+      const skillBasis = data.assessmentMode === "操作技能"
+        ? await loadSkillPlanBasis(connection, occupations[0].id, data.levelCode) : null;
+      if (skillBasis && skillBasis.versions.structure.id !== data.blueprintVersions.structure?.id) {
+        throw new Error("操作技能内容结构表已更新，请重新生成计划。");
+      }
       await assertOutlineConfirmed(connection, outlineVersionId);
-      const [nodes] = await connection.execute<(RowDataPacket & { node_code: string; name: string })[]>(
-        "SELECT node_code,name FROM blueprint_nodes WHERE blueprint_version_id=? AND node_kind='assessment_point'", [outlineVersionId]
+      const [allNodes] = await connection.execute<(RowDataPacket & { node_code: string; name: string; requirement_json: unknown; source_ref_json: unknown })[]>(
+        "SELECT node_code,name,requirement_json,source_ref_json FROM blueprint_nodes WHERE blueprint_version_id=? AND node_kind='assessment_point'", [outlineVersionId]
       );
+      const nodes = allNodes.filter((node) => !isLegalPoint(node));
       if (nodes.length !== data.points.length || data.points.some((point) => !nodes.some((node) => node.node_code === point.code))) {
         throw new Error("计划考评点与当前细目表不一致，请重新生成计划。");
       }
       const points = data.points.map((point) => ({
         ...point, name: nodes.find((node) => node.node_code === point.code)!.name,
-        total: point.single + point.multiple + point.judgement
+        total: quotaTotal(point)
       }));
 
       const planId = createUlid();
@@ -111,10 +122,9 @@ export async function POST(request: Request) {
           session.user.id
         ]
       );
-      await connection.execute(
-        "INSERT INTO authoring_plan_blueprints (plan_id, blueprint_version_id) VALUES (?, ?), (?, ?)",
-        [planId, outlineVersionId, planId, weightVersionId]
-      );
+      for (const id of [outlineVersionId, weightVersionId, ...(skillBasis ? [skillBasis.versions.structure.id] : [])]) {
+        await connection.execute("INSERT INTO authoring_plan_blueprints (plan_id, blueprint_version_id) VALUES (?, ?)", [planId, id]);
+      }
       await connection.execute(
         `INSERT INTO audit_logs (
           id, project_id, actor_id, action, object_type, object_id, after_json, result

@@ -9,6 +9,10 @@ import { listActiveOccupations } from "@/modules/authoring/occupations/service";
 import { getSavedModelConnection } from "@/modules/model-connection/service";
 import { query, withTransaction } from "@/shared/database/mysql";
 import { assertOutlineConfirmed } from "@/modules/blueprints/point-review";
+import { mergeQuota, type Quota } from "@/modules/authoring/generation/quota";
+import { isLegalPoint } from "@/modules/authoring/legal-topics";
+import { loadSkillPlanBasis } from "@/modules/authoring/skill-plan";
+import { practicalQuota } from "@/modules/authoring/generation/quota";
 
 export const dynamic = "force-dynamic";
 
@@ -23,8 +27,9 @@ const aiResultSchema = z.object({
   temporaryMinimums: z.object({
     single: z.number().int().min(0).max(100).default(0),
     multiple: z.number().int().min(0).max(100).default(0),
-    judgement: z.number().int().min(0).max(100).default(0)
-  }).default({ single: 0, multiple: 0, judgement: 0 }),
+    judgement: z.number().int().min(0).max(100).default(0),
+    practical: z.number().int().min(0).max(100).default(0)
+  }).default({ single: 0, multiple: 0, judgement: 0, practical: 0 }),
   qualityRequirements: z.array(z.string().trim().min(1).max(200)).max(10).default([])
 });
 
@@ -38,7 +43,6 @@ const levelLabels = {
 
 type LevelCode = keyof typeof levelLabels;
 type ParsedRequirement = z.infer<typeof aiResultSchema>;
-type Quota = { single: number; multiple: number; judgement: number; total: number; hint: string };
 type ModelResponse = {
   choices?: Array<{ message?: { content?: string } }>;
   content?: Array<{ text?: string }>;
@@ -121,9 +125,37 @@ export async function POST(request: Request) {
     }
 
     if (ai.assessmentMode !== "theory") {
-      return NextResponse.json({
-        data: createBlockedPlan(parsed.data.requirement, { ...ai, occupationName: occupation.name }, systemRule, "操作技能计划需加载内容结构表和技能细目表；当前接口暂仅支持理论知识计划确认。")
-      });
+      try {
+        const basis = await withTransaction(async (db) => {
+          const result = await loadSkillPlanBasis(db, occupation.id, levelCode);
+          await assertOutlineConfirmed(db, result.versions.outline.id);
+          return result;
+        });
+        const quota = practicalQuota(parsed.data.requirement, ai.temporaryMinimums);
+        const points = basis.nodes.filter((node) => !isLegalPoint(node)).map((node) => ({
+          code: node.node_code, name: node.name, single: 0, multiple: 0, judgement: 0, practical: quota.practical, total: quota.practical,
+        }));
+        if (!points.length) throw new Error("当前范围仅有法律法规考评点，请使用法律法规智能体命题。");
+        return NextResponse.json({ data: {
+          requirement: parsed.data.requirement, occupation: occupation.name, levelCode, levelLabel: levelLabels[levelCode],
+          assessmentMode: "操作技能", source: ai.source, status: "ready",
+          message: "已关联操作技能内容结构表、已确认细目表和技能权重；确认后冻结来源，生成实操任务、参考步骤与评分标准草稿。",
+          blueprintVersions: basis.versions,
+          validations: [
+            { name: "职业与等级识别", status: "passed", detail: `${occupation.name} · ${levelLabels[levelCode]} · 操作技能` },
+            { name: "操作技能细目表", status: "passed", detail: `已确认V${basis.versions.outline.versionNo}，本次${points.length}个鉴定点` },
+            { name: "技能要求权重表", status: "passed", detail: `已加载V${basis.versions.weights.versionNo}，合计${basis.weightTotal}%` },
+            { name: "操作技能内容结构表", status: "passed", detail: `已加载V${basis.versions.structure.versionNo}${basis.needsReview ? "；未明确的时间、选考或考核方式保留待核对，不编造正式要求" : ""}` },
+            { name: "实操题量规则", status: "passed", detail: quota.hint },
+          ],
+          temporaryMinimums: { single: 0, multiple: 0, judgement: 0, practical: quota.practical },
+          qualityRequirements: ai.qualityRequirements, points, minimumTotal: points.length * quota.practical, ruleHint: quota.hint,
+        } });
+      } catch (error) {
+        return NextResponse.json({ data: createBlockedPlan(parsed.data.requirement, { ...ai, occupationName: occupation.name },
+          { single: 0, multiple: 0, judgement: 0, total: 1, hint: "操作技能默认每鉴定点1道实操题，不套用理论题型配额。" },
+          error instanceof Error ? error.message : "操作技能计划校验失败。") });
+      }
     }
 
     const [outline, weights] = await Promise.all([
@@ -143,7 +175,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ data: createBlockedPlan(parsed.data.requirement, { ...ai, occupationName: occupation.name }, systemRule, "当前细目表尚未全部审核并经管理员确认，请先在“专家审定 → 审核确定”完成确认。") });
     }
     const quota = mergeQuota(systemRule, ai.temporaryMinimums);
-    const points = outline.points.map((point) => ({
+    const legalCount = outline.points.filter(isLegalPoint).length;
+    const points = outline.points.filter((point) => !isLegalPoint(point)).map((point) => ({
       name: point.name,
       code: point.code,
       single: quota.single,
@@ -155,13 +188,15 @@ export async function POST(request: Request) {
       ? weights.items.reduce((sum, item) => sum + (item.weights[levelCode] ?? 0), 0)
       : null;
     const blockers = [
+      ...(points.length ? [] : ["当前范围仅有法律法规考评点，请使用题库检索中的“法律法规智能体命题”。"]),
       ...(weights ? (Math.abs(weightTotal! - 100) < 0.001 ? [] : [`权重表合计为 ${weightTotal}%，不等于 100%。`]) : ["当前职业尚未保存理论知识权重表。"])
     ];
     const validations = [
       { name: "职业与等级识别", status: "passed", detail: `${occupation.name} · ${levelLabels[levelCode]} · 理论知识` },
       { name: "理论知识细目表", status: "passed", detail: `已加载 V${outline.versionNo}，共 ${outline.points.length} 个考评点` },
       { name: "理论知识权重表", status: weights && !blockers.length ? "passed" : "blocked", detail: weights ? `已加载 V${weights.versionNo}，当前等级合计 ${weightTotal}%` : "未维护权重表" },
-      { name: "题量规则", status: "passed", detail: describeQuota(systemRule, ai.temporaryMinimums, quota) }
+      { name: "题量规则", status: "passed", detail: quota.hint },
+      ...(legalCount ? [{ name: "法律法规命题", status: "passed", detail: `已排除${legalCount}个法规类考评点，请在题库检索使用法律法规智能体依据正式原文命题。` }] : [])
     ];
 
     return NextResponse.json({
@@ -173,7 +208,7 @@ export async function POST(request: Request) {
         assessmentMode: "理论知识",
         source: ai.source,
         status: blockers.length ? "blocked" : "ready",
-        message: blockers.length ? blockers.join(" ") : "已完成意图解析，并已关联当前生效的权重表、细目表及强制题量规则；确认后将冻结本次计划快照。",
+        message: blockers.length ? blockers.join(" ") : "已完成意图解析，并已关联当前生效的权重表、细目表及本次题量配额；确认后将冻结本次计划快照。",
         blueprintVersions: {
           outline: { id: outline.versionId, versionNo: outline.versionNo },
           weights: weights ? { id: weights.versionId, versionNo: weights.versionNo } : null
@@ -183,7 +218,7 @@ export async function POST(request: Request) {
         qualityRequirements: ai.qualityRequirements,
         points,
         minimumTotal: points.reduce((sum, point) => sum + point.total, 0),
-        ruleHint: systemRule.hint
+        ruleHint: quota.hint
       }
     });
   } catch (error) {
@@ -213,8 +248,9 @@ async function parseRequirement(requirement: string, occupationNames: string[]):
   if (!connection) throw new Error("未配置可用模型连接，请先在管理员菜单的“模型设置”中保存 API 地址、模型名称和 API Key。");
   const endpoint = getModelEndpoint(connection.baseUrl, connection.provider);
   const instruction = `你是职业技能题库命题计划助手。请依据用户提供的完整提示词，仅提取命题意图和本次临时最低题量，不生成试题、不编造职业标准。只返回 JSON，不要 Markdown：
-{"occupationName":"职业名称","levelCode":"level_5|level_4|level_3|level_2|level_1","assessmentMode":"theory|skill","temporaryMinimums":{"single":0,"multiple":0,"judgement":0},"qualityRequirements":["答案准确","避免重复"]}。
-temporaryMinimums 表示“每个考评点至少”的题量；提示词未明确时填 0。当前可用职业：${occupationNames.join("、") || "未建立职业"}。`;
+{"occupationName":"职业名称","levelCode":"level_5|level_4|level_3|level_2|level_1","assessmentMode":"theory|skill","temporaryMinimums":{"single":0,"multiple":0,"judgement":0,"practical":0},"qualityRequirements":["答案准确","避免重复"]}。
+操作技能使用practical表示每个鉴定点的实操题数，例如“操作技能，每个考评点至少1道题”返回practical:1，其余三个字段为0；不能改成理论知识题型。
+temporaryMinimums 表示用户明确指定的“每个考评点”题量；未指定的题型填 0，不得自行补齐默认题量。例如“每个考评点至少1道单选题、1道判断题”必须返回 {"single":1,"multiple":0,"judgement":1}。所有题型均未指定时全部填 0。当前可用职业：${occupationNames.join("、") || "未建立职业"}。`;
   let response: Response;
   try {
     response = await fetch(endpoint.url, {
@@ -265,29 +301,12 @@ function findOccupation<T extends { name: string }>(occupations: T[], occupation
 
 function getQuotaRule(levelCode: LevelCode): Quota {
   if (levelCode === "level_3") {
-    return { single: 3, multiple: 2, judgement: 2, total: 7, hint: "三级每考评点至少 3 道单选、2 道多选、2 道判断。" };
+    return { single: 3, multiple: 2, judgement: 2, total: 7, hint: "未指定题量时，三级每考评点默认 3 道单选、2 道多选、2 道判断。" };
   }
   if (levelCode === "level_1" || levelCode === "level_2") {
     return { single: 0, multiple: 0, judgement: 0, total: 0, hint: "二级、一级采用试卷库方式，需按已确认的试卷结构规划。"};
   }
-  return { single: 4, multiple: 0, judgement: 2, total: 6, hint: "五级、四级每考评点至少 4 道单选、2 道判断。" };
-}
-
-function mergeQuota(systemRule: Quota, temporaryMinimums: ParsedRequirement["temporaryMinimums"]): Quota {
-  const single = Math.max(systemRule.single, temporaryMinimums.single);
-  const multiple = Math.max(systemRule.multiple, temporaryMinimums.multiple);
-  const judgement = Math.max(systemRule.judgement, temporaryMinimums.judgement);
-  return { ...systemRule, single, multiple, judgement, total: single + multiple + judgement };
-}
-
-function describeQuota(systemRule: Quota, temporaryMinimums: ParsedRequirement["temporaryMinimums"], appliedQuota: Quota) {
-  const requested = [
-    temporaryMinimums.single ? `单选≥${temporaryMinimums.single}` : "",
-    temporaryMinimums.multiple ? `多选≥${temporaryMinimums.multiple}` : "",
-    temporaryMinimums.judgement ? `判断≥${temporaryMinimums.judgement}` : ""
-  ].filter(Boolean);
-  const applied = `每考评点执行单选${appliedQuota.single}、多选${appliedQuota.multiple}、判断${appliedQuota.judgement}`;
-  return requested.length ? `本次临时要求：${requested.join("、")}；与系统最低规则取较高值，${applied}。` : `${systemRule.hint} ${applied}。`;
+  return { single: 4, multiple: 0, judgement: 2, total: 6, hint: "未指定题量时，五级、四级每考评点默认 4 道单选、2 道判断。" };
 }
 
 function createBlockedPlan(

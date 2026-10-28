@@ -6,7 +6,10 @@ import { assertOutlineConfirmed } from "@/modules/blueprints/point-review";
 import { buildChapterExcerptPool, selectBatchExcerpts } from "@/modules/blueprints/theory-outline-generation/generation-context";
 import { query, withTransaction } from "@/shared/database/mysql";
 import { createUlid } from "@/shared/database/ulid";
-import { buildBatches, GENERATION_CONCURRENCY, MAX_ATTEMPTS, parseQuestions, questionTypes, stemHash, validateQuota, type GeneratedQuestion, type QuotaPoint, type Scope, type Snapshot, type QuestionType } from "./contracts";
+import { isLegalPoint } from "@/modules/authoring/legal-topics";
+import { buildBatches, GENERATION_CONCURRENCY, MAX_ATTEMPTS, parseQuestions, questionTypes, quotaTotal, stemHash, validateQuota, type GeneratedQuestion, type QuotaPoint, type Scope, type Snapshot, type QuestionType } from "./contracts";
+import { loadSkillPlanBasis } from "../skill-plan";
+import { skillQuestionPrompt } from "./skill-prompt";
 
 function json<T>(value: T | string): T {
   return typeof value === "string" ? JSON.parse(value) as T : value;
@@ -41,13 +44,14 @@ export async function startGeneration(planId: string, actorId: string, retryFail
     const scope = json<Scope>(plan.scope_json);
     await assertOutlineConfirmed(db, scope.blueprintVersions.outline.id);
     const quota = json<{ points: QuotaPoint[]; qualityRequirements: string[] }>(plan.quota_json);
-    if (scope.assessmentMode !== "理论知识") throw new Error("当前仅支持理论知识自动命题。");
-    validateQuota(quota.points, scope.levelCode);
-    const [nodes] = await db.execute<(RowDataPacket & { id: string; node_code: string; name: string; source_ref_json: string | { chapterIds?: string[] } })[]>(
-      "SELECT id,node_code,name,source_ref_json FROM blueprint_nodes WHERE blueprint_version_id=? AND node_kind='assessment_point'", [scope.blueprintVersions.outline.id],
+    const skillBasis = scope.assessmentMode === "操作技能" ? await loadSkillPlanBasis(db, scope.occupationId, scope.levelCode, scope.blueprintVersions) : null;
+    validateQuota(quota.points, scope.levelCode, scope.assessmentMode);
+    const [nodes] = await db.execute<(RowDataPacket & { id: string; node_code: string; name: string; requirement_json: unknown; source_ref_json: string | { chapterIds?: string[] } })[]>(
+      "SELECT id,node_code,name,requirement_json,source_ref_json FROM blueprint_nodes WHERE blueprint_version_id=? AND node_kind='assessment_point'", [scope.blueprintVersions.outline.id],
     );
     const byCode = new Map(nodes.map((node) => [node.node_code, node]));
     if (quota.points.some((point) => !byCode.has(point.code))) throw new Error("计划考评点不属于冻结细目表。");
+    if (quota.points.some((point) => isLegalPoint(byCode.get(point.code)!))) throw new Error("此计划包含法律法规考评点，不能通过普通AI命题。请重新生成计划，并在题库检索使用法律法规智能体。");
     const [sources] = await db.execute<(RowDataPacket & { source_version_id: string })[]>(
       "SELECT source_version_id FROM blueprint_version_sources WHERE blueprint_version_id=?", [scope.blueprintVersions.outline.id],
     );
@@ -56,13 +60,16 @@ export async function startGeneration(planId: string, actorId: string, retryFail
     );
     const snapshot: Snapshot = {
       projectId: plan.project_id, requirement: plan.raw_requirement, scope,
-      points: quota.points.map((point) => ({ ...point, total: point.single + point.multiple + point.judgement })),
+      points: quota.points.map((point) => ({ ...point, total: quotaTotal(point) })),
+      skillStructure: skillBasis?.structure,
       qualityRequirements: quota.qualityRequirements ?? [],
       qualityStandard: settings[0] ? json<{ content?: string }>(settings[0].setting_value_json).content ?? "" : "",
       sourceVersionIds: sources.map((source) => source.source_version_id),
       nodes: quota.points.map((point) => {
         const node = byCode.get(point.code)!;
-        return { id: node.id, code: node.node_code, name: node.name, chapterIds: node.source_ref_json ? json<{ chapterIds?: string[] }>(node.source_ref_json).chapterIds ?? [] : [] };
+        return { id: node.id, code: node.node_code, name: node.name, chapterIds: node.source_ref_json ? json<{ chapterIds?: string[] }>(node.source_ref_json).chapterIds ?? [] : [],
+          skillContext: skillBasis ? { point: node.requirement_json ? json(node.requirement_json) : null,
+            source: node.source_ref_json ? json(node.source_ref_json) : null } : undefined };
       }),
       model: { provider: connection.provider, baseUrl: connection.baseUrl, model: connection.model },
     };
@@ -198,20 +205,24 @@ async function saveOutput(unit: Unit, questions: GeneratedQuestion[], errorMessa
       if (!slot) continue;
       const questionId = createUlid();
       const versionId = createUlid();
-      const type = question.questionType === "single" ? "单项选择题" : question.questionType === "multiple" ? "多项选择题" : "判断题";
+      const skill = snapshot.scope.assessmentMode === "操作技能";
+      const status = skill ? "pending_review" : "draft";
+      const type = question.questionType === "practical" ? "实操题" : question.questionType === "single" ? "单项选择题" : question.questionType === "multiple" ? "多项选择题" : "判断题";
       const source = {
         planId: unit.plan_id, jobId: unit.job_id, batchId: unit.batch_id, unitId: unit.id,
         blueprintVersionId: snapshot.scope.blueprintVersions.outline.id,
         weightVersionId: snapshot.scope.blueprintVersions.weights.id,
         textbookSourceVersionIds: snapshot.sourceVersionIds, chapterIds: node.chapterIds,
+        structureVersionId: snapshot.scope.blueprintVersions.structure?.id,
+        skillContext: node.skillContext, skillStructure: snapshot.skillStructure,
         assessmentPointCode: node.code, generatedAt: new Date().toISOString(),
       };
       await db.execute(`INSERT INTO questions(id,project_id,question_no,occupation_id,level_code,assessment_mode,question_type,current_version_id,current_status)
-        VALUES(?,?,?,?,?,'theory',?,?,'draft')`, [questionId, snapshot.projectId, `AI-${unit.plan_id}-${String(slot.ordinal).padStart(4, "0")}`,
-        snapshot.scope.occupationId, snapshot.scope.levelCode, type, versionId]);
-      await db.execute(`INSERT INTO question_versions(id,question_id,version_no,stem,content_json,answer_json,analysis_text,source_snapshot_json,content_hash,created_by)
-        VALUES(?,?,1,?,?,?,?,?,?,?)`, [versionId, questionId, question.stem, JSON.stringify({ options: question.options }),
-        JSON.stringify({ answers: question.answers }), question.analysis, JSON.stringify(source),
+        VALUES(?,?,?,?,?,?,?,?,?)`, [questionId, snapshot.projectId, `AI-${unit.plan_id}-${String(slot.ordinal).padStart(4, "0")}`,
+        snapshot.scope.occupationId, snapshot.scope.levelCode, skill ? "skill" : "theory", type, versionId, status]);
+      await db.execute(`INSERT INTO question_versions(id,question_id,version_no,stem,content_json,answer_json,analysis_text,score_rubric_json,source_snapshot_json,content_hash,created_by)
+        VALUES(?,?,1,?,?,?,?,?,?,?,?)`, [versionId, questionId, question.stem, JSON.stringify({ options: question.options }),
+        JSON.stringify({ answers: question.answers }), question.analysis, question.scoreRubric ? JSON.stringify(question.scoreRubric) : null, JSON.stringify(source),
         createHash("sha256").update(JSON.stringify(question)).digest("hex"), unit.created_by]);
       for (const option of question.options) {
         await db.execute("INSERT INTO question_options(id,question_version_id,option_key,content,is_correct) VALUES(?,?,?,?,?)",
@@ -221,7 +232,7 @@ async function saveOutput(unit: Unit, questions: GeneratedQuestion[], errorMessa
       await db.execute(`INSERT INTO question_quality_checks(id,question_version_id,check_round,check_code,severity,result,detail_json)
         VALUES(?,?,'rule','authoring.basic_structure','info','pass',?)`, [createUlid(), versionId, JSON.stringify({ planId: unit.plan_id, unitId: unit.id, optionsValid: true })]);
       await db.execute(`INSERT INTO question_status_events(id,question_id,question_version_id,from_status,to_status,reason,actor_id)
-        VALUES(?,?,?,NULL,'draft','分批AI生成，等待人工核查',?)`, [createUlid(), questionId, versionId, unit.created_by]);
+        VALUES(?,?,?,NULL,?,'分批AI生成，等待人工核查',?)`, [createUlid(), questionId, versionId, status, unit.created_by]);
       await db.execute("UPDATE authoring_generation_slots SET question_id=?,stem_hash=? WHERE id=?", [questionId, hash, slot.id]);
       slots.splice(slots.indexOf(slot), 1);
       saved += 1;
@@ -261,6 +272,10 @@ async function requestQuestions(unit: Unit) {
   if (!missing.length) return [];
   const quotas = Object.fromEntries(questionTypes.map((type) => [type, missing.filter((slot) => slot.question_type === type).length]));
   const node = snapshot.nodes.find((item) => item.code === unit.point_code)!;
+  const [metadata] = await query<(RowDataPacket & { name: string; requirement_json: unknown; source_ref_json: unknown })[]>(
+    "SELECT name,requirement_json,source_ref_json FROM blueprint_nodes WHERE id=?", [node.id],
+  );
+  if (metadata && isLegalPoint(metadata)) throw new NonRetryableError("法律法规考评点必须通过法规智能体及已核验原文命题，已阻止普通生成。");
   const previous = await query<(RowDataPacket & { stem: string })[]>(
     `SELECT qv.stem FROM authoring_generation_slots s JOIN authoring_generation_units u ON u.id=s.unit_id
       JOIN questions q ON q.id=s.question_id JOIN question_versions qv ON qv.id=q.current_version_id
@@ -278,19 +293,22 @@ async function requestQuestions(unit: Unit) {
     })), node.name);
     excerpts = selectBatchExcerpts(pool, previous.length, Math.max(1, previous.length + missing.length), unit.attempts);
   }
-  const instruction = `你是职业技能理论知识试题编制助手。严格依据冻结考评点和提供的教材编制中文试题草稿，覆盖指定题型和数量。题目不得重复已生成题干，不得仅改写同一题。答案、解析必须明确且符合知识依据。只返回JSON：
+  let instruction = `你是职业技能理论知识试题编制助手。严格依据冻结考评点和提供的教材编制中文试题草稿，覆盖指定题型和数量。题目不得重复已生成题干，不得仅改写同一题。答案、解析必须明确且符合知识依据。只返回JSON：
 {"questions":[{"assessmentPointCode":"指定考评点代码","questionType":"single","stem":"真实中文题干","options":[{"key":"A","content":"真实选项"}],"answers":["A"],"analysis":"答案依据解析"}]}。
 严格按照“本次题型配额”分别生成各题型的缺额。mixed仅表示同一请求包含多题型，绝不能作为任何题目的questionType。
 每条questionType只能是single（单选）、multiple（多选）或judgement（判断），禁止中文题型值。
 先在考评点范围内选择不同的事实、条件、流程步骤或应用情境，每道题考查不同内容，不能复制题干或只换语序、正反问法。排除题干所考查的内容也不得重复。即使只补1题，也必须是新的知识角度。
 单选恰好4个不同选项和1个答案；多选至少4个不同选项和至少2个答案；答案键必须对应选项。判断options必须为[]，answers必须为["正确"]或["错误"]，不能写true/false、对/错或A/B。`;
-  const prompt = JSON.stringify({
+  let prompt = JSON.stringify({
     用户需求: snapshot.requirement, 职业: snapshot.scope.occupation, 等级: snapshot.scope.levelCode,
     考评点: { code: node.code, name: node.name }, 指定题型: unit.question_type, 本次必须生成数: missing.length,
     本次题型配额: quotas,
     质量要求: snapshot.qualityRequirements, 试题质量标准: snapshot.qualityStandard,
     教材片段: excerpts, 排除题干: previous.map((item) => item.stem), 补齐次数: unit.attempts,
   });
+  if (snapshot.scope.assessmentMode === "操作技能") {
+    ({ instruction, prompt } = skillQuestionPrompt(snapshot, node.code, missing.length, previous.map((item) => item.stem)));
+  }
   const target = endpoint(snapshot.model);
   let last: unknown;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -315,7 +333,7 @@ async function requestQuestions(unit: Unit) {
       }
       const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }>; content?: Array<{ text?: string }> };
       const output = target.anthropic ? payload.content?.map((item) => item.text ?? "").join("") ?? "" : payload.choices?.[0]?.message?.content ?? "";
-      const parsed = parseQuestions(output, node.code, unit.question_type);
+      const parsed = parseQuestions(output, node.code, snapshot.scope.assessmentMode === "操作技能" ? "practical" : unit.question_type);
       if (parsed.invalidReasons.length) console.warn("命题响应字段校验：", node.code, [...new Set(parsed.invalidReasons)].slice(0, 3).join("; "));
       if (!parsed.valid.length) throw new NonRetryableError(`模型返回${parsed.received}题，其中有效题为0：${parsed.invalidReasons[0] ?? "未知原因"}`);
       return parsed.valid;
