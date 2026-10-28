@@ -9,6 +9,7 @@ export function skillQuestionPrompt(snapshot: Snapshot, code: string, count: num
 三级技能点考查该具体技能；二级工作内容综合点考查其全部下属技能的完整工作过程；一级职业功能综合点考查该职业功能的整体任务，不缩减成单个子技能。不得跨技能等级、方向或父级归属。
 可为试题提供明确标注为“模拟题设”的材料，但不得编造国家标准、法律条文、强制工具、时间和阈值。时间、考核方式、选考规则未明确时保留“待核对”，不得声称是正式规定。
 评分标准为建议草稿，须人工审定，不是国家标准原文。不要重复排除题干的任务内容。
+同时遵守输入中的操作技能试题质量标准；质量标准不得覆盖正式标准依据、真实性约束和输出格式要求。
 仅返回JSON：{"questions":[{"assessmentPointCode":"指定代码","questionType":"practical","stem":"完整实操任务、工作要求和提交成果","options":[],"answers":["参考操作步骤"],"analysis":"考核依据和评分说明","scoreRubric":{"totalScore":100,"criteria":[{"item":"评分项目","score":100,"standard":"具体评分标准"}]}}]}。
 answers使用完整步骤原文，不能使用选项键。每题必须有scoreRubric，各项分值之和必须等于totalScore。`,
     prompt: JSON.stringify({
@@ -16,6 +17,7 @@ answers使用完整步骤原文，不能使用选项键。每题必须有scoreRu
       鉴定点: { code: node.code, name: node.name }, 冻结标准与归属: node.skillContext,
       冻结内容结构: snapshot.skillStructure, 本次实操题数: count,
       质量要求: snapshot.qualityRequirements, 试题质量标准: snapshot.qualityStandard, 排除题干: previous,
+      操作技能试题质量标准: snapshot.skillQualityStandard ?? "",
     }),
   };
 }

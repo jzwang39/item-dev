@@ -55,13 +55,18 @@ test("技能提示使用冻结来源和结构，保留综合层级，不虚构�
   const snapshot = {
     scope: { occupation: "劝募员", levelCode: "level_4" },
     nodes: [{ code: point.code, name: point.name, skillContext: { nodeKind: "occupational_function", evidence: "真实依据" } }],
-    skillStructure: { totalMinutes: null }, qualityRequirements: [], qualityStandard: "",
+    skillStructure: { totalMinutes: null }, qualityRequirements: [], qualityStandard: "通用质量要求",
+    skillQualityStandard: "评分项须对应提交成果，每项给出可观察的评分依据。",
   } as unknown as Snapshot;
   const output = skillQuestionPrompt(snapshot, point.code, 1, ["已生成题干"]);
   assert.match(output.instruction, /一级职业功能综合点/);
   assert.match(output.instruction, /待核对/);
   assert.match(output.prompt, /真实依据/);
   assert.match(output.prompt, /已生成题干/);
+  assert.equal(JSON.parse(output.prompt).操作技能试题质量标准, snapshot.skillQualityStandard);
+  assert.equal(JSON.parse(output.prompt).试题质量标准, "通用质量要求");
+  assert.match(output.instruction, /质量标准不得覆盖正式标准依据/);
+  assert.equal(JSON.parse(skillQuestionPrompt({ ...snapshot, skillQualityStandard: undefined }, point.code, 1, []).prompt).操作技能试题质量标准, "");
   assert.throws(() => skillQuestionPrompt({ ...snapshot, skillStructure: undefined }, point.code, 1, []), /冻结/);
 });
 

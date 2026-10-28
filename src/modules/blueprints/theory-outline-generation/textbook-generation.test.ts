@@ -7,6 +7,7 @@ import {
 } from "./textbook-generation";
 import type { GenerationChapter } from "./generation-context";
 import type { ModelCaller } from "./generation-batch";
+import type { TextbookWeight } from "./textbook-quota";
 
 const levels = ["level_5", "level_4", "level_3"];
 const chapters: GenerationChapter[] = [
@@ -22,36 +23,40 @@ function knowledge(levelCode: string, code = "1.1.1"): StandardKnowledge {
   };
 }
 const items = levels.map((level) => knowledge(level));
+const weights: TextbookWeight[] = [
+  { id: "basic", blueprintVersionId: "standard-version", category: "基本要求", name: "基础知识",
+    weights: { level_5: 10, level_4: 15, level_3: 20 } },
+  { id: "related", blueprintVersionId: "standard-version", category: "相关知识要求", name: "公益慈善宣讲",
+    weights: { level_5: 90, level_4: 85, level_3: 80 } },
+];
 function modelRecorder() {
   const prompts: Record<string, unknown>[] = [];
   const call: ModelCaller = async (_instruction, prompt) => {
     prompts.push(JSON.parse(prompt));
-    return JSON.stringify({ points: [
-      { name: "基本理念的含义", importance: "X", tertiaryName: "模型改写的范围" },
-      { name: "基本理念的应用原则", importance: "Y", tertiaryName: "模型改写的范围" },
-    ] });
+    return JSON.stringify({ points: Array.from({ length: JSON.parse(prompt).本批必须生成考评点数 }, (_, index) =>
+      ({ name: `来源${prompts.length}具体知识对象${index + 1}的含义`, importance: "X", tertiaryName: "模型改写的范围" })) });
   };
   return { prompts, call };
 }
 
-test("每条已存储章节各生成2点，同名章节不被合并，三等级复用同一份数据", async () => {
+test("按权重生成200点，同名章节保留，三等级从公共池按配额复用", async () => {
   const { call, prompts } = modelRecorder();
   const progress: number[] = [];
-  const result = await generateTextbookOutlines("劝募员", chapters, items, levels, call, async (_level, completed) => { progress.push(completed); });
-  assert.equal(prompts.length, 5);
-  assert.deepEqual(levels.map((level) => result.get(level)!.length), [6, 6, 6]);
+  const result = await generateTextbookOutlines("劝募员", chapters, items, levels, call, async (_level, completed) => { progress.push(completed); }, weights);
+  assert.equal(prompts.filter((prompt) => (prompt.依据 as { 章节记录?: unknown }).章节记录).length, 2);
+  assert.ok(prompts.every((prompt) => Number(prompt.本批必须生成考评点数) <= 40));
+  assert.deepEqual(levels.map((level) => result.get(level)!.length), [200, 200, 200]);
   const basics = levels.map((level) => result.get(level)!.filter((point) => point.sectionKind === "basic"));
-  assert.deepEqual(basics[0], basics[1]);
-  assert.deepEqual(basics[1], basics[2]);
-  assert.equal(basics[0][0], basics[1][0]);
-  assert.equal(new Set(basics[0].map((point) => point.sharedPointKey)).size, 4);
+  assert.deepEqual(basics.map((points) => points.length), [20, 30, 40]);
+  assert.ok(basics[0].every((point) => basics[1].some((other) => other.sharedPointKey === point.sharedPointKey && other.name === point.name)));
+  assert.equal(new Set(basics[0].map((point) => point.sharedPointKey)).size, 20);
   assert.equal(progress.length, 9);
 });
 
 test("标准条目仅进入对应等级，模型不能改变职业功能、工作内容和三级名称", async () => {
   const { call } = modelRecorder();
-  const result = await generateTextbookOutlines("劝募员", chapters, [...items, knowledge("level_4", "1.1.2")], levels, call, async () => {});
-  assert.deepEqual(levels.map((level) => result.get(level)!.length), [6, 8, 6]);
+  const result = await generateTextbookOutlines("劝募员", chapters, [...items, knowledge("level_4", "1.1.2")], levels, call, async () => {}, weights);
+  assert.deepEqual(levels.map((level) => result.get(level)!.length), [200, 200, 200]);
   for (const level of levels) {
     const related = result.get(level)!.filter((point) => point.sectionKind === "related_knowledge");
     assert.ok(related.every((point) => point.standardSource?.levelCode === level));
@@ -71,11 +76,11 @@ test("基础章节传入完整内容，标准条目不携带任何教材内容�
   assert.ok(!JSON.stringify(prompts).includes("范围总目标数"));
 });
 
-test("数量只由章节和三级条目数决定，超过200个也不截断", async () => {
+test("章节多于配额时部分章分配为零，不放大总配额", async () => {
   const { call } = modelRecorder();
   const many = Array.from({ length: 101 }, (_, index) => ({ ...chapters[0], id: `chapter${index}`, ordinal: index + 1 }));
-  const result = await generateTextbookOutlines("劝募员", many, items, levels, call, async () => {});
-  assert.deepEqual(levels.map((level) => result.get(level)!.length), [204, 204, 204]);
+  const result = await generateTextbookOutlines("劝募员", many, items, levels, call, async () => {}, weights);
+  assert.deepEqual(levels.map((level) => result.get(level)!.length), [200, 200, 200]);
 });
 
 test("缺少等级条目或父子编号不匹配时，在模型调用前拒绝", () => {
@@ -108,7 +113,7 @@ test("任一等级生成失败时整个结果拒绝，不返回部分等级结�
       return '{"points":[]}';
     }
     return call(instruction, prompt, temperature);
-  }, async () => {}), /连续6次/);
+  }, async () => {}, weights), /连续6次/);
   assert.equal(failedRequests, 6);
 });
 
@@ -168,13 +173,16 @@ test("真实劝募员标准按各等级相关知识条目生成，并保留截�
       contentCode: content.code, contentName: content.name, name: item.name, evidence: item.evidence,
     })))));
   const { call } = modelRecorder();
-  const result = await generateTextbookOutlines("劝募员", chapters, parsed, levels, call, async () => {});
-  for (const level of levels) assert.equal(result.get(level)!.length, chapters.length * 2 + parsed.filter((item) => item.levelCode === level).length * 2);
+  const result = await generateTextbookOutlines("劝募员", chapters, parsed, levels, call, async () => {},
+    weights[0].items.map((item, index) => ({ ...item, id: `weight-${index}`, blueprintVersionId: "standard-version" })));
+  for (const level of levels) assert.equal(result.get(level)!.length, 200);
   const item = result.get("level_5")!.find((point) => point.standardSource?.code === "1.1.1");
   assert.equal(item?.standardSource?.functionName, "公益慈善宣讲");
   assert.equal(item?.standardSource?.contentName, "理念宣传");
   assert.equal(item?.standardSource?.name, "募捐工作基本理念");
-  const typo = result.get("level_4")!.find((point) => point.standardSource?.name === "募捐工作资料分类方法");
+  const typoSource = parsed.find((item) => item.levelCode === "level_4" && item.name === "募捐工作资料分类方法")!;
+  // A source may receive zero quota; verify its original parent is never rewritten when generated.
+  const typo = (await generateStandardKnowledge("劝募员", typoSource, call))[0];
   assert.equal(typo?.standardSource?.contentCode, "3.2");
   assert.equal(typo?.standardSource?.code, "3.1.3");
   assert.ok(typo?.sourceWarning?.includes("待核对"));

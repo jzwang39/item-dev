@@ -5,17 +5,11 @@ import { z } from "zod";
 import { getVerifiedSession } from "@/auth";
 import { createUlid } from "@/shared/database/ulid";
 import { query, withTransaction } from "@/shared/database/mysql";
+import { qualityStandardConfigs, qualityStandardContent } from "@/modules/authoring/quality-standard";
 
-const settingKey = "authoring.question_quality_standard";
-const defaultContent = `1. 试题应准确对应考评点，不得超出职业标准和细目表范围。
-2. 题干表述清晰、条件完整，避免歧义、暗示性和无关信息。
-3. 选择题选项应具有合理干扰性，答案唯一或组合明确。
-4. 答案和解析必须准确，解析应说明判断依据。
-5. 同一计划内试题应避免重复或高度相似。`;
-
-const schema = z.object({
-  content: z.string().trim().min(1, "请填写试题质量标准。").max(20_000),
-});
+function configFor(request: Request) {
+  return qualityStandardConfigs[new URL(request.url).searchParams.get("kind") === "skill" ? "skill" : "theory"];
+}
 
 function unauthorized() {
   return NextResponse.json(
@@ -24,10 +18,11 @@ function unauthorized() {
   );
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   const session = await getVerifiedSession();
   if (!session?.user?.id || session.user.role !== "admin")
     return unauthorized();
+  const { settingKey, defaultContent } = configFor(request);
 
   try {
     const rows = await query<
@@ -36,17 +31,9 @@ export async function GET() {
       "SELECT setting_value_json, updated_at FROM system_settings WHERE setting_key = ? LIMIT 1",
       [settingKey],
     );
-    const value = rows[0]?.setting_value_json;
-    const parsed =
-      typeof value === "string"
-        ? JSON.parse(value)
-        : (value ?? { content: defaultContent });
     return NextResponse.json({
       data: {
-        content:
-          typeof parsed?.content === "string" && parsed.content.trim()
-            ? parsed.content
-            : defaultContent,
+        content: qualityStandardContent(rows[0]?.setting_value_json, defaultContent),
         updatedAt: rows[0]?.updated_at ?? null,
       },
     });
@@ -68,6 +55,10 @@ export async function PUT(request: Request) {
   const session = await getVerifiedSession();
   if (!session?.user?.id || session.user.role !== "admin")
     return unauthorized();
+  const { settingKey, title } = configFor(request);
+  const schema = z.object({
+    content: z.string().trim().min(1, `请填写${title}。`).max(20_000),
+  });
   const parsed = schema.safeParse(await request.json());
   if (!parsed.success) {
     return NextResponse.json(
@@ -83,6 +74,12 @@ export async function PUT(request: Request) {
 
   try {
     await withTransaction(async (connection) => {
+      const [previous] = await connection.execute<
+        (RowDataPacket & { setting_value_json: unknown; row_version: number })[]
+      >(
+        "SELECT setting_value_json, row_version FROM system_settings WHERE setting_key = ? FOR UPDATE",
+        [settingKey],
+      );
       await connection.execute(
         `INSERT INTO system_settings (setting_key, setting_value_json, updated_by)
          VALUES (?, ?, ?)
@@ -103,8 +100,8 @@ export async function PUT(request: Request) {
       );
       await connection.execute(
         `INSERT INTO audit_logs
-          (id, project_id, actor_id, action, object_type, object_id, after_json, result)
-         VALUES (?, ?, ?, 'authoring.quality_standard.save', 'system_setting', ?, ?, 'success')`,
+          (id, project_id, actor_id, action, object_type, object_id, before_json, after_json, result)
+         VALUES (?, ?, ?, 'authoring.quality_standard.save', 'system_setting', ?, ?, ?, 'success')`,
         [
           createUlid(),
           projects[0]?.id ?? null,
@@ -112,7 +109,13 @@ export async function PUT(request: Request) {
           createUlid(),
           JSON.stringify({
             settingKey,
-            contentLength: parsed.data.content.length,
+            content: qualityStandardContent(previous[0]?.setting_value_json, ""),
+            version: previous[0]?.row_version ?? 0,
+          }),
+          JSON.stringify({
+            settingKey,
+            content: parsed.data.content,
+            version: Number(previous[0]?.row_version ?? 0) + 1,
           }),
         ],
       );

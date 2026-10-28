@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { parseQuestions, type GeneratedQuestion } from "./generation/contracts";
-import { legalTopics } from "./legal-topics";
+import { legalQuestionQuota, legalTopics } from "./legal-topics";
 
 export const legalConfigSchema = z.object({
   id: z.enum(legalTopics.map((topic) => topic.id) as [string, ...string[]]),
@@ -91,11 +91,11 @@ export function allowedClauses(config: LegalConfigInput): LegalClause[] {
 
 export function validateLegalQuestions(payload: string, code: string, clauses: LegalClause[]): LegalQuestion[] {
   const raw = JSON.parse(payload.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")) as { questions?: unknown[] };
-  if (!Array.isArray(raw.questions) || raw.questions.length !== 2) throw new Error("每个法规必须恰好2道题，不得凑题或多出。");
+  if (!Array.isArray(raw.questions) || raw.questions.length !== legalQuestionQuota.total) throw new Error("每个法规必须恰好6道题，不得凑题或多出。");
   const parsed = parseQuestions(JSON.stringify(raw), code, "mixed");
-  if (parsed.valid.length !== 2 || parsed.invalid) throw new Error(`试题结构不合法：${parsed.invalidReasons[0] ?? "重复或缺失"}`);
-  if (parsed.valid.filter((item) => item.questionType === "single").length !== 1 ||
-    parsed.valid.filter((item) => item.questionType === "judgement").length !== 1) throw new Error("每个法规须1道单选、1道判断。");
+  if (parsed.valid.length !== legalQuestionQuota.total || parsed.invalid) throw new Error(`试题结构不合法：${parsed.invalidReasons[0] ?? "重复或缺失"}`);
+  if (parsed.valid.filter((item) => item.questionType === "single").length !== legalQuestionQuota.single ||
+    parsed.valid.filter((item) => item.questionType === "judgement").length !== legalQuestionQuota.judgement) throw new Error("每个法规须4道单选、2道判断。");
   return parsed.valid.map((question, index) => {
     const row = raw.questions![index] as Record<string, unknown>;
     const evidence = z.object({ clauseId: z.string(), quote: z.string().min(12).max(10000) }).parse(row.evidence);

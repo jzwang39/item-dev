@@ -783,13 +783,13 @@ function TheoryCompilationWorkspace({
           </p>
             {textbookMode === "textbook" ? (
               <p className="m-0 text-sm text-[#607694]">
-                基本要求：每条已存储教材章节生成 2 个考评点，三个等级共用。
-                相关知识要求：对应等级职业标准每个三级条目生成 2 个考评点，不使用教材；总数按实际章节和条目计算。
+                按权重值 × 2 确定各范围总配额，再按内容量分配到教材章／节和标准三级条目，每等级共 200 个考评点。
+                教材公共基础池只生成一次，各等级按配额复用；相关知识要求按对应等级职业标准生成，不使用教材。
               </p>
             ) : (
               <p className="m-0 text-sm text-[#607694]">
-                从职业标准提取基本要求／基本知识／基本信息／基础知识，每个编号末级条目生成 2 个公共考评点，三个等级共用。
-                再按对应等级的相关知识要求，每个三级条目生成 2 个考评点；不读取教材，不限制每级 200 个。
+                从职业标准提取公共基本要求，按范围权重值 × 2 确定配额，再按内容量比例和最大余数法分配到编号末级条目。
+                公共基础池只生成一次，各等级按配额复用；相关知识要求按对应等级权重分配到三级条目。不读取教材，权重合计为 100% 时每级 200 个，任一来源失败整批不发布。
               </p>
             )}
           <div className="flex flex-wrap items-center gap-7 text-sm text-[#536178]">
@@ -900,7 +900,7 @@ function TheoryCompilationWorkspace({
           {activeGeneration ? (
             <div className="max-w-[620px]">
               <div className="flex justify-between text-sm text-[#526b91]">
-                  <span>{activeGeneration.mode === "textbook" ? "正在按教材章节和标准三级条目生成考评点（批次）" : "正在按标准公共基本条目和分等级知识要求生成考评点（批次）"}</span>
+                  <span>正在按权重配额生成公共基础池和分等级考评点（批次）</span>
                 <span>{activeGeneration.completedBatches} / {activeGeneration.totalBatches || "?"} 批</span>
               </div>
               <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#e5ebf6]">
@@ -4776,6 +4776,9 @@ function AuthoringTaskPanel() {
   const manualCheckById = useRef(new Map<string, string>());
   const generationActive = generationJob?.status === "queued" || generationJob?.status === "running";
   const [isQualityStandardOpen, setIsQualityStandardOpen] = useState(false);
+  const [qualityStandardKind, setQualityStandardKind] = useState<"theory" | "skill">("theory");
+  const qualityStandardTitle = qualityStandardKind === "skill" ? "操作技能试题质量标准" : "试题质量标准";
+  const qualityStandardLoadId = useRef(0);
   const [qualityStandard, setQualityStandard] = useState("");
   const [qualityStandardError, setQualityStandardError] = useState("");
   const [isLoadingQualityStandard, setIsLoadingQualityStandard] =
@@ -5016,29 +5019,36 @@ function AuthoringTaskPanel() {
     });
     setExecutionError("");
   };
-  const openQualityStandard = async () => {
+  const openQualityStandard = async (kind: "theory" | "skill" = "theory") => {
+    const loadId = ++qualityStandardLoadId.current;
+    setQualityStandardKind(kind);
     setIsQualityStandardOpen(true);
+    setQualityStandard("");
     setQualityStandardError("");
     setIsLoadingQualityStandard(true);
     try {
-      const response = await fetch("/api/v1/authoring/quality-standard");
+      const response = await fetch(`/api/v1/authoring/quality-standard?kind=${kind}`, {
+        signal: AbortSignal.timeout(30_000),
+      });
       const payload = await response.json();
+      if (loadId !== qualityStandardLoadId.current) return;
       if (!response.ok)
         throw new Error(payload.error?.message ?? "加载试题质量标准失败。");
       setQualityStandard(payload.data?.content ?? "");
     } catch (error) {
+      if (loadId !== qualityStandardLoadId.current) return;
       setQualityStandardError(
         error instanceof Error ? error.message : "加载试题质量标准失败。",
       );
     } finally {
-      setIsLoadingQualityStandard(false);
+      if (loadId === qualityStandardLoadId.current) setIsLoadingQualityStandard(false);
     }
   };
   const saveQualityStandard = async () => {
     setIsSavingQualityStandard(true);
     setQualityStandardError("");
     try {
-      const response = await fetch("/api/v1/authoring/quality-standard", {
+      const response = await fetch(`/api/v1/authoring/quality-standard?kind=${qualityStandardKind}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: qualityStandard }),
@@ -5048,7 +5058,7 @@ function AuthoringTaskPanel() {
         throw new Error(payload.error?.message ?? "保存试题质量标准失败。");
       setQualityStandard(payload.data?.content ?? qualityStandard);
       setIsQualityStandardOpen(false);
-      setNotice("试题质量标准已保存，后续执行命题时将作为生成约束。");
+      setNotice(`${qualityStandardTitle}已保存，后续${qualityStandardKind === "skill" ? "操作技能" : ""}命题时将作为生成约束。`);
     } catch (error) {
       setQualityStandardError(
         error instanceof Error ? error.message : "保存试题质量标准失败。",
@@ -5674,6 +5684,13 @@ function AuthoringTaskPanel() {
               type="button"
             >
               试题质量标准
+            </button>
+            <button
+              className="rounded-xl border border-[#cbdaf0] bg-white px-5 py-3 text-base text-[#385578]"
+              onClick={() => void openQualityStandard("skill")}
+              type="button"
+            >
+              操作技能试题质量标准
             </button>
             <button
               className="rounded-xl bg-[#2e66dd] px-5 py-3 text-base font-medium text-white disabled:cursor-not-allowed disabled:bg-[#9aaae0]"
@@ -6380,15 +6397,16 @@ function AuthoringTaskPanel() {
                   className="m-0 text-[26px] font-semibold text-[#29436d]"
                   id="quality-standard-title"
                 >
-                  试题质量标准
+                  {qualityStandardTitle}
                 </h2>
                 <p className="m-0 mt-2 text-[15px] text-[#7185a5]">
-                  保存后覆盖当前标准，并在后续 AI 命题时作为质量约束使用。
+                  保存后覆盖当前标准，并在后续{qualityStandardKind === "skill" ? "操作技能" : ""} AI 命题时作为质量约束使用。
                 </p>
               </div>
               <button
-                aria-label="关闭试题质量标准"
+                aria-label={`关闭${qualityStandardTitle}`}
                 className="text-3xl text-[#7185a5]"
+                disabled={isSavingQualityStandard}
                 onClick={() => setIsQualityStandardOpen(false)}
                 type="button"
               >
@@ -6402,7 +6420,7 @@ function AuthoringTaskPanel() {
                   className="mt-3 min-h-[340px] w-full resize-y rounded-xl border border-[#cbdaf0] px-5 py-4 text-[16px] leading-7 text-[#34445d] outline-none focus:border-[#7691ee] focus:ring-2 focus:ring-[#e8eeff] disabled:bg-[#f5f7fb]"
                   disabled={isLoadingQualityStandard || isSavingQualityStandard}
                   onChange={(event) => setQualityStandard(event.target.value)}
-                  placeholder="请输入试题质量标准"
+                  placeholder={`请输入${qualityStandardTitle}`}
                   value={qualityStandard}
                 />
               </label>

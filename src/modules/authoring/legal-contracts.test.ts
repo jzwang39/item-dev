@@ -11,7 +11,7 @@ const config: LegalConfigInput = {
 };
 const quote = "测试条文用于验证原文边界和引用规则，不用于正式命题。";
 function payload() {
-  return { questions: [
+  const templates = [
     { assessmentPointCode: "A-001", questionType: "single", stem: "以下哪个选项符合测试条文规定的验证用途？",
       options: ["原文边界验证", "无依据事实", "自行编造内容", "改变原文内容"].map((content, index) => ({ key: String.fromCharCode(65 + index), content })),
       answers: ["A"], analysis: "给定原文明确说明其用途是验证原文边界及引用规则，因此该选项符合原文，不涉及其他用途。",
@@ -19,13 +19,17 @@ function payload() {
     { assessmentPointCode: "A-001", questionType: "judgement", stem: "测试条文明确声明不能将测试素材用于正式命题。",
       options: [], answers: ["正确"], analysis: "条文说明测试素材只供边界及引用规则验证，并且明确标注不用于正式命题，因此该判断成立。",
       knowledge: "测试素材范围", difficulty: "easy", evidence: { clauseId: "第一条", quote } },
+  ];
+  return { questions: [
+    ...Array.from({ length: 4 }, (_, index) => ({ ...templates[0], stem: `${templates[0].stem}（单选测试${index + 1}）` })),
+    ...Array.from({ length: 2 }, (_, index) => ({ ...templates[1], stem: `${templates[1].stem}（判断测试${index + 1}）` })),
   ] };
 }
 
-test("十类参考提示词数量固定为2，不沿用20道演示规则", () => {
+test("十类参考提示词数量固定为6，配额为4单选2判断", () => {
   assert.equal(legalTopics.length, 10);
   for (const topic of legalTopics) {
-    assert.ok(defaultLegalPrompt(topic).includes("固定2道题"));
+    assert.ok(defaultLegalPrompt(topic).includes("固定6道题：4道单项选择题、2道判断题"));
     assert.ok(defaultLegalPrompt(topic).includes("不得编造"));
   }
 });
@@ -54,9 +58,9 @@ test("重复条号、缺少条文、缺号时拒绝", () => {
   assert.throws(() => allowedClauses({ ...config, fullText: config.fullText.replace("第二条", "第四条") }), /不连续/);
   assert.throws(() => allowedClauses({ ...config, fullText: "中华人民共和国个人所得税法 第一条 短文。" }), /完整覆盖/);
 });
-test("1单选1判断及逐字引用通过，改写或越章引用拒绝", () => {
+test("4单选2判断及逐字引用通过，改写或越章引用拒绝", () => {
   const clauses = allowedClauses(config);
-  assert.equal(validateLegalQuestions(JSON.stringify(payload()), "A-001", clauses).length, 2);
+  assert.equal(validateLegalQuestions(JSON.stringify(payload()), "A-001", clauses).length, 6);
   const invalid = payload();
   invalid.questions[0].evidence.clauseId = "第三条";
   assert.throws(() => validateLegalQuestions(JSON.stringify(invalid), "A-001", clauses), /允许章条/);
@@ -66,7 +70,12 @@ test("1单选1判断及逐字引用通过，改写或越章引用拒绝", () => 
 });
 test("错误配额、答案结构、取巧选项、解析长度和重复题干拒绝", () => {
   const clauses = allowedClauses(config);
-  assert.throws(() => validateLegalQuestions('{"questions":[]}', "A-001", clauses), /恰好2道/);
+  assert.throws(() => validateLegalQuestions('{"questions":[]}', "A-001", clauses), /恰好6道/);
+  const oldQuota = payload(); oldQuota.questions = oldQuota.questions.slice(0, 2);
+  assert.throws(() => validateLegalQuestions(JSON.stringify(oldQuota), "A-001", clauses), /恰好6道/);
+  const wrongTypes = payload();
+  wrongTypes.questions[3] = { ...wrongTypes.questions[4], stem: "用于验证三单选三判断配额拒绝的独立测试题干。" };
+  assert.throws(() => validateLegalQuestions(JSON.stringify(wrongTypes), "A-001", clauses), /4道单选、2道判断/);
   const invalid = payload();
   invalid.questions[0].options[0].content = "以上都正确";
   assert.throws(() => validateLegalQuestions(JSON.stringify(invalid), "A-001", clauses), /取巧/);

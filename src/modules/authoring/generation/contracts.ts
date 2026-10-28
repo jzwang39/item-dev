@@ -27,6 +27,7 @@ export type Scope = {
 export type Snapshot = {
   projectId: string; requirement: string; scope: Scope;
   points: QuotaPoint[]; qualityRequirements: string[]; qualityStandard: string;
+  skillQualityStandard?: string;
   sourceVersionIds: string[];
   nodes: Array<{ id: string; code: string; name: string; chapterIds: string[]; skillContext?: unknown }>;
   skillStructure?: unknown;

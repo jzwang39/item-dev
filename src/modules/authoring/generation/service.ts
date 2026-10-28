@@ -10,6 +10,7 @@ import { isLegalPoint } from "@/modules/authoring/legal-topics";
 import { buildBatches, GENERATION_CONCURRENCY, MAX_ATTEMPTS, parseQuestions, questionTypes, quotaTotal, stemHash, validateQuota, type GeneratedQuestion, type QuotaPoint, type Scope, type Snapshot, type QuestionType } from "./contracts";
 import { loadSkillPlanBasis } from "../skill-plan";
 import { skillQuestionPrompt } from "./skill-prompt";
+import { qualityStandardConfigs, qualityStandardContent } from "../quality-standard";
 
 function json<T>(value: T | string): T {
   return typeof value === "string" ? JSON.parse(value) as T : value;
@@ -55,15 +56,20 @@ export async function startGeneration(planId: string, actorId: string, retryFail
     const [sources] = await db.execute<(RowDataPacket & { source_version_id: string })[]>(
       "SELECT source_version_id FROM blueprint_version_sources WHERE blueprint_version_id=?", [scope.blueprintVersions.outline.id],
     );
-    const [settings] = await db.execute<(RowDataPacket & { setting_value_json: string | { content?: string } })[]>(
-      "SELECT setting_value_json FROM system_settings WHERE setting_key='authoring.question_quality_standard' LIMIT 1",
+    const [settings] = await db.execute<(RowDataPacket & { setting_key: string; setting_value_json: unknown })[]>(
+      "SELECT setting_key, setting_value_json FROM system_settings WHERE setting_key IN (?, ?)",
+      [qualityStandardConfigs.theory.settingKey, qualityStandardConfigs.skill.settingKey],
     );
+    const savedSettings = new Map(settings.map((setting) => [setting.setting_key, setting.setting_value_json]));
     const snapshot: Snapshot = {
       projectId: plan.project_id, requirement: plan.raw_requirement, scope,
       points: quota.points.map((point) => ({ ...point, total: quotaTotal(point) })),
       skillStructure: skillBasis?.structure,
       qualityRequirements: quota.qualityRequirements ?? [],
-      qualityStandard: settings[0] ? json<{ content?: string }>(settings[0].setting_value_json).content ?? "" : "",
+      qualityStandard: qualityStandardContent(savedSettings.get(qualityStandardConfigs.theory.settingKey), ""),
+      skillQualityStandard: scope.assessmentMode === "操作技能"
+        ? qualityStandardContent(savedSettings.get(qualityStandardConfigs.skill.settingKey), qualityStandardConfigs.skill.defaultContent)
+        : undefined,
       sourceVersionIds: sources.map((source) => source.source_version_id),
       nodes: quota.points.map((point) => {
         const node = byCode.get(point.code)!;

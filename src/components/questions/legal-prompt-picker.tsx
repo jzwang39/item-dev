@@ -54,6 +54,6 @@ export function LegalPromptPicker({ topics, selectedIds, previewId, disabled, on
         : `所选提示词的正式原文尚未核验：${unverified.map(title).join("、")}。请补全配置并勾选核验确认后保存。`}
       <button className="ml-2 underline disabled:opacity-40" disabled={disabled} onClick={onManage} type="button">前往配置并核验</button>
     </div> : null}
-    <p className="m-0 text-sm text-[#607694]">使用所选主题的已保存提示词及原文命题，每主题 2 道（1 单选＋1 判断）；生成后待审核，通过并确认后入库。</p>
+    <p className="m-0 text-sm text-[#607694]">使用所选主题的已保存提示词及原文命题，每主题 6 道（4 单选＋2 判断）；生成后待审核，通过并确认后入库。</p>
   </section>;
 }

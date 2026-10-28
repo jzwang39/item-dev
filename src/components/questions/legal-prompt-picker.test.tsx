@@ -44,6 +44,8 @@ test("切换主题显示该主题的保存内容，而非默认参考提示词",
 test("未核验主题仍可查看选择，多选时显示全部选择状态", () => {
   const html = render(["law-1", "law-2"]);
   assert.ok(html.includes("已选 2 个"));
+  assert.ok(html.includes("每主题 6 道（4 单选＋2 判断）"));
+  assert.ok(!html.includes("每主题 2 道"));
   assert.equal((html.match(/aria-pressed="true"/g) ?? []).length, 2);
   assert.ok(!html.includes("disabled="));
 });

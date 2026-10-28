@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { legalTopics } from "@/modules/authoring/legal-topics";
+import { legalQuestionQuota, legalTopics } from "@/modules/authoring/legal-topics";
 import type { LegalConfig } from "@/modules/authoring/legal-contracts";
 import { jsonRequest } from "./legal-agent-request";
 import { LegalPromptPicker } from "./legal-prompt-picker";
@@ -198,14 +198,14 @@ export function LegalAgent({ onCompleted }: Readonly<{ onCompleted: () => void }
               }} onManage={managePrompts} /> : null}
             <details className="text-sm">
               <summary className="cursor-pointer text-[#607694]">补充命题要求（可选）</summary>
-              <textarea aria-label="补充命题要求" className={`${field} mt-2`} disabled={busy} rows={3} maxLength={12000} value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="补充知识点侧重，不可更改原文范围和每法规2道的规则。" />
+              <textarea aria-label="补充命题要求" className={`${field} mt-2`} disabled={busy} rows={3} maxLength={12000} value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="补充知识点侧重，不可更改原文范围和每法规6道（4单选＋2判断）的规则。" />
             </details>
           </>}
         </div>
         <LegalDialogFooter error={error}>
           <button className={button} disabled={submitting} onClick={close} type="button">取消</button>
           {modal === "prompts" ? <button className={primary} disabled={busy || !state} onClick={() => void save()} type="button">{managingFromJob ? "保存并返回命题" : "保存提示词及原文"}</button>
-            : <button className={primary} disabled={busy || !state || Boolean(watchId) || !selectedTopics.length || hasUnverifiedSelection} onClick={() => void generate()} type="button">开始命题 · {selectedTopics.length * 2}道</button>}
+            : <button className={primary} disabled={busy || !state || Boolean(watchId) || !selectedTopics.length || hasUnverifiedSelection} onClick={() => void generate()} type="button">开始命题 · {selectedTopics.length * legalQuestionQuota.total}道</button>}
         </LegalDialogFooter>
       </div>
     </div> : null}

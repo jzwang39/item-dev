@@ -6,6 +6,7 @@ export type StandardBasicItem = {
   category: string;
   parentName: string;
   evidence: string;
+  ancestorNames?: string[];
 };
 
 export type StandardBasicSource = StandardBasicItem & {
@@ -47,6 +48,7 @@ export function parseStandardBasicItems(input: string): StandardBasicItem[] {
       result.push({
         code: item.code, name: item.name, category: root.name, parentName: parent.name,
         evidence: `${item.code} ${item.evidence}`,
+        ancestorNames: headings.slice(start, end).filter((heading) => item.code.startsWith(`${heading.code}.`)).map((heading) => heading.name),
       });
     }
   }

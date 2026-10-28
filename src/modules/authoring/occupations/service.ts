@@ -14,6 +14,9 @@ import {
 export { OccupationOperationError } from "./directions";
 
 type ProjectRow = RowDataPacket & { id: string };
+// The generic legal bank is an internal storage/review scope, not an occupation project.
+const activeOccupationProjectsSql =
+  "SELECT id FROM projects WHERE status = 'active' AND code <> 'SYSTEM-GENERIC-LEGAL' ORDER BY created_at";
 type OccupationRow = RowDataPacket & {
   id: string;
   name: string;
@@ -248,7 +251,7 @@ async function saveDirections(
 
 async function getActiveProjectId(): Promise<string | null> {
   const rows = await query<ProjectRow[]>(
-    "SELECT id FROM projects WHERE status = 'active' ORDER BY created_at"
+    activeOccupationProjectsSql
   );
   if (rows.length > 1) {
     throw new OccupationOperationError("当前存在多个启用项目，请先选择项目后再维护职业。");
@@ -258,7 +261,7 @@ async function getActiveProjectId(): Promise<string | null> {
 
 async function getActiveProjectIdForUpdate(connection: PoolConnection): Promise<string | null> {
   const [rows] = await connection.execute<ProjectRow[]>(
-    "SELECT id FROM projects WHERE status = 'active' ORDER BY created_at FOR UPDATE"
+    `${activeOccupationProjectsSql} FOR UPDATE`
   );
   if (rows.length > 1) {
     throw new OccupationOperationError("当前存在多个启用项目，请先选择项目后再维护职业。");
@@ -275,7 +278,7 @@ async function getOrCreateDefaultProject(
   }
 
   const [rows] = await connection.execute<ProjectRow[]>(
-    "SELECT id FROM projects WHERE status = 'active' ORDER BY created_at FOR UPDATE"
+    `${activeOccupationProjectsSql} FOR UPDATE`
   );
   if (rows.length === 1) {
     if (actorId) {
