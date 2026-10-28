@@ -326,7 +326,7 @@ export function QuestionBankWorkspace({
               <option value="">全部适用等级</option>
               {levels.map((item) => (
                 <option key={item.levelCode} value={item.levelCode}>
-                  {item.levelCode.replace("level_", "")}级
+                  {item.levelCode === "generic" ? "通用" : `${item.levelCode.replace("level_", "")}级`}
                 </option>
               ))}
             </Filter>

@@ -53,7 +53,7 @@ export async function GET() {
         question_version_id: string;
         question_no: string;
         occupation_name: string;
-        level_code: string;
+        level_code: string | null;
         assessment_mode: "theory" | "skill";
         question_type: string;
         stem: string;
@@ -66,7 +66,7 @@ export async function GET() {
         current_status: string;
       })[]
     >(
-      `SELECT ra.id AS assignment_id, q.id AS question_id, qv.id AS question_version_id, q.question_no, po.name AS occupation_name,
+      `SELECT ra.id AS assignment_id, q.id AS question_id, qv.id AS question_version_id, q.question_no, COALESCE(po.name,'通用') AS occupation_name,
               q.level_code, q.assessment_mode, q.question_type, qv.stem, qv.content_json, qv.answer_json, qv.analysis_text, qv.score_rubric_json,
               (SELECT GROUP_CONCAT(DISTINCT bn.name ORDER BY bn.ordinal SEPARATOR '、')
                 FROM question_assessment_points qap JOIN blueprint_nodes bn ON bn.id=qap.blueprint_node_id
@@ -74,7 +74,7 @@ export async function GET() {
          FROM review_assignments ra
          INNER JOIN questions q ON q.id = ra.question_id AND q.current_status IN ('pending_review','returned','approved','stored') AND q.archived_at IS NULL
          INNER JOIN question_versions qv ON qv.id = ra.question_version_id AND qv.id=q.current_version_id
-         INNER JOIN project_occupations po ON po.id = q.occupation_id
+         LEFT JOIN project_occupations po ON po.id = q.occupation_id
         WHERE ra.expert_id = ? AND ra.status IN ('assigned','submitted')
           AND ra.id=(SELECT latest.id FROM review_assignments latest WHERE latest.question_version_id=qv.id ORDER BY latest.assigned_at DESC,latest.id DESC LIMIT 1)
         ORDER BY ra.assigned_at ASC`,
@@ -102,7 +102,7 @@ export async function GET() {
           questionVersionId: task.question_version_id,
           questionNo: task.question_no,
           occupationName: task.occupation_name,
-          levelLabel: levels[task.level_code] ?? task.level_code,
+          levelLabel: task.level_code ? levels[task.level_code] ?? task.level_code : "通用",
           assessmentMode: task.assessment_mode,
           questionType: task.question_type,
           stem: task.stem,
@@ -110,7 +110,7 @@ export async function GET() {
           answer: decode(task.answer_json),
           analysis: task.analysis_text,
           scoreRubric: task.score_rubric_json ? decode(task.score_rubric_json) : null,
-          pointName: task.point_name ?? "未关联考评点",
+          pointName: task.point_name ?? (task.level_code === null ? "通用法规知识" : "未关联考评点"),
           assignedAt: task.assigned_at,
           status: task.current_status,
         })),

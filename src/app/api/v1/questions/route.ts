@@ -32,7 +32,7 @@ type QuestionRow = RowDataPacket & {
   question_no: string;
   occupation_name: string;
   occupation_code: string;
-  level_code: (typeof levelCodes)[number];
+  level_code: (typeof levelCodes)[number] | null;
   assessment_mode: (typeof assessmentModes)[number];
   question_type: string;
   current_status: (typeof statusCodes)[number];
@@ -373,6 +373,8 @@ export async function GET(request: Request) {
   if (levelCodes.includes(levelCode as (typeof levelCodes)[number])) {
     conditions.push("q.level_code = ?");
     values.push(levelCode!);
+  } else if (levelCode === "generic") {
+    conditions.push("q.level_code IS NULL AND q.occupation_id IS NULL");
   }
   if (questionType) {
     conditions.push("q.question_type = ?");
@@ -400,7 +402,7 @@ export async function GET(request: Request) {
   const { page, pageSize } = pagination.data;
   const searchJoins = `FROM questions q
     INNER JOIN projects p ON p.id=q.project_id
-    INNER JOIN project_occupations po ON po.id=q.occupation_id
+    LEFT JOIN project_occupations po ON po.id=q.occupation_id
     LEFT JOIN question_versions qv ON qv.id=q.current_version_id
     LEFT JOIN question_assessment_points qap ON qap.question_version_id=qv.id
     LEFT JOIN blueprint_nodes bn ON bn.id=qap.blueprint_node_id`;
@@ -418,7 +420,7 @@ export async function GET(request: Request) {
       return NextResponse.json({ data: candidates });
     }
     const rows = await query<QuestionRow[]>(
-      `SELECT q.id, q.question_no, po.name AS occupation_name, po.code AS occupation_code,
+      `SELECT q.id, q.question_no, COALESCE(po.name,'通用') AS occupation_name, COALESCE(po.code,'') AS occupation_code,
               q.level_code, q.assessment_mode, q.question_type, q.current_status, q.difficulty,
               q.created_at, q.current_version_id, qv.stem, qv.content_json, qv.answer_json, qv.analysis_text,
               EXISTS (SELECT 1 FROM question_review_confirmations qrc WHERE qrc.question_version_id=q.current_version_id) AS is_confirmed,
@@ -426,7 +428,7 @@ export async function GET(request: Request) {
               GROUP_CONCAT(DISTINCT bn.name ORDER BY bn.ordinal SEPARATOR '、') AS point_names
          FROM questions q
          INNER JOIN projects p ON p.id = q.project_id
-         INNER JOIN project_occupations po ON po.id = q.occupation_id
+         LEFT JOIN project_occupations po ON po.id = q.occupation_id
          LEFT JOIN question_versions qv ON qv.id = q.current_version_id
          LEFT JOIN question_assessment_points qap ON qap.question_version_id = qv.id
          LEFT JOIN blueprint_nodes bn ON bn.id = qap.blueprint_node_id
@@ -443,7 +445,7 @@ export async function GET(request: Request) {
     ) : [{ total: rows.length }];
     const options = await query<
       (RowDataPacket & {
-        level_code: (typeof levelCodes)[number];
+        level_code: (typeof levelCodes)[number] | null;
         assessment_mode: (typeof assessmentModes)[number];
         question_type: string;
       })[]
@@ -459,8 +461,8 @@ export async function GET(request: Request) {
         questionNo: row.question_no,
         occupationName: row.occupation_name,
         occupationCode: row.occupation_code,
-        levelCode: row.level_code,
-        levelLabel: levelLabels[row.level_code],
+        levelCode: row.level_code ?? "generic",
+        levelLabel: row.level_code ? levelLabels[row.level_code] : "通用",
         assessmentMode: row.assessment_mode,
         questionType: row.question_type,
         status: row.current_status,
@@ -473,11 +475,11 @@ export async function GET(request: Request) {
         answer: parseJson(row.answer_json),
         analysis: row.analysis_text,
         pointCodes: row.point_codes ?? "—",
-        pointNames: row.point_names ?? "未关联考评点",
+        pointNames: row.point_names ?? (row.level_code === null ? "通用法规知识" : "未关联考评点"),
       })),
       total: Number(count.total),
       options: options.map((item) => ({
-        levelCode: item.level_code,
+        levelCode: item.level_code ?? "generic",
         assessmentMode: item.assessment_mode,
         questionType: item.question_type,
       })),

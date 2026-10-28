@@ -72,7 +72,7 @@ export async function GET() {
           project_id: string;
           question_no: string;
           occupation_name: string;
-          level_code: string;
+          level_code: string | null;
           assessment_mode: "theory" | "skill";
           question_type: string;
           stem: string;
@@ -90,13 +90,13 @@ export async function GET() {
           review_opinion: string | null;
         })[]
       >(
-        `SELECT q.id, q.project_id, q.question_no, po.name AS occupation_name, q.level_code, q.assessment_mode, q.question_type,
+        `SELECT q.id, q.project_id, q.question_no, COALESCE(po.name,'通用') AS occupation_name, q.level_code, q.assessment_mode, q.question_type,
                 qv.stem, qv.content_json, qv.answer_json, qv.analysis_text, qv.score_rubric_json, ra.id AS assignment_id, ra.assigned_at,
                 assigned.display_name AS assigned_expert_name,q.current_status,q.current_version_id,assigned.role AS reviewer_role,qrc.confirmed_at,
                 (SELECT rr.comment FROM review_records rr WHERE rr.question_version_id=qv.id ORDER BY rr.submitted_at DESC,rr.id DESC LIMIT 1) AS review_opinion
            FROM questions q
            INNER JOIN projects p ON p.id = q.project_id AND p.status = 'active'
-           INNER JOIN project_occupations po ON po.id = q.occupation_id AND po.status = 'active'
+           LEFT JOIN project_occupations po ON po.id = q.occupation_id
            INNER JOIN question_versions qv ON qv.id = q.current_version_id
            LEFT JOIN review_assignments ra ON ra.id = (
              SELECT latest.id FROM review_assignments latest WHERE latest.question_version_id=qv.id
@@ -104,6 +104,7 @@ export async function GET() {
            LEFT JOIN accounts assigned ON assigned.id = ra.expert_id
            LEFT JOIN question_review_confirmations qrc ON qrc.question_version_id=qv.id
           WHERE q.current_status IN ('pending_review','returned','approved','stored') AND q.archived_at IS NULL
+            AND (q.occupation_id IS NULL OR po.status='active')
           ORDER BY FIELD(q.current_status,'pending_review','returned','approved','stored'),po.name, q.level_code, q.created_at DESC`,
       ),
       query<
@@ -142,7 +143,7 @@ export async function GET() {
           projectId: question.project_id,
           questionNo: question.question_no,
           occupationName: question.occupation_name,
-          levelLabel: levelLabels[question.level_code] ?? question.level_code,
+          levelLabel: question.level_code ? levelLabels[question.level_code] ?? question.level_code : "通用",
           assessmentMode: question.assessment_mode,
           questionType: question.question_type,
           stem: question.stem,
@@ -154,7 +155,7 @@ export async function GET() {
             id: question.id,
             questionNo: question.question_no,
             occupationName: question.occupation_name,
-            levelLabel: levelLabels[question.level_code] ?? question.level_code,
+            levelLabel: question.level_code ? levelLabels[question.level_code] ?? question.level_code : "通用",
             assessmentMode: question.assessment_mode,
             questionType: question.question_type,
             stem: question.stem,

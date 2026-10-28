@@ -34,17 +34,24 @@ export function allowedClauses(config: LegalConfigInput): LegalClause[] {
     throw new Error(`${topic.title}：须填写正式原文、版本、施行日期、权威出处，并确认已核验现行有效。`);
   }
   const url = new URL(config.sourceUrl);
-  if (url.protocol !== "https:" || !/(?:^|\.)gov\.cn$|(?:^|\.)npc\.gov\.cn$|(?:^|\.)cnis\.ac\.cn$/.test(url.hostname)) {
-    throw new Error("原文出处必须为 HTTPS 政府或权威标准机构链接。");
+  if (url.protocol !== "https:" || !/(?:^|\.)gov\.cn$|(?:^|\.)cnis\.ac\.cn$|(?:^|\.)people\.com\.cn$|(?:^|\.)xinhuanet\.com$|(?:^|\.)news\.cn$/.test(url.hostname)) {
+    throw new Error("原文出处须为 HTTPS 政府、权威标准机构、人民网或新华社链接。");
   }
   const date = new Date(`${config.effectiveDate}T00:00:00Z`);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(config.effectiveDate) || !Number.isFinite(date.getTime()) ||
     date.toISOString().slice(0, 10) !== config.effectiveDate || date.getTime() > Date.now()) throw new Error("施行日期无效或尚未施行。");
+  if (config.id === "law-1" && config.effectiveDate !== "2021-01-01") {
+    throw new Error("民法典施行日期应为2021-01-01；2020-05-28是通过日期，不是施行日期。");
+  }
   const text = compactLegalText(config.fullText);
   const title = compactLegalText(config.documentTitle).replace(/[《》]/g, "");
   if (config.id !== "law-10" && title !== topic.title) throw new Error(`文件名称必须为《${topic.title}》。`);
   if (!text.includes(title)) throw new Error("原文未出现填写的正式文件名称，请核对文件。");
-  const readable = config.fullText.normalize("NFKC").replace(/第\s*一\s*章/g, "第一章").replace(/第\s*二\s*章/g, "第二章");
+  // Strip Markdown presentation markers without rewriting the quoted legal text.
+  const readable = config.fullText.normalize("NFKC")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/\*\*(第\s*[一二三四五六七八九十百零〇\d\s]+?\s*条)\*\*/g, "$1")
+    .replace(/第\s*一\s*章/g, "第一章").replace(/第\s*二\s*章/g, "第二章");
   if (config.id === "law-10") {
     if (title === topic.title || !/(?:GB|GB\/T|[A-Z]{1,5}\/T)\s*\d+[-—]\d{4}/i.test(config.documentVersion)) throw new Error("标准须填写真实具体名称及标准编号和年份，不能使用泛称。");
     const candidates = [...readable.matchAll(/第一章|(?:^|[\s。；：])1[.、]?\s*(?:适用\s*范围|范\s*围|总\s*则)/g)]

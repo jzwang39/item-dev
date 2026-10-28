@@ -81,3 +81,27 @@ test("法规识别使用父级名称和源依据，普通知识点不误判", ()
   assert.equal(isLegalPoint({ name: "公开信息", source_ref_json: { standardBasic: { name: "法规知识" } } }), true);
   assert.equal(isLegalPoint({ name: "募捐基本理念", tertiaryName: "理念宣传" }), false);
 });
+
+test("人民网及新华社转载来源可用，伪装域名与非HTTPS仍拒绝", () => {
+  for (const sourceUrl of ["https://cpc.people.com.cn/test", "https://www.news.cn/test", "https://www.xinhuanet.com/test"]) {
+    assert.equal(allowedClauses({ ...config, sourceUrl }).length, 2);
+  }
+  for (const sourceUrl of ["https://people.com.cn.evil.example/test", "https://fakepeople.com.cn/test", "http://cpc.people.com.cn/test"]) {
+    assert.throws(() => allowedClauses({ ...config, sourceUrl }), /原文出处/);
+  }
+});
+
+test("Markdown加粗条号可解析且保持逐字原文，仍拒绝重复编号", () => {
+  const source = { ...config, fullText: config.fullText.replace(/(第[一二三]条)/g, "**$1**") };
+  assert.deepEqual(allowedClauses(source), allowedClauses(config));
+  assert.throws(() => allowedClauses({ ...source, fullText: source.fullText.replace("第二条", "第一条") }), /编号重复/);
+});
+
+test("民法典使用施行日期，章节引导语不误识别为正文", () => {
+  const numbers = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一", "十二"];
+  const source = { ...config, id: "law-1", documentTitle: "中华人民共和国民法典", effectiveDate: "2021-01-01",
+    fullText: `《中华人民共和国民法典》第一编下的第一章和第二章原文如下：\n### 第一章 基本规定\n${numbers.map((number) => `**第${number}条** 测试条文用于验证格式解析，不用于正式业务命题。`).join("\n")}\n### 第二章 自然人\n**第十三条** 不属于命题范围。` };
+  assert.equal(allowedClauses(source).length, 12);
+  assert.throws(() => allowedClauses({ ...source, effectiveDate: "2020-05-28" }), /通过日期/);
+  assert.throws(() => allowedClauses({ ...source, confirmed: false }), /确认已核验/);
+});

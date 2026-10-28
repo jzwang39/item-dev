@@ -3,12 +3,12 @@ import { z } from "zod";
 import { getVerifiedSession } from "@/auth";
 import { extractDocxText, extractPdfText } from "@/modules/documents/extraction/service";
 import { legalConfigSchema } from "@/modules/authoring/legal-contracts";
-import { getLegalConfig, listLegalJobs, listLegalTargets, saveLegalConfig, startLegalJob } from "@/modules/authoring/legal-service";
+import { getLegalConfig, listLegalJobs, saveLegalConfig, startLegalJob } from "@/modules/authoring/legal-service";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 const generateSchema = z.object({
-  nodeId: z.string().length(26), topicIds: z.array(z.string().max(30)).min(1).max(10),
+  topicIds: z.array(z.string().max(30)).min(1).max(10),
   instructions: z.string().trim().max(12000), revision: z.number().int().positive(),
 });
 function guard(session: Awaited<ReturnType<typeof getVerifiedSession>>) {
@@ -24,8 +24,8 @@ export async function GET(request: Request) {
   if (rejection) return rejection;
   try {
     if (new URL(request.url).searchParams.get("view") === "jobs") return NextResponse.json({ data: { jobs: await listLegalJobs() } });
-    const [config, targets, jobs] = await Promise.all([getLegalConfig(), listLegalTargets(), listLegalJobs()]);
-    return NextResponse.json({ data: { config, targets, jobs } });
+    const [config, jobs] = await Promise.all([getLegalConfig(), listLegalJobs()]);
+    return NextResponse.json({ data: { config, jobs } });
   } catch (error) { return failure(error); }
 }
 export async function PUT(request: Request) {
@@ -52,6 +52,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ data: { text, originalName: file.name } });
     }
     const input = generateSchema.parse(await request.json());
-    return NextResponse.json({ data: await startLegalJob(input.nodeId, input.topicIds, input.instructions, input.revision, session!.user.id) }, { status: 202 });
+    return NextResponse.json({ data: await startLegalJob(input.topicIds, input.instructions, input.revision, session!.user.id) }, { status: 202 });
   } catch (error) { return failure(error); }
 }
