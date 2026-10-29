@@ -13,24 +13,12 @@ import { mergeQuota, type Quota } from "@/modules/authoring/generation/quota";
 import { isLegalPoint } from "@/modules/authoring/legal-topics";
 import { loadSkillPlanBasis } from "@/modules/authoring/skill-plan";
 import { practicalQuota } from "@/modules/authoring/generation/quota";
+import { parseModelRequirement, type ParsedRequirement } from "@/modules/authoring/requirement-parser";
 
 export const dynamic = "force-dynamic";
 
 const requestSchema = z.object({
   requirement: z.string().trim().min(1, "请先描述命题需求。").max(12000)
-});
-
-const aiResultSchema = z.object({ 
-  occupationName: z.string().trim().min(1),
-  levelCode: z.enum(["level_5", "level_4", "level_3", "level_2", "level_1"]),
-  assessmentMode: z.enum(["theory", "skill"]),
-  temporaryMinimums: z.object({
-    single: z.number().int().min(0).max(100).default(0),
-    multiple: z.number().int().min(0).max(100).default(0),
-    judgement: z.number().int().min(0).max(100).default(0),
-    practical: z.number().int().min(0).max(100).default(0)
-  }).default({ single: 0, multiple: 0, judgement: 0, practical: 0 }),
-  qualityRequirements: z.array(z.string().trim().min(1).max(200)).max(10).default([])
 });
 
 const levelLabels = {
@@ -42,7 +30,6 @@ const levelLabels = {
 } as const;
 
 type LevelCode = keyof typeof levelLabels;
-type ParsedRequirement = z.infer<typeof aiResultSchema>;
 type ModelResponse = {
   choices?: Array<{ message?: { content?: string } }>;
   content?: Array<{ text?: string }>;
@@ -248,7 +235,11 @@ async function parseRequirement(requirement: string, occupationNames: string[]):
   if (!connection) throw new Error("未配置可用模型连接，请先在管理员菜单的“模型设置”中保存 API 地址、模型名称和 API Key。");
   const endpoint = getModelEndpoint(connection.baseUrl, connection.provider);
   const instruction = `你是职业技能题库命题计划助手。请依据用户提供的完整提示词，仅提取命题意图和本次临时最低题量，不生成试题、不编造职业标准。只返回 JSON，不要 Markdown：
-{"occupationName":"职业名称","levelCode":"level_5|level_4|level_3|level_2|level_1","assessmentMode":"theory|skill","temporaryMinimums":{"single":0,"multiple":0,"judgement":0,"practical":0},"qualityRequirements":["答案准确","避免重复"]}。
+字段必须为occupationName、levelCode、assessmentMode、temporaryMinimums、qualityRequirements，不要嵌套data或result。
+levelCode只能取level_5、level_4、level_3、level_2、level_1其中一个；assessmentMode只能取theory或skill其中一个，不要输出用竖线连接的候选值或中文枚举。
+temporaryMinimums的题量使用0至100的整数，不要字符串；qualityRequirements为最多10条、每条1至200字的文本数组。
+示例：“请为劝募员五级/初级工生成理论知识试题，每个考评点至少4道单选题、2道判断题”返回：
+{"occupationName":"劝募员","levelCode":"level_5","assessmentMode":"theory","temporaryMinimums":{"single":4,"multiple":0,"judgement":2,"practical":0},"qualityRequirements":["答案准确","避免重复"]}。
 操作技能使用practical表示每个鉴定点的实操题数，例如“操作技能，每个考评点至少1道题”返回practical:1，其余三个字段为0；不能改成理论知识题型。
 temporaryMinimums 表示用户明确指定的“每个考评点”题量；未指定的题型填 0，不得自行补齐默认题量。例如“每个考评点至少1道单选题、1道判断题”必须返回 {"single":1,"multiple":0,"judgement":1}。所有题型均未指定时全部填 0。当前可用职业：${occupationNames.join("、") || "未建立职业"}。`;
   let response: Response;
@@ -279,19 +270,9 @@ temporaryMinimums 表示用户明确指定的“每个考评点”题量；未�
   }
   if (!response.ok) throw new Error(payload?.error?.message || `AI 接口调用失败（${response.status}）。`);
   const content = endpoint.protocol === "anthropic"
-    ? payload?.content?.[0]?.text ?? ""
+    ? payload?.content?.map((block) => block.text ?? "").join("\n") ?? ""
     : payload?.choices?.[0]?.message?.content ?? "";
-  const json = content.match(/\{[\s\S]*\}/)?.[0];
-  if (!json) throw new Error("AI 未返回可解析的命题范围。");
-  let parsedContent: unknown;
-  try {
-    parsedContent = JSON.parse(json);
-  } catch {
-    throw new Error("AI 返回的命题范围 JSON 格式不正确，请调整模型输出格式后重试。");
-  }
-  const result = aiResultSchema.safeParse(parsedContent);
-  if (!result.success) throw new Error("AI 返回的职业、等级或考核方式无效。");
-  return { ...result.data, source: "AI 智能规划" };
+  return { ...parseModelRequirement(content), source: "AI 智能规划" };
 }
 
 function findOccupation<T extends { name: string }>(occupations: T[], occupationName: string) {
