@@ -13,6 +13,7 @@ import { readPdfWeightColumns } from "./pdf-columns";
 import type { PdfTextRun } from "@/modules/documents/extraction/service";
 import { parseSkillStandard } from "../skill-standard";
 import { publishSkillStandard } from "../skill-standard-import";
+import { readCurrentTheoryVersion } from "../current-theory-version";
 
 const levels = ["level_5", "level_4", "level_3", "level_2", "level_1"] as const;
 
@@ -65,30 +66,13 @@ export async function listOccupationStandards(occupationId: string): Promise<Sou
 export async function getCurrentTheoryWeights(occupationId: string): Promise<TheoryWeightSnapshot | null> {
   return withTransaction(async (connection) => {
     const projectId = await getProjectForOccupation(connection, occupationId);
-    const [rows] = await connection.execute<(RowDataPacket & {
-      id: string;
-      version_no: number;
-      snapshot_json: string | Omit<TheoryWeightSnapshot, "versionId" | "versionNo" | "importedAt">;
-      created_at: Date;
-    })[]>(
-      `SELECT bv.id, bv.version_no, bv.snapshot_json, bv.created_at
-         FROM blueprints b
-         INNER JOIN blueprint_versions bv ON bv.id = b.current_version_id
-        WHERE b.project_id = ?
-          AND b.occupation_id = ?
-          AND b.blueprint_kind = 'theory_weight'
-          AND b.assessment_mode = 'theory'
-        ORDER BY b.updated_at DESC
-        LIMIT 1`,
-      [projectId, occupationId]
-    );
-    const current = rows[0];
+    const current = await readCurrentTheoryVersion(connection, { projectId, occupationId, kind: "theory_weight" });
     if (!current) {
       return null;
     }
     const snapshot = typeof current.snapshot_json === "string"
       ? JSON.parse(current.snapshot_json) as Omit<TheoryWeightSnapshot, "versionId" | "versionNo" | "importedAt">
-      : current.snapshot_json;
+      : current.snapshot_json as Omit<TheoryWeightSnapshot, "versionId" | "versionNo" | "importedAt">;
     return {
       ...snapshot,
       versionId: current.id,

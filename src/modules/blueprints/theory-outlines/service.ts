@@ -7,6 +7,7 @@ import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 
 import { createUlid } from "@/shared/database/ulid";
 import { withTransaction } from "@/shared/database/mysql";
+import { readCurrentTheoryVersion } from "../current-theory-version";
 
 const uploadDirectory = "/tmp/itembank-blueprint-imports";
 const levelCodes = ["level_5", "level_4", "level_3", "level_2", "level_1"] as const;
@@ -51,26 +52,13 @@ export async function getCurrentTheoryOutline(
   const level = validateLevel(levelCode);
   return withTransaction(async (connection) => {
     const projectId = await getProjectForOccupation(connection, occupationId);
-    const [rows] = await connection.execute<(RowDataPacket & {
-      id: string;
-      version_no: number;
-      snapshot_json: Snapshot | string;
-      created_at: Date;
-    })[]>(
-      `SELECT bv.id, bv.version_no, bv.snapshot_json, bv.created_at
-         FROM blueprints b
-         INNER JOIN blueprint_versions bv ON bv.id = b.current_version_id
-        WHERE b.project_id = ? AND b.occupation_id = ?
-          AND b.blueprint_kind = 'theory_outline'
-          AND b.assessment_mode = 'theory' AND b.level_code = ?
-        LIMIT 1`,
-      [projectId, occupationId, level]
-    );
-    const current = rows[0];
+    const current = await readCurrentTheoryVersion(connection, {
+      projectId, occupationId, kind: "theory_outline", levelCode: level,
+    });
     if (!current) return null;
     const snapshot = typeof current.snapshot_json === "string"
       ? JSON.parse(current.snapshot_json) as Snapshot
-      : current.snapshot_json;
+      : current.snapshot_json as Snapshot;
     const points = await readGeneratedPoints(connection, current.id, snapshot.points);
     return { ...snapshot, points, versionId: current.id, versionNo: current.version_no, importedAt: current.created_at.toISOString() };
   });

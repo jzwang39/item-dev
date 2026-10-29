@@ -13,7 +13,7 @@ async function main() {
   assert.match(prefix, /^vg_\d+_$/);
   const admin = await createConnection({ uri: process.env.DATABASE_URL!, multipleStatements: true });
   const baseTables = [
-    "accounts", "projects", "project_occupations", "blueprints", "blueprint_versions",
+    "accounts", "projects", "project_occupations", "blueprints", "blueprint_versions", "textbook_chapters",
     "blueprint_nodes", "blueprint_version_sources", "system_settings", "model_connection_settings",
     "authoring_plans", "questions", "question_versions", "question_options",
     "question_assessment_points", "question_quality_checks", "question_status_events", "audit_logs", "outline_point_reviews",
@@ -69,11 +69,23 @@ async function main() {
       await admin.execute("INSERT INTO blueprints(id,project_id,name,blueprint_kind,occupation_id,level_code,assessment_mode) VALUES(?,?,'测试蓝图',?,?,'level_4','theory')", [blueprintId, projectId, kind, occupationId]);
       await admin.execute("INSERT INTO blueprint_versions(id,blueprint_id,version_no,snapshot_json) VALUES(?,?,1,'{}')", [versionId, blueprintId]);
     }
+    const sourceId = createUlid(), chapterId = createUlid(), unrelatedChapterId = createUlid();
+    await admin.execute("INSERT INTO blueprint_version_sources(blueprint_version_id,source_version_id) VALUES(?,?)", [outlineId, sourceId]);
+    for (const [id, source, ordinal, content] of [
+      [chapterId, sourceId, 1, "关联教材正文：规范知识来源，仅用于隔离测试。"],
+      [unrelatedChapterId, createUlid(), 1, "其他版本教材正文，不应进入本计划。"],
+    ] as const) {
+      await admin.execute("INSERT INTO textbook_chapters(id,source_version_id,ordinal,chapter_title,content_text,content_hash) VALUES(?,?,?,'测试教材',?,?)",
+        [id, source, ordinal, content, "b".repeat(64)]);
+    }
     const points = Array.from({ length: 200 }, (_, index) => ({ code: `P-${index + 1}`, name: `规范知识${index + 1}`, single: 4, multiple: 0, judgement: 2, total: 6 }));
     for (const [index, point] of points.entries()) {
       const nodeId = createUlid();
-      await admin.execute("INSERT INTO blueprint_nodes(id,blueprint_version_id,node_kind,node_code,name,ordinal) VALUES(?,?,'assessment_point',?,?,?)",
-        [nodeId, outlineId, point.code, point.name, index + 1]);
+      await admin.execute("INSERT INTO blueprint_nodes(id,blueprint_version_id,node_kind,node_code,name,ordinal,requirement_json) VALUES(?,?,'assessment_point',?,?,?,?)",
+        [nodeId, outlineId, point.code, point.name, index + 1,
+          JSON.stringify({ standardSource: { evidence: `隔离测试标准依据${point.code}` } })]);
+      if (index === 0) await admin.execute("UPDATE blueprint_nodes SET source_ref_json=? WHERE id=?",
+        [JSON.stringify({ chapterIds: [chapterId, unrelatedChapterId] }), nodeId]);
       await admin.execute("INSERT INTO outline_point_reviews(node_id,status,reviewed_by,confirmed_by) VALUES(?,'confirmed',?,?)", [nodeId, actorId, actorId]);
     }
     const scope = { occupationId, occupation: "测试职业", levelCode: "level_4", assessmentMode: "理论知识",
@@ -111,6 +123,14 @@ async function main() {
       const request = JSON.parse(String(init?.body));
       const prompt = JSON.parse(request.messages[1].content);
       const code: string = prompt["考评点"].code;
+      assert.equal(prompt["冻结考评点与标准依据"].point.standardSource.evidence, `隔离测试标准依据${code}`);
+      assert.ok(prompt["试题质量标准"].length > 0);
+      if (code === "P-1") {
+        assert.ok(prompt["教材片段"].length > 0);
+        assert.ok(prompt["教材片段"].every((excerpt: { content: string }) => excerpt.content.includes("关联教材正文")));
+      } else {
+        assert.deepEqual(prompt["教材片段"], []);
+      }
       const quotas = prompt["本次题型配额"] as Record<string, number>;
       // Accept only half the first request for one unit. The second request must
       // ask for the missing count, not regenerate the previously saved records.
@@ -285,6 +305,7 @@ async function main() {
     console.info("隔离验证通过：1200题/13批、部分保存、失败后继续、仅补失败4题、重复启动幂等、过期租约恢复、旧令牌迟到结果拦截、1200个唯一题目。");
     console.info("成果读取验证通过：ONLY_FULL_GROUP_BY、空计划、执行中草稿、多考评点关联、历史版本隔离、无考评点关联。");
     console.info("并发验证通过：两路同时执行、第三路被数据库全局容量拒绝、混合题型按槽位配额保存。");
+    console.info("理论来源验证通过：有教材节点仅使用冻结来源的关联章节，排除其他教材版本；无教材节点传入标准依据，通用质量标准默认值生效。");
   } finally {
     globalThis.fetch = originalFetch;
     if (globalThis.__itembankMysqlPool) await globalThis.__itembankMysqlPool.end();

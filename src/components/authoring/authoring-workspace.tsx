@@ -5071,14 +5071,19 @@ function AuthoringTaskPanel() {
     }
   };
   const executePlan = async (plan: GeneratedPlan) => {
-    if (plan.status !== "ready") return;
+    if (plan.status !== "ready" || isConfirmingPlan || isGeneratingPlan) return;
+    if (plan.requirement !== requirement) {
+      setExecutionError("命题需求已修改，请重新生成计划后确认。");
+      return;
+    }
     setIsConfirmingPlan(true);
     setExecutionError("");
     try {
       let planId = autoPlanId;
-      if (historyPlanId && !historyRequirementChanged) {
+      const savedPlanId = historyPlanId && !historyRequirementChanged ? historyPlanId : autoPlanId;
+      if (savedPlanId) {
         const response = await fetch(
-          `/api/v1/authoring/plans/${historyPlanId}`,
+          `/api/v1/authoring/plans/${savedPlanId}`,
           {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
@@ -5093,7 +5098,7 @@ function AuthoringTaskPanel() {
           throw new Error(
             payload.error?.message ?? "调整后的命题题量保存失败。",
           );
-        planId = historyPlanId;
+        planId = savedPlanId;
         plan = {
           ...plan,
           minimumTotal: payload.data.minimumTotal,
@@ -5235,6 +5240,7 @@ function AuthoringTaskPanel() {
     }
   };
   const viewHistoryPlan = (plan: HistoryPlan) => {
+    setAutoPlanId(null);
     const quota = plan.quota_json;
     const scope = plan.scope_json;
     setRequirement(plan.raw_requirement);
@@ -5312,8 +5318,10 @@ function AuthoringTaskPanel() {
       return;
     }
     setIsGeneratingPlan(true);
+    setGeneratedPlan(null);
     setNotice("");
     setAutoPlanId(null);
+    setHistoryPlanId(null);
     setExecutionError("");
     try {
       const response = await fetch("/api/v1/authoring/plans", {
@@ -5677,6 +5685,7 @@ function AuthoringTaskPanel() {
             <button
               className="rounded-xl border border-[#cbdaf0] bg-white px-5 py-3 text-base text-[#385578]"
               onClick={() => setGeneratedPlan(null)}
+              disabled={isConfirmingPlan}
               type="button"
             >
               返回修改需求
@@ -5699,7 +5708,7 @@ function AuthoringTaskPanel() {
               className="rounded-xl bg-[#2e66dd] px-5 py-3 text-base font-medium text-white disabled:cursor-not-allowed disabled:bg-[#9aaae0]"
               disabled={
                 generatedPlan.status !== "ready" ||
-                isConfirmingPlan
+                isConfirmingPlan || isGeneratingPlan
               }
               onClick={() =>
                 historyPlanId && historyRequirementChanged

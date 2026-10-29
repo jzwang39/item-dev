@@ -13,7 +13,7 @@ import { mergeQuota, type Quota } from "@/modules/authoring/generation/quota";
 import { isLegalPoint } from "@/modules/authoring/legal-topics";
 import { loadSkillPlanBasis } from "@/modules/authoring/skill-plan";
 import { practicalQuota } from "@/modules/authoring/generation/quota";
-import { parseModelRequirement, type ParsedRequirement } from "@/modules/authoring/requirement-parser";
+import { findPlanOccupation, parseModelRequirement, type ParsedRequirement } from "@/modules/authoring/requirement-parser";
 
 export const dynamic = "force-dynamic";
 
@@ -101,7 +101,7 @@ export async function POST(request: Request) {
   try {
     const occupations = await listActiveOccupations();
     const ai = await parseRequirement(parsed.data.requirement, occupations.map((occupation) => occupation.name));
-    const occupation = findOccupation(occupations, ai.occupationName);
+    const occupation = findPlanOccupation(occupations, ai.occupationName);
     const levelCode = ai.levelCode;
     const systemRule = getQuotaRule(levelCode);
 
@@ -109,6 +109,14 @@ export async function POST(request: Request) {
       return NextResponse.json({
         data: createBlockedPlan(parsed.data.requirement, ai, systemRule, "未能从当前项目的职业范围中匹配解析结果；请先建立对应职业和细目表后再执行。")
       });
+    }
+
+    if (!["level_5", "level_4", "level_3"].includes(levelCode)) {
+      return NextResponse.json({ data: createBlockedPlan(parsed.data.requirement, ai, systemRule,
+        "二级、一级需按试卷结构规划，不能执行固定考评点配额命题。") });
+    }
+    if (ai.assessmentMode === "theory" && ai.temporaryMinimums.practical > 0) {
+      throw new Error("理论知识不能配置实操题，请调整命题需求后重新生成计划。");
     }
 
     if (ai.assessmentMode !== "theory") {
@@ -273,11 +281,6 @@ temporaryMinimums 表示用户明确指定的“每个考评点”题量；未�
     ? payload?.content?.map((block) => block.text ?? "").join("\n") ?? ""
     : payload?.choices?.[0]?.message?.content ?? "";
   return { ...parseModelRequirement(content), source: "AI 智能规划" };
-}
-
-function findOccupation<T extends { name: string }>(occupations: T[], occupationName: string) {
-  return occupations.find((occupation) => occupation.name === occupationName)
-    ?? occupations.find((occupation) => occupationName.includes(occupation.name) || occupation.name.includes(occupationName));
 }
 
 function getQuotaRule(levelCode: LevelCode): Quota {

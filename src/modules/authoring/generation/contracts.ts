@@ -29,7 +29,7 @@ export type Snapshot = {
   points: QuotaPoint[]; qualityRequirements: string[]; qualityStandard: string;
   skillQualityStandard?: string;
   sourceVersionIds: string[];
-  nodes: Array<{ id: string; code: string; name: string; chapterIds: string[]; skillContext?: unknown }>;
+  nodes: Array<{ id: string; code: string; name: string; chapterIds: string[]; skillContext?: unknown; theoryContext?: unknown }>;
   skillStructure?: unknown;
   model: { provider: string; baseUrl: string; model: string };
 };

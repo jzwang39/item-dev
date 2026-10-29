@@ -15,6 +15,15 @@ const aiResultSchema = z.object({
 
 export type ParsedRequirement = z.infer<typeof aiResultSchema>;
 
+export function findPlanOccupation<T extends { name: string }>(occupations: T[], name: string): T | undefined {
+  const exact = occupations.filter((occupation) => occupation.name === name);
+  if (exact.length === 1) return exact[0];
+  const matches = exact.length ? exact : occupations.filter((occupation) =>
+    name.includes(occupation.name) || occupation.name.includes(name));
+  if (matches.length > 1) throw new Error("命题职业匹配到多个职业，请使用完整职业名称重新生成计划。");
+  return matches[0];
+}
+
 const record = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown> : null;

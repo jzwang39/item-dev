@@ -11,6 +11,7 @@ import { buildBatches, GENERATION_CONCURRENCY, MAX_ATTEMPTS, parseQuestions, que
 import { loadSkillPlanBasis } from "../skill-plan";
 import { skillQuestionPrompt } from "./skill-prompt";
 import { qualityStandardConfigs, qualityStandardContent } from "../quality-standard";
+import { assertFrozenPlanBasis, theoryPointContext } from "./plan-basis";
 
 function json<T>(value: T | string): T {
   return typeof value === "string" ? JSON.parse(value) as T : value;
@@ -28,6 +29,8 @@ export async function startGeneration(planId: string, actorId: string, retryFail
     );
     const plan = plans[0];
     if (!plan || plan.status !== "confirmed") throw new Error("计划不存在或未确认。");
+    const scope = json<Scope>(plan.scope_json);
+    await assertFrozenPlanBasis(db, plan.project_id, scope);
     const [existing] = await db.execute<(RowDataPacket & { id: string })[]>("SELECT id FROM authoring_generation_jobs WHERE plan_id=?", [planId]);
     if (existing[0]) {
       if (retryFailed) {
@@ -42,7 +45,6 @@ export async function startGeneration(planId: string, actorId: string, retryFail
       "SELECT COUNT(*) AS count FROM question_versions WHERE JSON_UNQUOTE(JSON_EXTRACT(source_snapshot_json,'$.planId'))=?", [planId],
     );
     if (Number(legacy[0].count)) throw new Error("该历史计划已有试题成果，请查看成果；新需求请创建新计划。");
-    const scope = json<Scope>(plan.scope_json);
     await assertOutlineConfirmed(db, scope.blueprintVersions.outline.id);
     const quota = json<{ points: QuotaPoint[]; qualityRequirements: string[] }>(plan.quota_json);
     const skillBasis = scope.assessmentMode === "操作技能" ? await loadSkillPlanBasis(db, scope.occupationId, scope.levelCode, scope.blueprintVersions) : null;
@@ -66,7 +68,7 @@ export async function startGeneration(planId: string, actorId: string, retryFail
       points: quota.points.map((point) => ({ ...point, total: quotaTotal(point) })),
       skillStructure: skillBasis?.structure,
       qualityRequirements: quota.qualityRequirements ?? [],
-      qualityStandard: qualityStandardContent(savedSettings.get(qualityStandardConfigs.theory.settingKey), ""),
+      qualityStandard: qualityStandardContent(savedSettings.get(qualityStandardConfigs.theory.settingKey), qualityStandardConfigs.theory.defaultContent),
       skillQualityStandard: scope.assessmentMode === "操作技能"
         ? qualityStandardContent(savedSettings.get(qualityStandardConfigs.skill.settingKey), qualityStandardConfigs.skill.defaultContent)
         : undefined,
@@ -75,7 +77,8 @@ export async function startGeneration(planId: string, actorId: string, retryFail
         const node = byCode.get(point.code)!;
         return { id: node.id, code: node.node_code, name: node.name, chapterIds: node.source_ref_json ? json<{ chapterIds?: string[] }>(node.source_ref_json).chapterIds ?? [] : [],
           skillContext: skillBasis ? { point: node.requirement_json ? json(node.requirement_json) : null,
-            source: node.source_ref_json ? json(node.source_ref_json) : null } : undefined };
+            source: node.source_ref_json ? json(node.source_ref_json) : null } : undefined,
+          theoryContext: skillBasis ? undefined : theoryPointContext(node.requirement_json, node.source_ref_json) };
       }),
       model: { provider: connection.provider, baseUrl: connection.baseUrl, model: connection.model },
     };
@@ -299,7 +302,9 @@ async function requestQuestions(unit: Unit) {
     })), node.name);
     excerpts = selectBatchExcerpts(pool, previous.length, Math.max(1, previous.length + missing.length), unit.attempts);
   }
-  let instruction = `你是职业技能理论知识试题编制助手。严格依据冻结考评点和提供的教材编制中文试题草稿，覆盖指定题型和数量。题目不得重复已生成题干，不得仅改写同一题。答案、解析必须明确且符合知识依据。只返回JSON：
+  let instruction = `你是职业技能理论知识试题编制助手。严格依据冻结考评点、关联标准依据及提供的教材片段编制中文试题草稿，覆盖指定题型和数量。
+有教材时只能使用关联教材片段和标准依据；没有教材时以关联标准条目为考核范围，结合适用职业等级的通用专业知识出题。不得编造法律条款、数值标准或机构制度，资料不足不得凑题。遵守输入中的试题质量标准，但不得改变指定题型或数量、越出正式标准范围。
+题目不得重复已生成题干，不得仅改写同一题。答案、解析必须明确且符合知识依据。只返回JSON：
 {"questions":[{"assessmentPointCode":"指定考评点代码","questionType":"single","stem":"真实中文题干","options":[{"key":"A","content":"真实选项"}],"answers":["A"],"analysis":"答案依据解析"}]}。
 严格按照“本次题型配额”分别生成各题型的缺额。mixed仅表示同一请求包含多题型，绝不能作为任何题目的questionType。
 每条questionType只能是single（单选）、multiple（多选）或judgement（判断），禁止中文题型值。
@@ -310,6 +315,7 @@ async function requestQuestions(unit: Unit) {
     考评点: { code: node.code, name: node.name }, 指定题型: unit.question_type, 本次必须生成数: missing.length,
     本次题型配额: quotas,
     质量要求: snapshot.qualityRequirements, 试题质量标准: snapshot.qualityStandard,
+    冻结考评点与标准依据: node.theoryContext,
     教材片段: excerpts, 排除题干: previous.map((item) => item.stem), 补齐次数: unit.attempts,
   });
   if (snapshot.scope.assessmentMode === "操作技能") {

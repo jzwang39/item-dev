@@ -8,6 +8,7 @@ import { quotaPointSchema, quotaTotal, validateQuota } from "@/modules/authoring
 import { loadSkillPlanBasis } from "@/modules/authoring/skill-plan";
 import { isLegalPoint } from "@/modules/authoring/legal-topics";
 import { getActiveProjectIdForUpdate } from "@/modules/authoring/occupations/service";
+import { assertPlanVersions, readCurrentTheoryVersion } from "@/modules/blueprints/current-theory-version";
 import { createUlid } from "@/shared/database/ulid";
 import { withTransaction } from "@/shared/database/mysql";
 
@@ -59,21 +60,18 @@ export async function POST(request: Request) {
         [projectId, data.occupation]
       );
       if (!occupations[0]) throw new Error("计划中的职业不存在或已归档，请重新生成计划。");
-      const [blueprints] = await connection.execute<(RowDataPacket & { blueprint_kind: string; current_version_id: string | null })[]>(
-        `SELECT blueprint_kind, current_version_id
-           FROM blueprints
-          WHERE project_id = ? AND occupation_id = ? AND assessment_mode = ?
-            AND (blueprint_kind = ? AND level_code = ? OR blueprint_kind = 'theory_weight') FOR UPDATE`,
-        [projectId, occupations[0].id, data.assessmentMode === "操作技能" ? "skill" : "theory",
-          data.assessmentMode === "操作技能" ? "skill_outline" : "theory_outline", data.levelCode]
-      );
-      const outlineVersionId = blueprints.find((item) => item.blueprint_kind.endsWith("_outline"))?.current_version_id;
-      const weightVersionId = blueprints.find((item) => item.blueprint_kind === "theory_weight")?.current_version_id;
-      if (outlineVersionId !== data.blueprintVersions.outline.id || weightVersionId !== data.blueprintVersions.weights.id) {
-        throw new Error("权重表或细目表已更新，请重新生成命题计划后确认。");
-      }
       const skillBasis = data.assessmentMode === "操作技能"
         ? await loadSkillPlanBasis(connection, occupations[0].id, data.levelCode) : null;
+      const selection = { projectId, occupationId: occupations[0].id };
+      const current = skillBasis?.versions ?? {
+        outline: await readCurrentTheoryVersion(connection, {
+          ...selection, kind: "theory_outline", levelCode: data.levelCode,
+        }),
+        weights: await readCurrentTheoryVersion(connection, { ...selection, kind: "theory_weight" }),
+      };
+      assertPlanVersions(current, data.blueprintVersions);
+      const outlineVersionId = current.outline!.id;
+      const weightVersionId = current.weights!.id;
       if (skillBasis && skillBasis.versions.structure.id !== data.blueprintVersions.structure?.id) {
         throw new Error("操作技能内容结构表已更新，请重新生成计划。");
       }
@@ -96,7 +94,10 @@ export async function POST(request: Request) {
         occupation: occupations[0].name,
         levelCode: data.levelCode,
         assessmentMode: data.assessmentMode,
-        blueprintVersions: data.blueprintVersions
+        blueprintVersions: skillBasis?.versions ?? {
+          outline: { id: outlineVersionId, versionNo: Number("version_no" in current.outline! ? current.outline.version_no : current.outline!.versionNo) },
+          weights: { id: weightVersionId, versionNo: Number("version_no" in current.weights! ? current.weights.version_no : current.weights!.versionNo) },
+        },
       };
       const quota = {
         minimumTotal: points.reduce((sum, point) => sum + point.total, 0),
