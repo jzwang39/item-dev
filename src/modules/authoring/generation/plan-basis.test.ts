@@ -53,3 +53,36 @@ test("职业精确匹配优先，模糊匹配必须唯一，不按列表顺序�
   assert.throws(() => findPlanOccupation(occupations, "工"), /多个职业/);
   assert.equal(findPlanOccupation(occupations, "劝募员"), undefined);
 });
+
+test("截图明确的劝募员名称优先于模型误返回的宽泛职业或其他职业", () => {
+  const occupations = [{ name: "车工" }, { name: "汽车维修工" }, { name: "劝募员" }];
+  const requirement = "请为劝募员五级/初级工生成理论知识试题，每个考评点至少4道单选题、2道判断题。";
+  for (const aiName of ["工", "员", "车工", "劝募", " 劝募员 "]) {
+    assert.equal(findPlanOccupation(occupations, aiName, requirement), occupations[2]);
+  }
+});
+
+test("长职业名称内嵌短名称不误报多个，单独提及两者仍拦截", () => {
+  const occupations = [{ name: "电工" }, { name: "建筑电工" }];
+  assert.equal(findPlanOccupation(occupations, "电工", "为建筑电工生成试题"), occupations[1]);
+  assert.throws(() => findPlanOccupation(occupations, "建筑电工", "为建筑电工和电工分别生成试题"), /多个职业/);
+});
+
+test("同名不同代码必须显式区分，不按顺序选择，并提示候选代码", () => {
+  const occupations = [{ name: "劝募员", code: "4-13" }, { name: "劝募员", code: "LOCAL" }];
+  assert.throws(() => findPlanOccupation(occupations, "劝募员", "为劝募员生成试题"), /同名职业记录.*4-13.*LOCAL/);
+  assert.equal(findPlanOccupation(occupations, "劝募员", "为劝募员生成试题，职业代码：4-13"), occupations[0]);
+  assert.equal(findPlanOccupation(occupations, "劝募员", "职业代码: LOCAL，生成试题"), occupations[1]);
+  assert.throws(() => findPlanOccupation(occupations, "劝募员", "职业代码: MISSING，生成试题"), /不存在或已停用/);
+});
+
+test("职业名称与代码冲突时不允许以代码覆盖明确需求", () => {
+  const occupations = [{ name: "劝募员", code: "LEGAL" }, { name: "车工", code: "TURNER" }];
+  assert.throws(() => findPlanOccupation(occupations, "车工", "为劝募员命题，职业代码:TURNER"), /不一致/);
+});
+
+test("重复提及同一职业不视为多个职业，空模型名称不匹配全部职业", () => {
+  const occupations = [{ name: "劝募员" }, { name: "车工" }];
+  assert.equal(findPlanOccupation(occupations, "员", "劝募员理论命题，按劝募员标准生成"), occupations[0]);
+  assert.equal(findPlanOccupation(occupations, "  "), undefined);
+});

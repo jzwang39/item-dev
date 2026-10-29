@@ -4646,6 +4646,7 @@ const promptTemplates: PromptTemplate[] = [
 
 type GeneratedPlan = {
   requirement: string;
+  occupationId?: string;
   occupation: string;
   levelCode: string;
   levelLabel: string;
@@ -5112,6 +5113,7 @@ function AuthoringTaskPanel() {
           body: JSON.stringify({
             requirement: plan.requirement,
             occupation: plan.occupation,
+            occupationId: plan.occupationId,
             levelCode: plan.levelCode,
             assessmentMode: plan.assessmentMode,
             minimumTotal: plan.minimumTotal,

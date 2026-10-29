@@ -101,7 +101,7 @@ export async function POST(request: Request) {
   try {
     const occupations = await listActiveOccupations();
     const ai = await parseRequirement(parsed.data.requirement, occupations.map((occupation) => occupation.name));
-    const occupation = findPlanOccupation(occupations, ai.occupationName);
+    const occupation = findPlanOccupation(occupations, ai.occupationName, parsed.data.requirement);
     const levelCode = ai.levelCode;
     const systemRule = getQuotaRule(levelCode);
 
@@ -132,7 +132,7 @@ export async function POST(request: Request) {
         }));
         if (!points.length) throw new Error("当前范围仅有法律法规考评点，请使用法律法规智能体命题。");
         return NextResponse.json({ data: {
-          requirement: parsed.data.requirement, occupation: occupation.name, levelCode, levelLabel: levelLabels[levelCode],
+          requirement: parsed.data.requirement, occupationId: occupation.id, occupation: occupation.name, levelCode, levelLabel: levelLabels[levelCode],
           assessmentMode: "操作技能", source: ai.source, status: "ready",
           message: "已关联操作技能内容结构表、已确认细目表和技能权重；确认后冻结来源，生成实操任务、参考步骤与评分标准草稿。",
           blueprintVersions: basis.versions,
@@ -197,6 +197,7 @@ export async function POST(request: Request) {
     return NextResponse.json({
       data: {
         requirement: parsed.data.requirement,
+        occupationId: occupation.id,
         occupation: occupation.name,
         levelCode,
         levelLabel: levelLabels[levelCode],

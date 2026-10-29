@@ -15,13 +15,53 @@ const aiResultSchema = z.object({
 
 export type ParsedRequirement = z.infer<typeof aiResultSchema>;
 
-export function findPlanOccupation<T extends { name: string }>(occupations: T[], name: string): T | undefined {
-  const exact = occupations.filter((occupation) => occupation.name === name);
-  if (exact.length === 1) return exact[0];
-  const matches = exact.length ? exact : occupations.filter((occupation) =>
-    name.includes(occupation.name) || occupation.name.includes(name));
-  if (matches.length > 1) throw new Error("命题职业匹配到多个职业，请使用完整职业名称重新生成计划。");
-  return matches[0];
+export function findPlanOccupation<T extends { name: string; code?: string }>(
+  occupations: T[], name: string, requirement?: string,
+): T | undefined {
+  const normalize = (text: string) => text.normalize("NFKC").trim().replace(/\s+/g, " ");
+  const unique = (matches: T[]) => {
+    if (matches.length > 1) {
+      const candidates = matches.map((item) => `${item.name}${item.code ? `（${item.code}）` : ""}`).join("、");
+      const sameName = new Set(matches.map((item) => normalize(item.name))).size === 1;
+      throw new Error(sameName
+        ? `存在同名职业记录：${candidates}。请在需求中注明职业代码，或核对职业维护中的重复记录。`
+        : `命题职业匹配到多个职业：${candidates}。请明确一个完整职业名称后重新生成计划。`);
+    }
+    return matches[0];
+  };
+  if (requirement) {
+    const text = normalize(requirement);
+    const code = text.match(/职业代码\s*[:：]?\s*([A-Za-z0-9][A-Za-z0-9._-]*)/)?.[1];
+    const mentions = occupations.flatMap((occupation) => {
+      const label = normalize(occupation.name);
+      if (!label) return [];
+      const spans = [];
+      for (let start = text.indexOf(label); start >= 0; start = text.indexOf(label, start + label.length)) {
+        spans.push({ occupation, start, end: start + label.length });
+      }
+      return spans;
+    });
+    // A short name inside a longer occupation name is not a second requested occupation.
+    const explicit = mentions.filter((span) => !mentions.some((other) =>
+      other.start <= span.start && other.end >= span.end && other.end - other.start > span.end - span.start));
+    if (code) {
+      const selected = unique(occupations.filter((item) => item.code === code));
+      if (!selected) throw new Error(`职业代码“${code}”不存在或已停用，请核对职业维护。`);
+      if (explicit.some((span) => normalize(span.occupation.name) !== normalize(selected.name))) {
+        throw new Error("需求中的职业名称与职业代码不一致或涉及多个职业，请核对后重新生成计划。");
+      }
+      return selected;
+    }
+    if (explicit.length) return unique([...new Set(explicit.map((span) => span.occupation))]);
+  }
+  const label = normalize(name);
+  if (!label) return undefined;
+  const exact = occupations.filter((occupation) => normalize(occupation.name) === label);
+  if (exact.length) return unique(exact);
+  return unique(occupations.filter((occupation) => {
+    const stored = normalize(occupation.name);
+    return stored && (label.includes(stored) || stored.includes(label));
+  }));
 }
 
 const record = (value: unknown): Record<string, unknown> | null =>

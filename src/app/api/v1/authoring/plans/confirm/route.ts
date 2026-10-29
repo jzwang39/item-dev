@@ -15,6 +15,7 @@ import { withTransaction } from "@/shared/database/mysql";
 const schema = z.object({
   requirement: z.string().trim().min(1).max(12000),
   occupation: z.string().trim().min(1),
+  occupationId: z.string().length(26).optional(),
   levelCode: z.enum(["level_5", "level_4", "level_3", "level_2", "level_1"]),
   assessmentMode: z.enum(["理论知识", "操作技能"]),
   minimumTotal: z.number().int().nonnegative(),
@@ -56,10 +57,12 @@ export async function POST(request: Request) {
       const projectId = await getActiveProjectIdForUpdate(connection);
       if (!projectId) throw new Error("当前没有启用的业务项目，无法启动命题任务。");
       const [occupations] = await connection.execute<(RowDataPacket & { id: string; name: string })[]>(
-        "SELECT id, name FROM project_occupations WHERE project_id = ? AND name = ? AND status = 'active' LIMIT 1 FOR UPDATE",
-        [projectId, data.occupation]
+        `SELECT id, name FROM project_occupations WHERE project_id = ? AND name = ? AND status = 'active'
+         ${data.occupationId ? "AND id = ?" : ""} FOR UPDATE`,
+        [projectId, data.occupation, ...(data.occupationId ? [data.occupationId] : [])],
       );
       if (!occupations[0]) throw new Error("计划中的职业不存在或已归档，请重新生成计划。");
+      if (occupations.length !== 1) throw new Error("旧计划未关联唯一职业ID，且存在同名职业，请重新生成命题计划。");
       const skillBasis = data.assessmentMode === "操作技能"
         ? await loadSkillPlanBasis(connection, occupations[0].id, data.levelCode) : null;
       const selection = { projectId, occupationId: occupations[0].id };
