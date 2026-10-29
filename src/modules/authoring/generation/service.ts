@@ -38,8 +38,9 @@ export async function startGeneration(planId: string, actorId: string, retryFail
     if (!plan || plan.status !== "confirmed") throw new Error("计划不存在或未确认。");
     const scope = json<Scope>(plan.scope_json);
     await assertFrozenPlanBasis(db, plan.project_id, scope);
-    const [existing] = await db.execute<(RowDataPacket & { id: string })[]>("SELECT id FROM authoring_generation_jobs WHERE plan_id=?", [planId]);
+    const [existing] = await db.execute<(RowDataPacket & { id: string; status: string })[]>("SELECT id,status FROM authoring_generation_jobs WHERE plan_id=?", [planId]);
     if (existing[0]) {
+      if (["stopped", "cancelled"].includes(existing[0].status)) throw new Error("任务已结束，不能恢复生成或重试；如需补题请新建计划。");
       if (retryFailed) {
         const [active] = await db.execute<RowDataPacket[]>(
           "SELECT id FROM authoring_generation_units WHERE job_id=? AND status IN ('queued','running') LIMIT 1", [existing[0].id],
@@ -129,8 +130,8 @@ export async function startGeneration(planId: string, actorId: string, retryFail
 }
 
 export async function getGenerationState(planId: string) {
-  const jobs = await query<(RowDataPacket & { id: string; status: string; target_count: number; termination_summary_json: unknown })[]>(
-    "SELECT id,status,target_count,termination_summary_json FROM authoring_generation_jobs WHERE plan_id=?", [planId],
+  const jobs = await query<(RowDataPacket & { id: string; status: string; target_count: number; termination_summary_json: unknown; stop_summary_json: unknown })[]>(
+    "SELECT id,status,target_count,termination_summary_json,stop_summary_json FROM authoring_generation_jobs WHERE plan_id=?", [planId],
   );
   if (!jobs[0]) return { job: null };
   const job = jobs[0];
@@ -146,29 +147,30 @@ export async function getGenerationState(planId: string) {
   const failed = await query<(RowDataPacket & { id: string; point_code: string; question_type: string; error_message: string; remaining: number; attempts: number; retry_state_json: unknown })[]>(
     `SELECT u.id,u.point_code,u.question_type,u.error_message,u.attempts,u.retry_state_json,COUNT(*) AS remaining
        FROM authoring_generation_units u JOIN authoring_generation_slots s ON s.unit_id=u.id
-      WHERE u.job_id=? AND u.status='failed' AND s.question_id IS NULL GROUP BY u.id`, [job.id],
+      WHERE u.job_id=? AND u.status IN ('failed','stopped') AND s.question_id IS NULL GROUP BY u.id`, [job.id],
   );
   const generated = batches.reduce((sum, batch) => sum + Number(batch.generated_count), 0);
   const pending = batches.reduce((sum, batch) => sum + Number(batch.pending), 0);
-  const status = job.status === "cancelled" ? "cancelled" : generated === Number(job.target_count) ? "succeeded" : pending ? job.status === "queued" ? "queued" : "running" : "partial";
+  const status = ["cancelled", "stopped"].includes(job.status) ? job.status : generated === Number(job.target_count) ? "succeeded" : pending ? job.status === "queued" ? "queued" : "running" : "partial";
   return {
     job: {
       id: job.id, status, target: Number(job.target_count), generated,
       retryLimits: { totalAttempts: MAX_TOTAL_ATTEMPTS, targetedAttempts: MAX_TARGETED_ATTEMPTS, consecutiveZeroOutputs: 2 },
       activity: await readGenerationActivity(job.id),
       terminationSummary: job.termination_summary_json ? json(job.termination_summary_json) : null,
+      stopSummary: job.stop_summary_json ? json(job.stop_summary_json) : null,
       totalBatches: batches.length,
       completedBatches: batches.filter((batch) => Number(batch.generated_count) === Number(batch.target)).length,
       currentBatch: batches.find((batch) => Number(batch.running))?.ordinal ?? batches.find((batch) => Number(batch.pending))?.ordinal ?? null,
       failedUnits: failed.map((unit) => {
         const state = retryState(unit.retry_state_json);
         return { id: unit.id, code: unit.point_code, type: unit.question_type, remaining: Number(unit.remaining),
-          error: unit.error_message, attempts: Number(unit.attempts), failures: state.failures,
-          stopReason: state.stopReason, retryable: !retryBlocked(state, Number(unit.attempts), true) };
+          error: unit.error_message ?? (status === "stopped" ? "任务已停止，此缺额不再处理。" : "请求失败。"), attempts: Number(unit.attempts), failures: state.failures,
+          stopReason: status === "stopped" ? "已停止，不再处理此缺额。" : state.stopReason, retryable: status !== "stopped" && !retryBlocked(state, Number(unit.attempts), true) };
       }),
       batches: batches.map((batch) => ({
         ordinal: batch.ordinal, target: Number(batch.target), generated: Number(batch.generated_count),
-        status: Number(batch.generated_count) === Number(batch.target) ? "succeeded" : Number(batch.pending) ? "running" : "partial",
+        status: Number(batch.generated_count) === Number(batch.target) ? "succeeded" : status === "stopped" ? "stopped" : Number(batch.pending) ? "running" : "partial",
       })),
     },
   };
@@ -248,7 +250,7 @@ async function refreshJob(db: PoolConnection, jobId: string) {
   const [counts] = await db.execute<(RowDataPacket & { pending: number; failed: number })[]>(
     "SELECT SUM(status IN ('queued','running')) AS pending,SUM(status='failed') AS failed FROM authoring_generation_units WHERE job_id=?", [jobId],
   );
-  await db.execute("UPDATE authoring_generation_jobs SET status=? WHERE id=? AND status<>'cancelled'",
+  await db.execute("UPDATE authoring_generation_jobs SET status=? WHERE id=? AND status NOT IN ('cancelled','stopped')",
     [Number(counts[0].pending) ? "running" : Number(counts[0].failed) ? "partial" : "succeeded", jobId]);
 }
 
@@ -261,7 +263,7 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
     // these short transactions so both model requests still run in parallel.
     await db.execute("SELECT id FROM authoring_generation_capacity WHERE id=1 FOR UPDATE");
     const [jobs] = await db.execute<(RowDataPacket & { status: string })[]>("SELECT status FROM authoring_generation_jobs WHERE id=? FOR UPDATE", [unit.job_id]);
-    if (!jobs[0] || jobs[0].status === "cancelled") return;
+    if (!jobs[0] || ["cancelled", "stopped"].includes(jobs[0].status)) return;
     const [leases] = await db.execute<(RowDataPacket & { lease_token: string; status: string })[]>(
       "SELECT lease_token,status FROM authoring_generation_units WHERE id=? FOR UPDATE", [unit.id],
     );

@@ -5,6 +5,7 @@ import type { RowDataPacket } from "mysql2/promise";
 import { getVerifiedSession } from "@/auth";
 import { createUlid } from "@/shared/database/ulid";
 import { withTransaction } from "@/shared/database/mysql";
+import { assertGenerationHandoffReady } from "@/modules/authoring/generation/stop";
 
 const schema = z.object({
   manualChecks: z
@@ -54,19 +55,7 @@ export async function POST(
         [params.planId],
       );
       if (!plans[0]) throw new Error("待交接的命题计划不存在或未确认。");
-      const [jobs] = await connection.execute<(RowDataPacket & { id: string; target_count: number })[]>(
-        "SELECT id,target_count FROM authoring_generation_jobs WHERE plan_id=? FOR UPDATE", [params.planId],
-      );
-      if (jobs[0]) {
-        const [counts] = await connection.execute<(RowDataPacket & { generated_count: number; pending: number })[]>(
-          `SELECT COUNT(*) AS generated_count,
-             (SELECT COUNT(*) FROM authoring_generation_units WHERE job_id=? AND status<>'succeeded') AS pending
-           FROM authoring_generation_slots WHERE job_id=? AND question_id IS NOT NULL`, [jobs[0].id, jobs[0].id],
-        );
-        if (Number(counts[0].generated_count) !== Number(jobs[0].target_count) || Number(counts[0].pending)) {
-          throw new Error("命题计划尚未全部生成完成，请补齐失败部分后再交接专家审定。");
-        }
-      }
+      await assertGenerationHandoffReady(connection, params.planId);
       const approvedQuestionIds = parsed.data.manualChecks
         .filter((item) => item.status === "人工通过")
         .map((item) => item.questionId);
@@ -78,20 +67,24 @@ export async function POST(
           id: string;
           current_version_id: string | null;
           current_status: string;
+          assessment_mode: string;
         })[]
       >(
-        `SELECT q.id, q.current_version_id, q.current_status
+        `SELECT q.id, q.current_version_id, q.current_status, q.assessment_mode
            FROM questions q
            INNER JOIN question_versions qv ON qv.id = q.current_version_id
           WHERE q.project_id = ? AND q.id IN (${placeholders})
-            AND qv.source_snapshot_json LIKE ? FOR UPDATE`,
-        [plans[0].project_id, ...approvedQuestionIds, `%${params.planId}%`],
+            AND JSON_UNQUOTE(JSON_EXTRACT(qv.source_snapshot_json,'$.planId')) = ? FOR UPDATE`,
+        [plans[0].project_id, ...approvedQuestionIds, params.planId],
       );
       if (questions.length !== approvedQuestionIds.length)
         throw new Error("人工核查的试题不属于当前命题计划或已被更新。");
       for (const question of questions) {
-        if (!question.current_version_id || question.current_status !== "draft")
+        if (!question.current_version_id || !(question.current_status === "draft" || question.current_status === "pending_review" && question.assessment_mode === "skill"))
           throw new Error("仅可交接当前计划下处于草稿状态的试题。");
+        // Skill generation already stores pending_review drafts. Their manual
+        // handoff is audited without manufacturing a second status transition.
+        if (question.current_status === "pending_review") continue;
         await connection.execute(
           "UPDATE questions SET current_status = 'pending_review', row_version = row_version + 1 WHERE id = ?",
           [question.id],

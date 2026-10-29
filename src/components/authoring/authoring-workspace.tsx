@@ -4701,13 +4701,14 @@ type HistoryPlan = {
   created_at: string;
   updated_at: string;
   question_count: number;
-  generation_status?: "queued" | "running" | "partial" | "succeeded" | "cancelled" | null;
+  generation_status?: "queued" | "running" | "partial" | "succeeded" | "cancelled" | "stopped" | null;
 };
 
 type QuestionGenerationJob = {
   id: string;
-  status: "queued" | "running" | "partial" | "succeeded" | "cancelled";
+  status: "queued" | "running" | "partial" | "succeeded" | "cancelled" | "stopped";
   terminationSummary?: { deletedQuestions: number; preservedQuestions: number } | null;
+  stopSummary?: { target: number; preservedQuestions: number; missingQuestions: number; stoppedAt: string } | null;
   target: number;
   generated: number;
   totalBatches: number;
@@ -4788,6 +4789,7 @@ function AuthoringTaskPanel() {
   const [generationJob, setGenerationJob] = useState<QuestionGenerationJob | null>(null);
   const [progressError, setProgressError] = useState("");
   const [terminatingPlanId, setTerminatingPlanId] = useState<string | null>(null);
+  const [stoppingPlanId, setStoppingPlanId] = useState<string | null>(null);
   const [sessionExpired, setSessionExpired] = useState(false);
   const manualCheckById = useRef(new Map<string, string>());
   const terminatedPlans = useRef(new Set<string>());
@@ -4803,6 +4805,7 @@ function AuthoringTaskPanel() {
   const [isSavingQualityStandard, setIsSavingQualityStandard] = useState(false);
   const getHistoryStage = (plan: HistoryPlan) => {
     if (plan.generation_status === "cancelled" || plan.status === "cancelled") return "已终止";
+    if (plan.generation_status === "stopped") return "已停止，保留成果";
     if (plan.generation_status === "queued" || plan.generation_status === "running") return "生成中";
     if (plan.generation_status === "partial") return "部分失败";
     if (plan.generation_status === "succeeded") return "已完成";
@@ -4968,7 +4971,7 @@ function AuthoringTaskPanel() {
           return;
         }
         if (!response.ok || !payload.data) throw new Error(payload.error?.message ?? "生成进度读取失败。");
-        if (terminatedPlans.current.has(confirmedPlanId)) return;
+        if (terminatedPlans.current.has(confirmedPlanId) && !["cancelled", "stopped"].includes(payload.data.job?.status ?? "")) return;
         setSessionExpired(false);
         const data = payload.data;
         setProgressError("");
@@ -4990,8 +4993,38 @@ function AuthoringTaskPanel() {
     void poll();
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [confirmedPlanId, generationJob?.status]);
+  const stopKeepTask = async (planId: string) => {
+    if (stoppingPlanId || terminatingPlanId || !window.confirm("确认停止生成并保留成果？\n将停止排队和在途请求，失败请求不再处理，保留全部已保存试题和缺口记录。\n本任务无法恢复生成或重试；保留试题可继续人工核查和专家审定。")) return;
+    setStoppingPlanId(planId);
+    setExecutionError("");
+    setProgressError("");
+    try {
+      const response = await fetch(`/api/v1/authoring/plans/${planId}/generate`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "stop_keep" }),
+      });
+      const payload = await response.json() as {
+        data?: { job: QuestionGenerationJob; summary: NonNullable<QuestionGenerationJob["stopSummary"]> };
+        error?: { message?: string };
+      };
+      if (!response.ok || !payload.data) throw new Error(payload.error?.message ?? "停止生成失败。");
+      terminatedPlans.current.add(planId);
+      if (confirmedPlanId === planId) {
+        setGenerationJob(payload.data.job);
+        const results = await fetch(`/api/v1/authoring/plans/${planId}`, { cache: "no-store" });
+        if (!results.ok) throw new Error("任务已停止，但成果读取失败，请刷新页面查看。");
+        const data = await results.json() as { data?: { questions: GeneratedQuestion[] } };
+        const questions = data.data?.questions ?? [];
+        setExecutionQuestions(questions);
+        setManualChecks(questions.map((question) => manualCheckById.current.get(question.id) ?? "待人工核查"));
+      }
+      setNotice(`已停止生成：计划${payload.data.summary.target}道，保留${payload.data.summary.preservedQuestions}道，未生成${payload.data.summary.missingQuestions}道。保留试题可继续核查和审定。`);
+      await loadTaskHistory();
+    } catch (error) {
+      setExecutionError(error instanceof Error ? error.message : "停止生成失败。");
+    } finally { setStoppingPlanId(null); }
+  };
   const terminateTask = async (planId: string) => {
-    if (terminatingPlanId || !window.confirm("确认终止命题任务？\n将停止后续生成，清理本任务未审定的原始草稿及批次数据，无法恢复或重试。\n已审核、修订、确认、入库或用于试卷的试题保留，终止操作会留痕。")) return;
+    if (terminatingPlanId || stoppingPlanId || !window.confirm("确认终止命题任务？\n将停止后续生成，清理本任务未审定的原始草稿及批次数据，无法恢复或重试。\n已审核、修订、确认、入库或用于试卷的试题保留，终止操作会留痕。")) return;
     setTerminatingPlanId(planId);
     setExecutionError("");
     try {
@@ -5248,7 +5281,7 @@ function AuthoringTaskPanel() {
         }))
         .filter(
           ({ question }) =>
-            question?.id && (!question.status || question.status === "draft"),
+            question?.id && (!question.status || question.status === "draft" || question.status === "pending_review" && question.questionType === "实操题"),
         )
         .map(({ question, status }) => ({ questionId: question.id, status }));
       if (!manualCheckPayload.some((item) => item.status === "人工通过")) {
@@ -5783,14 +5816,14 @@ function AuthoringTaskPanel() {
               </p>
             </div>
             <span className="rounded-xl bg-[#fff4df] px-4 py-2 text-sm text-[#a96f13]">
-              {generationJob?.status === "cancelled" ? "已终止" : generationActive ? "后台生成中" : generationJob?.status === "partial" ? "尚未完成" : "待人工核查"}
+              {generationJob?.status === "stopped" ? "已停止，保留成果" : generationJob?.status === "cancelled" ? "已终止" : generationActive ? "后台生成中" : generationJob?.status === "partial" ? "尚未完成" : "待人工核查"}
             </span>
           </div>
           {generationJob ? (
             <div className="mt-6 rounded-xl border border-[#d6e3ff] bg-[#f5f8ff] p-5">
               <div className="flex flex-wrap justify-between gap-3 text-[#385578]">
                 <span>
-                  {generationJob.status === "cancelled" ? "任务已终止，不再生成试题" : generationJob.status === "succeeded" ? "全部试题已生成" : generationJob.status === "partial" ? "部分请求失败，已保留成功草稿"
+                  {generationJob.status === "stopped" ? "生成已停止，保留试题可继续人工核查和专家审定" : generationJob.status === "cancelled" ? "任务已终止，不再生成试题" : generationJob.status === "succeeded" ? "全部试题已生成" : generationJob.status === "partial" ? "部分请求失败，已保留成功草稿"
                     : generationJob.activity ? {
                       running: "正在执行请求（准备资料、调用模型或保存试题）",
                       queued: "等待后台领取（全局最多2路请求，较早任务优先）",
@@ -5811,16 +5844,25 @@ function AuthoringTaskPanel() {
               </div>
               <p className="mb-0 mt-3 text-sm text-[#6980a4]">
                 {generationJob.currentBatch ? `当前第 ${generationJob.currentBatch} / ${generationJob.totalBatches} 批；` : ""}
-                {generationJob.status === "cancelled" ? "任务批次和请求已清理。" : `已完成 ${generationJob.completedBatches} / ${generationJob.totalBatches} 批。每批最多100题，每点合并题型生成，最多2路并发；刷新或关闭页面不会中断。`}
+                {generationJob.status === "stopped" ? "所有未完成请求已关闭，不再生成或重试。" : generationJob.status === "cancelled" ? "任务批次和请求已清理。" : `已完成 ${generationJob.completedBatches} / ${generationJob.totalBatches} 批。每批最多100题，每点合并题型生成，最多2路并发；刷新或关闭页面不会中断。`}
               </p>
               {generationJob.status === "cancelled" && generationJob.terminationSummary ? (
                 <p className="mb-0 mt-3 text-sm text-[#6980a4]">已清理 {generationJob.terminationSummary.deletedQuestions} 道草稿；保留 {generationJob.terminationSummary.preservedQuestions} 道受保护试题。终止记录已留存。</p>
               ) : null}
+              {generationJob.status === "stopped" && generationJob.stopSummary ? (
+                <p className="mb-0 mt-3 text-sm text-[#6980a4]">原计划 {generationJob.stopSummary.target} 道，保留 {generationJob.stopSummary.preservedQuestions} 道，未生成 {generationJob.stopSummary.missingQuestions} 道。缺口及失败记录已留存。</p>
+              ) : null}
               {(generationActive || generationJob.status === "partial") && confirmedPlanId ? (
-                <button type="button" className="mt-3 rounded-lg border border-[#f0c8ce] px-4 py-2 text-[#cf4d58] disabled:opacity-50"
-                  disabled={Boolean(terminatingPlanId)} onClick={() => void terminateTask(confirmedPlanId)}>
+                <div className="mt-3 flex flex-wrap gap-3">
+                <button type="button" className="rounded-lg border border-[#b9cae5] bg-white px-4 py-2 text-[#385578] disabled:opacity-50"
+                  disabled={Boolean(stoppingPlanId || terminatingPlanId)} onClick={() => void stopKeepTask(confirmedPlanId)}>
+                  {stoppingPlanId === confirmedPlanId ? "停止生成中..." : "停止生成，保留成果"}
+                </button>
+                <button type="button" className="rounded-lg border border-[#f0c8ce] px-4 py-2 text-[#cf4d58] disabled:opacity-50"
+                  disabled={Boolean(terminatingPlanId || stoppingPlanId)} onClick={() => void terminateTask(confirmedPlanId)}>
                   {terminatingPlanId === confirmedPlanId ? "终止清理中..." : "终止任务"}
                 </button>
+                </div>
               ) : null}
               {generationActive && generationJob.activity ? (
                 <div className="mt-3 text-sm text-[#6980a4]">
@@ -5833,17 +5875,19 @@ function AuthoringTaskPanel() {
               {generationJob.failedUnits.length ? (
                 <div className="mt-4 text-sm text-[#a6711f]">
                   <details>
-                    <summary className="cursor-pointer">查看 {generationJob.failedUnits.length} 个失败请求</summary>
+                    <summary className="cursor-pointer">查看 {generationJob.failedUnits.length} 个{generationJob.status === "stopped" ? "已关闭缺额" : "失败请求"}</summary>
                     {generationJob.failedUnits.map((unit) => (
-                      <p className="mb-0 mt-2" key={unit.id}>{unit.code} · {unit.type === "mixed" ? "混合题型" : unit.type === "single" ? "单选" : unit.type === "multiple" ? "多选" : unit.type === "practical" ? "实操" : "判断"} · 缺 {unit.remaining} 题{unit.attempts !== undefined ? ` · 累计${unit.attempts}次` : ""}：{unit.error}{unit.retryable === false ? " · 不可自动补题，需人工处理" : ""}</p>
+                      <p className="mb-0 mt-2" key={unit.id}>{unit.code} · {unit.type === "mixed" ? "混合题型" : unit.type === "single" ? "单选" : unit.type === "multiple" ? "多选" : unit.type === "practical" ? "实操" : "判断"} · 缺 {unit.remaining} 题{unit.attempts !== undefined ? ` · 累计${unit.attempts}次` : ""}：{unit.error}{generationJob.status !== "stopped" && unit.retryable === false ? " · 不可自动补题，需人工处理" : ""}</p>
                     ))}
                   </details>
+                  {generationJob.status !== "stopped" ? <>
                   <button
                     className="mt-3 rounded-lg bg-[#2e66dd] px-4 py-2 text-white disabled:bg-[#9aaae0]"
-                    disabled={isConfirmingPlan || generationActive || generationJob.failedUnits.every((unit) => unit.retryable === false)}
+                    disabled={isConfirmingPlan || Boolean(stoppingPlanId || terminatingPlanId) || generationActive || generationJob.failedUnits.every((unit) => unit.retryable === false)}
                     onClick={() => void retryFailedGeneration()} type="button"
                   >{isConfirmingPlan ? "正在重试..." : "仅重试失败部分"}</button>
                   <p className="mb-0 mt-2">重试先分析未覆盖知识角度，每次仅补1题；连续两次新增0题停止。累计最多6次精准补题、12次执行，达到上限或依据不足时需人工处理。</p>
+                  </> : null}
                 </div>
               ) : null}
               {progressError ? <p className="mb-0 mt-3 text-sm text-red-600" role="alert">{progressError}</p> : null}
@@ -5972,7 +6016,8 @@ function AuthoringTaskPanel() {
               className="rounded-xl bg-[#2e66dd] px-5 py-3 text-base font-medium text-white disabled:cursor-not-allowed disabled:bg-[#9aaae0]"
               disabled={
                 isSavingHandoff ||
-                Boolean(generationJob && generationJob.status !== "succeeded") ||
+                Boolean(generationJob && !["succeeded", "stopped"].includes(generationJob.status)) ||
+                Boolean(stoppingPlanId || terminatingPlanId) ||
                 !executionQuestions.length ||
                 manualChecks.some((item) => item === "待人工核查")
               }
@@ -6014,6 +6059,8 @@ function AuthoringTaskPanel() {
               <option>生成中</option>
               <option>部分失败</option>
               <option>已暂停</option>
+              <option>已停止，保留成果</option>
+              <option>已终止</option>
               <option>已完成</option>
             </select>
           </label>
@@ -6098,8 +6145,15 @@ function AuthoringTaskPanel() {
                           : "查看计划"}
                       </button>
                       <button
+                        className="ml-3 rounded-xl border border-[#b9cae5] bg-white px-4 py-2.5 text-sm font-medium text-[#385578] disabled:opacity-50"
+                        disabled={Boolean(stoppingPlanId || terminatingPlanId) || !["queued", "running", "partial"].includes(row.generation_status ?? "")}
+                        onClick={() => void stopKeepTask(row.id)} type="button"
+                      >
+                        {stoppingPlanId === row.id ? "停止生成中..." : row.generation_status === "stopped" ? "已停止，保留成果" : "停止生成，保留成果"}
+                      </button>
+                      <button
                         className="ml-3 rounded-xl border border-[#f0c8ce] bg-white px-4 py-2.5 text-sm font-medium text-[#cf4d58]"
-                        disabled={Boolean(terminatingPlanId) || !["queued", "running", "partial"].includes(row.generation_status ?? "")}
+                        disabled={Boolean(terminatingPlanId || stoppingPlanId) || !["queued", "running", "partial"].includes(row.generation_status ?? "")}
                         onClick={() => void terminateTask(row.id)}
                         type="button"
                       >

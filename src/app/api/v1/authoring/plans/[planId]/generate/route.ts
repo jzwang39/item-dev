@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getVerifiedSession } from "@/auth";
 import { ensureGenerationWorker, getGenerationState, startGeneration } from "@/modules/authoring/generation/service";
 import { terminateGeneration } from "@/modules/authoring/generation/termination";
+import { stopGenerationKeepResults } from "@/modules/authoring/generation/stop";
 
 export const dynamic = "force-dynamic";
 
@@ -29,6 +30,10 @@ export async function POST(request: Request, { params }: { params: { planId: str
   try {
     const body = await request.text();
     const action = body ? (JSON.parse(body) as { action?: string }).action : undefined;
+    if (action === "stop_keep") {
+      const summary = await stopGenerationKeepResults(params.planId, auth.actorId!);
+      return NextResponse.json({ data: { summary, ...await getGenerationState(params.planId) } });
+    }
     if (action === "terminate") {
       const summary = await terminateGeneration(params.planId, auth.actorId!);
       return NextResponse.json({ data: { summary, ...await getGenerationState(params.planId) } });

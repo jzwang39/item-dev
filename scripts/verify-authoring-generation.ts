@@ -38,6 +38,7 @@ async function main() {
     await rawQuery(rewrite(await readFile(join(process.cwd(), "database/migrations/0017_skill_question_generation.sql"), "utf8")));
     await rawQuery(rewrite(await readFile(join(process.cwd(), "database/migrations/0019_authoring_generation_termination.sql"), "utf8")));
     await rawQuery(rewrite(await readFile(join(process.cwd(), "database/migrations/0020_authoring_generation_retry_strategy.sql"), "utf8")));
+    await rawQuery(rewrite(await readFile(join(process.cwd(), "database/migrations/0021_authoring_generation_stop_keep.sql"), "utf8")));
     const execute = admin.execute.bind(admin);
     admin.execute = ((sql: string, values?: Parameters<typeof admin.execute>[1]) => execute(rewrite(sql), values)) as typeof admin.execute;
     process.env.AUTHORING_GENERATION_WORKER_DISABLED = "1";
@@ -351,11 +352,11 @@ async function main() {
     assert.equal(savedSource.skillContext.point.sourceStandardRequirement.nodeKind, "skill_requirement");
     // Isolated retry failures: semantic planning, format correction, permanent
     // lack of evidence and cumulative limits must not corrupt saved questions.
-    const makeRetryPlan = async (name: string, code = "P-2") => {
+    const makeRetryPlan = async (name: string, code = "P-2", count = 1) => {
       const id = createUlid();
       await admin.execute("INSERT INTO authoring_plans(id,project_id,name,raw_requirement,scope_json,quota_json,status,created_by) VALUES(?,?,?,?,?,?,'confirmed',?)",
         [id, projectId, name, "测试精准重试", JSON.stringify(scope),
-          JSON.stringify({ points: [{ ...points[1], code, single: 1, judgement: 0, total: 1 }], qualityRequirements: [] }), actorId]);
+          JSON.stringify({ points: [{ ...points[1], code, single: count, judgement: 0, total: count }], qualityRequirements: [] }), actorId]);
       return { id, jobId: (await startGeneration(id, actorId)).jobId };
     };
     const formatPlan = await makeRetryPlan("格式纠正");
@@ -409,6 +410,57 @@ async function main() {
     assert.equal(noBasisCalls, 1, "Limit is checked before any model call.");
     await admin.execute("UPDATE authoring_plans SET status='cancelled' WHERE id IN (?,?,?)", [formatPlan.id, noBasisPlan.id, limitPlan.id]);
     await admin.execute("UPDATE authoring_generation_jobs SET status='cancelled' WHERE id IN (?,?,?)", [formatPlan.jobId, noBasisPlan.jobId, limitPlan.jobId]);
+    const { stopGenerationKeepResults, assertGenerationHandoffReady } = await import("../src/modules/authoring/generation/stop");
+    const stoppedPlan = await makeRetryPlan("停止保留", "P-2", 2);
+    globalThis.fetch = async () => Response.json({ choices: [{ message: { content: JSON.stringify({ questions: [{
+      assessmentPointCode: "P-2", questionType: "single", stem: "停止前已保存的捐赠凭证应如何归档？",
+      options: ["A", "B", "C", "D"].map((key) => ({ key, content: `归档步骤${key}` })),
+      answers: ["A"], analysis: "按归档规范保存。",
+    }] }) } }] });
+    await runGenerationTick();
+    const retained = await getPlanQuestionRows(stoppedPlan.id);
+    assert.equal(retained.length, 1);
+    const validationDb = await pool.getConnection();
+    try { await assert.rejects(assertGenerationHandoffReady(validationDb, stoppedPlan.id), /尚未全部生成/); }
+    finally { validationDb.release(); }
+    await admin.execute("UPDATE authoring_generation_units SET next_attempt_at=UTC_TIMESTAMP(3) WHERE job_id=?", [stoppedPlan.jobId]);
+    let enteredStop = () => {};
+    let releaseStop = () => {};
+    const stopEntered = new Promise<void>((resolve) => { enteredStop = resolve; });
+    const stopRelease = new Promise<void>((resolve) => { releaseStop = resolve; });
+    let stopSignal: AbortSignal | null = null;
+    globalThis.fetch = async (_, init) => {
+      stopSignal = init?.signal ?? null;
+      enteredStop();
+      await stopRelease;
+      return Response.json({ choices: [{ message: { content: '{"questions":[]}' } }] });
+    };
+    const stoppingWorker = runGenerationTick();
+    await stopEntered;
+    const stopSummary = await stopGenerationKeepResults(stoppedPlan.id, actorId);
+    assert.equal(stopSummary.preservedQuestions, 1);
+    assert.equal(stopSummary.missingQuestions, 1);
+    assert.equal(stopSummary.target, 2);
+    assert.ok((stopSignal as AbortSignal | null)?.aborted);
+    releaseStop();
+    await stoppingWorker;
+    assert.deepEqual(await stopGenerationKeepResults(stoppedPlan.id, actorId), stopSummary);
+    assert.equal((await getGenerationState(stoppedPlan.id)).job?.status, "stopped");
+    assert.equal((await getGenerationState(stoppedPlan.id)).job?.failedUnits[0].retryable, false);
+    assert.deepEqual((await getPlanQuestionRows(stoppedPlan.id)).map((row) => row.id), retained.map((row) => row.id));
+    await assert.rejects(startGeneration(stoppedPlan.id, actorId), /不能恢复/);
+    await assert.rejects(startGeneration(stoppedPlan.id, actorId, true), /不能恢复/);
+    assert.equal(await runGenerationTick(), false);
+    const handoffDb = await pool.getConnection();
+    try { await assertGenerationHandoffReady(handoffDb, stoppedPlan.id); }
+    finally { handoffDb.release(); }
+    const emptyStopPlan = await makeRetryPlan("空成果停止");
+    await stopGenerationKeepResults(emptyStopPlan.id, actorId);
+    const emptyDb = await pool.getConnection();
+    try { await assert.rejects(assertGenerationHandoffReady(emptyDb, emptyStopPlan.id), /空成果/); }
+    finally { emptyDb.release(); }
+    assert.equal(await runGenerationTick(), false);
+    console.info("停止保留验证通过：全部草稿保留、缺口与错误留存、在途撤销、迟到响应拦截、幂等停止、禁止恢复和重试、有成果可交接、空成果禁止交接。");
     const { terminateGeneration } = await import("../src/modules/authoring/generation/termination");
     await assert.rejects(terminateGeneration(skillPlanId, actorId), /已完成任务/);
     // Leave one successful unit queued to emulate a slow response arriving after termination.
