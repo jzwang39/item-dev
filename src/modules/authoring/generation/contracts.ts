@@ -6,7 +6,6 @@ export type QuestionType = typeof questionTypes[number];
 export const BUSINESS_BATCH_LIMIT = 100;
 export const MODEL_REQUEST_LIMIT = 12;
 export const GENERATION_CONCURRENCY = 2;
-export const MAX_ATTEMPTS = 6;
 
 export const quotaPointSchema = z.object({
   code: z.string().trim().min(1).max(200),
@@ -158,7 +157,13 @@ export function parseQuestions(content: string, code: string, requestedType: Que
         && (type === "single" ? question.options.length === 4 && answers.size === 1 : question.options.length >= 4 && answers.size >= 2);
     const hash = stemHash(question.stem);
     if (!legal || seen.has(hash) || /^(?:试题|题干|测试|示例)\s*\d*$/u.test(question.stem)) {
-      invalidReasons.push(!legal ? `${type}选项或答案规则不符` : "题干重复或占位");
+      const reason = type === "practical" && !question.scoreRubric ? "实操题缺少评分标准"
+        : type === "practical" && (question.stem.length < 30 || question.answers.some((answer) => answer.length < 4)) ? "实操题内容或参考答案不完整"
+        : type === "practical" || type === "judgement" ? question.options.length ? "该题型不允许选项" : "判断题答案须为正确或错误"
+        : optionKeys.size !== question.options.length || options.size !== question.options.length
+          || (type === "single" ? question.options.length !== 4 : question.options.length < 4) ? "选项数量或选项唯一性不符"
+        : "答案数量、唯一性或答案键与选项不符";
+      invalidReasons.push(!legal ? reason : seen.has(hash) ? "题干重复" : "题干为占位内容");
       continue;
     }
     seen.add(hash);

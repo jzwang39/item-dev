@@ -7,13 +7,16 @@ import { buildChapterExcerptPool, selectBatchExcerpts } from "@/modules/blueprin
 import { query, withTransaction } from "@/shared/database/mysql";
 import { createUlid } from "@/shared/database/ulid";
 import { isLegalPoint } from "@/modules/authoring/legal-topics";
-import { buildBatches, GENERATION_CONCURRENCY, MAX_ATTEMPTS, parseQuestions, questionTypes, quotaTotal, stemHash, validateQuota, type GeneratedQuestion, type QuotaPoint, type Scope, type Snapshot, type QuestionType } from "./contracts";
+import { buildBatches, GENERATION_CONCURRENCY, parseQuestions, questionTypes, quotaTotal, stemHash, validateQuota, type QuotaPoint, type Scope, type Snapshot, type QuestionType } from "./contracts";
 import { loadSkillPlanBasis } from "../skill-plan";
 import { skillQuestionPrompt } from "./skill-prompt";
 import { qualityStandardConfigs, qualityStandardContent } from "../quality-standard";
 import { assertFrozenPlanBasis, theoryPointContext } from "./plan-basis";
 import { readGenerationActivity } from "./activity";
 import { registerGenerationRequest } from "./cancellation";
+import { anglePlanningPrompt, angleSources, completeRetry, failureOf, GenerationFailure, keepSelectedAngle, MAX_TOTAL_ATTEMPTS, MAX_TARGETED_ATTEMPTS,
+  parseAnglePlan, prepareManualRetry, retryBlocked, retryQuestionFeedback, retryState, validationFailure,
+  type RequestOutput, type RetryFailure, type RetryState } from "./retry-policy";
 
 function json<T>(value: T | string): T {
   return typeof value === "string" ? JSON.parse(value) as T : value;
@@ -21,6 +24,8 @@ function json<T>(value: T | string): T {
 type Unit = RowDataPacket & {
   id: string; job_id: string; batch_id: string; point_code: string; question_type: QuestionType | "mixed";
   attempts: number; lease_token: string; snapshot_json: Snapshot | string; plan_id: string; created_by: string | null;
+  retry_state_json: RetryState | string | null;
+  error_message: string | null;
 };
 
 export async function startGeneration(planId: string, actorId: string, retryFailed = false) {
@@ -36,9 +41,25 @@ export async function startGeneration(planId: string, actorId: string, retryFail
     const [existing] = await db.execute<(RowDataPacket & { id: string })[]>("SELECT id FROM authoring_generation_jobs WHERE plan_id=?", [planId]);
     if (existing[0]) {
       if (retryFailed) {
-        await db.execute("UPDATE authoring_generation_units SET status='queued', attempts=0, error_message=NULL, next_attempt_at=UTC_TIMESTAMP(3) WHERE job_id=? AND status='failed'", [existing[0].id]);
-        await db.execute("UPDATE authoring_generation_jobs SET status='running' WHERE id=? AND status='partial'", [existing[0].id]);
-        await audit(db, plan.project_id, actorId, planId, "authoring.plan.retry_failed", { jobId: existing[0].id });
+        const [active] = await db.execute<RowDataPacket[]>(
+          "SELECT id FROM authoring_generation_units WHERE job_id=? AND status IN ('queued','running') LIMIT 1", [existing[0].id],
+        );
+        if (active.length) throw new Error("任务仍在执行，请待本轮结束后重试失败部分。");
+        const [failed] = await db.execute<(RowDataPacket & { id: string; attempts: number; retry_state_json: unknown; error_message: string | null })[]>(
+          "SELECT id,attempts,retry_state_json,error_message FROM authoring_generation_units WHERE job_id=? AND status='failed' FOR UPDATE", [existing[0].id],
+        );
+        let retried = 0;
+        for (const unit of failed) {
+          const state = retryState(unit.retry_state_json);
+          if (retryBlocked(state, Number(unit.attempts), true)) continue;
+          const next = prepareManualRetry(state, Number(unit.attempts), unit.error_message);
+          await db.execute("UPDATE authoring_generation_units SET status='queued',retry_state_json=?,next_attempt_at=UTC_TIMESTAMP(3) WHERE id=?",
+            [JSON.stringify(next), unit.id]);
+          retried++;
+        }
+        if (!retried) throw new Error("失败请求已达到累计上限或需补充依据、修复配置，不能继续原样重试。");
+        await refreshJob(db, existing[0].id);
+        await audit(db, plan.project_id, actorId, planId, "authoring.plan.retry_failed", { jobId: existing[0].id, retried, skipped: failed.length - retried });
       }
       return existing[0].id;
     }
@@ -122,8 +143,8 @@ export async function getGenerationState(planId: string) {
      JOIN authoring_generation_slots s ON s.unit_id=u.id WHERE b.job_id=?
      GROUP BY b.id ORDER BY b.ordinal`, [job.id],
   );
-  const failed = await query<(RowDataPacket & { id: string; point_code: string; question_type: string; error_message: string; remaining: number })[]>(
-    `SELECT u.id,u.point_code,u.question_type,u.error_message,COUNT(*) AS remaining
+  const failed = await query<(RowDataPacket & { id: string; point_code: string; question_type: string; error_message: string; remaining: number; attempts: number; retry_state_json: unknown })[]>(
+    `SELECT u.id,u.point_code,u.question_type,u.error_message,u.attempts,u.retry_state_json,COUNT(*) AS remaining
        FROM authoring_generation_units u JOIN authoring_generation_slots s ON s.unit_id=u.id
       WHERE u.job_id=? AND u.status='failed' AND s.question_id IS NULL GROUP BY u.id`, [job.id],
   );
@@ -133,12 +154,18 @@ export async function getGenerationState(planId: string) {
   return {
     job: {
       id: job.id, status, target: Number(job.target_count), generated,
+      retryLimits: { totalAttempts: MAX_TOTAL_ATTEMPTS, targetedAttempts: MAX_TARGETED_ATTEMPTS, consecutiveZeroOutputs: 2 },
       activity: await readGenerationActivity(job.id),
       terminationSummary: job.termination_summary_json ? json(job.termination_summary_json) : null,
       totalBatches: batches.length,
       completedBatches: batches.filter((batch) => Number(batch.generated_count) === Number(batch.target)).length,
       currentBatch: batches.find((batch) => Number(batch.running))?.ordinal ?? batches.find((batch) => Number(batch.pending))?.ordinal ?? null,
-      failedUnits: failed.map((unit) => ({ id: unit.id, code: unit.point_code, type: unit.question_type, remaining: Number(unit.remaining), error: unit.error_message })),
+      failedUnits: failed.map((unit) => {
+        const state = retryState(unit.retry_state_json);
+        return { id: unit.id, code: unit.point_code, type: unit.question_type, remaining: Number(unit.remaining),
+          error: unit.error_message, attempts: Number(unit.attempts), failures: state.failures,
+          stopReason: state.stopReason, retryable: !retryBlocked(state, Number(unit.attempts), true) };
+      }),
       batches: batches.map((batch) => ({
         ordinal: batch.ordinal, target: Number(batch.target), generated: Number(batch.generated_count),
         status: Number(batch.generated_count) === Number(batch.target) ? "succeeded" : Number(batch.pending) ? "running" : "partial",
@@ -158,11 +185,19 @@ async function claimUnit(): Promise<Unit | null> {
       "SELECT cooldown_until>UTC_TIMESTAMP(3) AS cooling FROM authoring_generation_capacity WHERE id=1 FOR UPDATE",
     );
     if (capacity[0]?.cooling) return null;
-    // Expired leases are recoverable after a process exit; the interrupted try is
-    // not charged again. Token fencing prevents that old worker from committing.
-    await db.execute(`UPDATE authoring_generation_units SET status='queued',attempts=GREATEST(0,CAST(attempts AS SIGNED)-1),
-      lease_token=NULL,lease_until=NULL,next_attempt_at=UTC_TIMESTAMP(3)
-      WHERE status='running' AND lease_until<UTC_TIMESTAMP(3)`);
+    // Preserve cumulative attempts on recovery so repeated process exits cannot
+    // bypass retry limits. Token fencing still rejects late workers.
+    const [expired] = await db.execute<(RowDataPacket & { id: string; job_id: string; attempts: number; retry_state_json: unknown })[]>(
+      "SELECT id,job_id,attempts,retry_state_json FROM authoring_generation_units WHERE status='running' AND lease_until<UTC_TIMESTAMP(3) FOR UPDATE",
+    );
+    for (const unit of expired) {
+      const state = retryState(unit.retry_state_json);
+      const result = completeRetry(state, Number(unit.attempts), 0, 1, [{ code: "lease_expired", message: "请求租约过期，已回收；累计次数保留。" }]);
+      await db.execute(`UPDATE authoring_generation_units SET status=?,retry_state_json=?,error_message=?,
+        lease_token=NULL,lease_until=NULL,next_attempt_at=UTC_TIMESTAMP(3) WHERE id=?`,
+        [result.status, JSON.stringify(result.state), result.state.stopReason ?? "请求租约过期，等待恢复。", unit.id]);
+      await refreshJob(db, unit.job_id);
+    }
     const [running] = await db.execute<(RowDataPacket & { count: number })[]>(
       "SELECT COUNT(*) AS count FROM authoring_generation_units WHERE status='running'",
     );
@@ -179,17 +214,32 @@ async function claimUnit(): Promise<Unit | null> {
     );
     if (!rows[0]) return null;
     const [units] = await db.execute<Unit[]>(
-      `SELECT u.id,u.job_id,u.batch_id,u.point_code,u.question_type,u.attempts,
+      `SELECT u.id,u.job_id,u.batch_id,u.point_code,u.question_type,u.attempts,u.retry_state_json,u.error_message,
               j.snapshot_json,j.plan_id,j.created_by
        FROM authoring_generation_units u JOIN authoring_generation_jobs j ON j.id=u.job_id
        WHERE u.id=? AND j.id=? FOR UPDATE`, [rows[0].id, rows[0].job_id],
     );
     const unit = units[0];
     if (!unit) throw new Error("领取的命题请求或关联任务不存在。");
+    const state = retryState(unit.retry_state_json);
+    if (!unit.retry_state_json && Number(unit.attempts) > 0 && unit.error_message) {
+      state.targeted = true;
+      state.failures = [validationFailure(unit.error_message)];
+    }
+    const blocked = retryBlocked(state, Number(unit.attempts));
+    if (blocked) {
+      state.stopReason = blocked;
+      await db.execute("UPDATE authoring_generation_units SET status='failed',error_message=?,retry_state_json=? WHERE id=?",
+        [blocked, JSON.stringify(state), unit.id]);
+      await refreshJob(db, unit.job_id);
+      return null;
+    }
     unit.lease_token = createUlid();
     unit.attempts = Number(unit.attempts) + 1;
-    await db.execute("UPDATE authoring_generation_units SET status='running',attempts=?,lease_token=?,lease_until=DATE_ADD(UTC_TIMESTAMP(3),INTERVAL 180 SECOND) WHERE id=?",
-      [unit.attempts, unit.lease_token, unit.id]);
+    if (state.targeted) state.targetedAttempts += 1;
+    unit.retry_state_json = state;
+    await db.execute("UPDATE authoring_generation_units SET status='running',attempts=?,retry_state_json=?,lease_token=?,lease_until=DATE_ADD(UTC_TIMESTAMP(3),INTERVAL 180 SECOND) WHERE id=?",
+      [unit.attempts, JSON.stringify(state), unit.lease_token, unit.id]);
     return unit;
   });
 }
@@ -202,7 +252,9 @@ async function refreshJob(db: PoolConnection, jobId: string) {
     [Number(counts[0].pending) ? "running" : Number(counts[0].failed) ? "partial" : "succeeded", jobId]);
 }
 
-async function saveOutput(unit: Unit, questions: GeneratedQuestion[], errorMessage: string) {
+async function saveOutput(unit: Unit, output: RequestOutput) {
+  const { questions } = output;
+  const failures = output.failures.slice();
   const snapshot = json<Snapshot>(unit.snapshot_json);
   return withTransaction(async (db) => {
     // Claiming and saving use the same leading lock; network calls stay outside
@@ -223,9 +275,9 @@ async function saveOutput(unit: Unit, questions: GeneratedQuestion[], errorMessa
       if (!slots.length) break;
       const hash = stemHash(question.stem);
       const [duplicates] = await db.execute<RowDataPacket[]>("SELECT id FROM authoring_generation_slots WHERE job_id=? AND stem_hash=? LIMIT 1", [unit.job_id, hash]);
-      if (duplicates.length) continue;
+      if (duplicates.length) { failures.push({ code: "duplicate", message: "题干与本任务已有题重复。" }); continue; }
       const slot = slots.find((item) => item.question_type === question.questionType);
-      if (!slot) continue;
+      if (!slot) { failures.push({ code: "invalid_type", message: "返回题型没有对应缺额槽位。" }); continue; }
       const questionId = createUlid();
       const versionId = createUlid();
       const skill = snapshot.scope.assessmentMode === "操作技能";
@@ -239,6 +291,7 @@ async function saveOutput(unit: Unit, questions: GeneratedQuestion[], errorMessa
         structureVersionId: snapshot.scope.blueprintVersions.structure?.id,
         skillContext: node.skillContext, skillStructure: snapshot.skillStructure,
         assessmentPointCode: node.code, generatedAt: new Date().toISOString(),
+        retryAngle: output.state.selectedAngle, retryCovered: output.state.covered,
       };
       await db.execute(`INSERT INTO questions(id,project_id,question_no,occupation_id,level_code,assessment_mode,question_type,current_version_id,current_status)
         VALUES(?,?,?,?,?,?,?,?,?)`, [questionId, snapshot.projectId, `AI-${unit.plan_id}-${String(slot.ordinal).padStart(4, "0")}`,
@@ -260,15 +313,19 @@ async function saveOutput(unit: Unit, questions: GeneratedQuestion[], errorMessa
       slots.splice(slots.indexOf(slot), 1);
       saved += 1;
     }
-    const complete = slots.length === 0;
-    await db.execute(`UPDATE authoring_generation_units SET status=?,error_message=?,lease_token=NULL,lease_until=NULL,
-      next_attempt_at=DATE_ADD(UTC_TIMESTAMP(3),INTERVAL 5 SECOND) WHERE id=?`,
-    [complete ? "succeeded" : unit.attempts >= MAX_ATTEMPTS ? "failed" : "queued",
-      complete ? null : `${errorMessage || "返回重复或无效试题"}；本次保存${saved}题，尚缺${slots.length}题`.slice(0, 2000), unit.id]);
+    if (slots.length && !failures.length && !saved) failures.push({ code: "invalid_content", message: "模型未返回可保存的试题。" });
+    const result = completeRetry(output.state, unit.attempts, saved, slots.length, failures);
+    const details = [...new Set(failures.map((failure) => failure.message))].join("；") || "仅补缺额，下一次按新的知识角度补一道";
+    await db.execute(`UPDATE authoring_generation_units SET status=?,error_message=?,retry_state_json=?,lease_token=NULL,lease_until=NULL,
+      next_attempt_at=DATE_ADD(UTC_TIMESTAMP(3),INTERVAL ? SECOND) WHERE id=?`,
+    [result.status, result.status === "succeeded" ? null : `${details}；本次保存${saved}题，尚缺${slots.length}题${result.state.stopReason ? `；${result.state.stopReason}` : ""}`.slice(0, 2000),
+      JSON.stringify(result.state), result.delay, unit.id]);
     await refreshJob(db, unit.job_id);
     if (saved) await audit(db, snapshot.projectId, unit.created_by, unit.plan_id, "authoring.plan.batch_output_saved", { jobId: unit.job_id, batchId: unit.batch_id, unitId: unit.id, saved });
-    if (!complete && unit.attempts >= MAX_ATTEMPTS) {
-      await audit(db, snapshot.projectId, unit.created_by, unit.plan_id, "authoring.plan.unit_failed", { jobId: unit.job_id, unitId: unit.id, missing: slots.length, error: errorMessage });
+    if (result.status !== "succeeded") {
+      await audit(db, snapshot.projectId, unit.created_by, unit.plan_id, "authoring.plan.retry_result", {
+        jobId: unit.job_id, unitId: unit.id, missing: slots.length, saved, attempts: unit.attempts, ...result.state,
+      });
     }
   });
 }
@@ -285,23 +342,28 @@ function endpoint(model: Snapshot["model"]) {
   return { url: url.toString(), anthropic };
 }
 
-async function requestQuestions(unit: Unit, cancellation: AbortSignal) {
+async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<RequestOutput> {
   cancellation.throwIfAborted();
+  const state = retryState(unit.retry_state_json);
   const snapshot = json<Snapshot>(unit.snapshot_json);
   const connection = await getSavedModelConnection();
   if (!connection || connection.provider !== snapshot.model.provider || connection.baseUrl !== snapshot.model.baseUrl) {
-    throw new Error("模型连接已变更，请恢复原连接后重试失败部分，或新建计划。");
+    throw new GenerationFailure("connection_changed", "模型连接已变更，请恢复原连接后处理，或新建计划。");
   }
-  const missing = await query<(RowDataPacket & { question_type: QuestionType })[]>("SELECT question_type FROM authoring_generation_slots WHERE unit_id=? AND question_id IS NULL", [unit.id]);
-  if (!missing.length) return [];
-  const quotas = Object.fromEntries(questionTypes.map((type) => [type, missing.filter((slot) => slot.question_type === type).length]));
+  const missing = await query<(RowDataPacket & { question_type: QuestionType })[]>(
+    "SELECT question_type FROM authoring_generation_slots WHERE unit_id=? AND question_id IS NULL ORDER BY ordinal", [unit.id],
+  );
+  if (!missing.length) return { questions: [], failures: [], state };
+  const requested = state.targeted ? missing.slice(0, 1) : missing;
+  const quotas = Object.fromEntries(questionTypes.map((type) => [type, requested.filter((slot) => slot.question_type === type).length]));
   const node = snapshot.nodes.find((item) => item.code === unit.point_code)!;
   const [metadata] = await query<(RowDataPacket & { name: string; requirement_json: unknown; source_ref_json: unknown })[]>(
     "SELECT name,requirement_json,source_ref_json FROM blueprint_nodes WHERE id=?", [node.id],
   );
-  if (metadata && isLegalPoint(metadata)) throw new NonRetryableError("法律法规考评点必须通过法规智能体及已核验原文命题，已阻止普通生成。");
-  const previous = await query<(RowDataPacket & { stem: string })[]>(
-    `SELECT qv.stem FROM authoring_generation_slots s JOIN authoring_generation_units u ON u.id=s.unit_id
+  if (metadata && isLegalPoint(metadata)) throw new GenerationFailure("insufficient_basis", "法律法规考评点必须通过法规智能体及已核验原文命题，已阻止普通生成。");
+  const previous = await query<(RowDataPacket & { stem: string; content: unknown; answer: unknown; analysis: string | null })[]>(
+    `SELECT qv.stem,qv.content_json AS content,qv.answer_json AS answer,qv.analysis_text AS analysis
+      FROM authoring_generation_slots s JOIN authoring_generation_units u ON u.id=s.unit_id
       JOIN questions q ON q.id=s.question_id JOIN question_versions qv ON qv.id=q.current_version_id
      WHERE s.job_id=? AND u.point_code=? ORDER BY s.ordinal`, [unit.job_id, unit.point_code],
   );
@@ -317,6 +379,34 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal) {
     })), node.name);
     excerpts = selectBatchExcerpts(pool, previous.length, Math.max(1, previous.length + missing.length), unit.attempts);
   }
+  const reuseAngle = keepSelectedAngle(state);
+  if (!reuseAngle) state.selectedAngle = undefined;
+  unit.retry_state_json = state;
+  if (state.targeted) {
+    const context = snapshot.scope.assessmentMode === "操作技能" ? node.skillContext : node.theoryContext;
+    const sources = angleSources(context, excerpts);
+    if (!sources.length) throw new GenerationFailure("insufficient_basis", "冻结教材和标准未提供可核验原文，不能为补题编造新角度。");
+    const analysisPrompt = anglePlanningPrompt(node.code, node.name, requested[0].question_type, previous, sources, state, {
+      职业: snapshot.scope.occupation, 等级: snapshot.scope.levelCode, 依据: context,
+    });
+    if (!reuseAngle) {
+      const analysis = await callGenerationModel(snapshot, connection.apiKey, analysisPrompt, cancellation);
+      const plan = parseAnglePlan(analysis, previous.length, sources, state.attemptedAngles);
+      state.covered = plan.covered;
+      state.selectedAngle = plan.selected;
+      state.attemptedAngles = [...state.attemptedAngles, plan.selected];
+    }
+    unit.retry_state_json = state;
+    cancellation.throwIfAborted();
+    // Lease fencing preserves the plan without allowing a cancelled/old worker
+    // to write retry metadata or consume a second model request.
+    const persisted = await query<RowDataPacket[]>(
+      "SELECT id FROM authoring_generation_units WHERE id=? AND lease_token=? AND status='running'", [unit.id, unit.lease_token],
+    );
+    if (!persisted.length) throw new GenerationFailure("lease_expired", "补题分析后租约已失效，停止生成。");
+    await query("UPDATE authoring_generation_units SET retry_state_json=? WHERE id=? AND lease_token=? AND status='running'",
+      [JSON.stringify(state), unit.id, unit.lease_token]);
+  }
   let instruction = `你是职业技能理论知识试题编制助手。严格依据冻结考评点、关联标准依据及提供的教材片段编制中文试题草稿，覆盖指定题型和数量。
 有教材时只能使用关联教材片段和标准依据；没有教材时以关联标准条目为考核范围，结合适用职业等级的通用专业知识出题。不得编造法律条款、数值标准或机构制度，资料不足不得凑题。遵守输入中的试题质量标准，但不得改变指定题型或数量、越出正式标准范围。
 题目不得重复已生成题干，不得仅改写同一题。答案、解析必须明确且符合知识依据。只返回JSON：
@@ -327,53 +417,55 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal) {
 单选恰好4个不同选项和1个答案；多选至少4个不同选项和至少2个答案；答案键必须对应选项。判断options必须为[]，answers必须为["正确"]或["错误"]，不能写true/false、对/错或A/B。`;
   let prompt = JSON.stringify({
     用户需求: snapshot.requirement, 职业: snapshot.scope.occupation, 等级: snapshot.scope.levelCode,
-    考评点: { code: node.code, name: node.name }, 指定题型: unit.question_type, 本次必须生成数: missing.length,
+    考评点: { code: node.code, name: node.name }, 指定题型: state.targeted ? requested[0].question_type : unit.question_type, 本次必须生成数: requested.length,
     本次题型配额: quotas,
     质量要求: snapshot.qualityRequirements, 试题质量标准: snapshot.qualityStandard,
     冻结考评点与标准依据: node.theoryContext,
     教材片段: excerpts, 排除题干: previous.map((item) => item.stem), 补齐次数: unit.attempts,
   });
   if (snapshot.scope.assessmentMode === "操作技能") {
-    ({ instruction, prompt } = skillQuestionPrompt(snapshot, node.code, missing.length, previous.map((item) => item.stem)));
+    ({ instruction, prompt } = skillQuestionPrompt(snapshot, node.code, requested.length, previous.map((item) => item.stem)));
   }
-  const target = endpoint(snapshot.model);
-  let last: unknown;
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    try {
-      const response = await fetch(target.url, {
-        method: "POST",
-        headers: target.anthropic ? { "x-api-key": connection.apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" }
-          : { Authorization: `Bearer ${connection.apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify(target.anthropic
-          ? { model: snapshot.model.model, max_tokens: 8192, system: instruction, messages: [{ role: "user", content: prompt }] }
-          : { model: snapshot.model.model, temperature: unit.attempts > 1 ? 0.7 : 0.5, max_tokens: 8192, response_format: { type: "json_object" },
-            messages: [{ role: "system", content: instruction }, { role: "user", content: prompt }] }),
-        signal: AbortSignal.any([cancellation, AbortSignal.timeout(90000)]),
-      });
-      if (!response.ok) {
-        if (response.status === 429) {
-          await query("UPDATE authoring_generation_capacity SET cooldown_until=DATE_ADD(UTC_TIMESTAMP(3),INTERVAL 30 SECOND) WHERE id=1");
-          throw new NonRetryableError("模型限流 HTTP 429，暂停新请求30秒后补齐。");
-        }
-        if (response.status !== 429 && response.status < 500) throw new NonRetryableError(`模型请求失败 HTTP ${response.status}`);
-        throw new Error(`模型请求失败 HTTP ${response.status}`);
-      }
-      const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }>; content?: Array<{ text?: string }> };
-      const output = target.anthropic ? payload.content?.map((item) => item.text ?? "").join("") ?? "" : payload.choices?.[0]?.message?.content ?? "";
-      const parsed = parseQuestions(output, node.code, snapshot.scope.assessmentMode === "操作技能" ? "practical" : unit.question_type);
-      if (parsed.invalidReasons.length) console.warn("命题响应字段校验：", node.code, [...new Set(parsed.invalidReasons)].slice(0, 3).join("; "));
-      if (!parsed.valid.length) throw new NonRetryableError(`模型返回${parsed.received}题，其中有效题为0：${parsed.invalidReasons[0] ?? "未知原因"}`);
-      return parsed.valid;
-    } catch (error) {
-      last = error;
-      cancellation.throwIfAborted();
-      if (error instanceof NonRetryableError) throw error;
-      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
-    }
+  if (state.selectedAngle) {
+    instruction += "\n本次为精准补题，只生成一道指定题型的新题。必须使用补题策略指定的知识角度和原文依据，检查与已有题的实质内容差异，并针对上次具体错误修正，不得忽略质量标准。";
+    prompt = JSON.stringify({ ...JSON.parse(prompt), 补题策略: retryQuestionFeedback(state, state.selectedAngle, requested[0].question_type) });
   }
-  throw last;
+  const content = await callGenerationModel(snapshot, connection.apiKey, { instruction, prompt }, cancellation);
+  let parsed: ReturnType<typeof parseQuestions>;
+  try { parsed = parseQuestions(content, node.code, snapshot.scope.assessmentMode === "操作技能" ? "practical" : state.targeted ? requested[0].question_type : unit.question_type); }
+  catch (error) { throw new GenerationFailure("invalid_json", error instanceof Error ? error.message : "试题 JSON 无效。"); }
+  const failures = parsed.invalidReasons.map(validationFailure);
+  if (!parsed.valid.length && !failures.length) failures.push({ code: "invalid_content", message: "模型未返回试题，新增有效题为0。" });
+  return { questions: state.targeted ? parsed.valid.slice(0, 1) : parsed.valid, failures, state };
 }
-class NonRetryableError extends Error {}
+
+async function callGenerationModel(snapshot: Snapshot, apiKey: string, input: { instruction: string; prompt: string }, cancellation: AbortSignal) {
+  cancellation.throwIfAborted();
+  const target = endpoint(snapshot.model);
+  const response = await fetch(target.url, {
+    method: "POST",
+    headers: target.anthropic ? { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" }
+      : { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify(target.anthropic
+      ? { model: snapshot.model.model, max_tokens: 8192, system: input.instruction, messages: [{ role: "user", content: input.prompt }] }
+      : { model: snapshot.model.model, temperature: 0.5, max_tokens: 8192, response_format: { type: "json_object" },
+        messages: [{ role: "system", content: input.instruction }, { role: "user", content: input.prompt }] }),
+    signal: AbortSignal.any([cancellation, AbortSignal.timeout(90000)]),
+  });
+  cancellation.throwIfAborted();
+  if (!response.ok) {
+    if (response.status === 429) {
+      await query("UPDATE authoring_generation_capacity SET cooldown_until=DATE_ADD(UTC_TIMESTAMP(3),INTERVAL 30 SECOND) WHERE id=1");
+      throw new GenerationFailure("rate_limited", "模型限流 HTTP 429，等待冷却后补题。");
+    }
+    throw new GenerationFailure(response.status >= 500 || response.status === 408 ? "network_error" : "model_error", `模型请求失败 HTTP ${response.status}`);
+  }
+  let payload: { choices?: Array<{ message?: { content?: string } }>; content?: Array<{ text?: string }> };
+  try { payload = await response.json(); }
+  catch { throw new GenerationFailure("invalid_json", "模型接口返回的响应不是有效 JSON。"); }
+  cancellation.throwIfAborted();
+  return target.anthropic ? payload.content?.map((item) => item.text ?? "").join("") ?? "" : payload.choices?.[0]?.message?.content ?? "";
+}
 
 export async function runGenerationTick() {
   const unit = await claimUnit();
@@ -389,21 +481,22 @@ export async function runGenerationTick() {
   }, 30000);
   heartbeat.unref();
   try {
-    let output: GeneratedQuestion[] = [];
-    let message = "";
+    let output: RequestOutput = { questions: [], failures: [], state: retryState(unit.retry_state_json) };
     try { output = await requestQuestions(unit, request.controller.signal); }
-    catch (error) { message = error instanceof Error ? error.message : "模型请求失败"; }
+    catch (error) { output = { questions: [], failures: [failureOf(error)], state: retryState(unit.retry_state_json) }; }
     try {
-      await saveOutput(unit, output, message);
+      await saveOutput(unit, output);
     } catch (error) {
       // A permanent write/constraint error must not become an endless lease
       // recovery loop. The transaction already rolled back this response.
       await withTransaction(async (db) => {
         await db.execute("SELECT id FROM authoring_generation_capacity WHERE id=1 FOR UPDATE");
         await db.execute("SELECT id FROM authoring_generation_jobs WHERE id=? FOR UPDATE", [unit.job_id]);
-        await db.execute(`UPDATE authoring_generation_units SET status='failed',error_message=?,lease_token=NULL,lease_until=NULL
+        const failure: RetryFailure = { code: "save_error", message: `试题保存失败：${error instanceof Error ? error.message : "数据库异常"}`.slice(0, 1500) };
+        const state = { ...output.state, failures: [failure], stopReason: "数据写入失败，需人工处理。" };
+        await db.execute(`UPDATE authoring_generation_units SET status='failed',error_message=?,retry_state_json=?,lease_token=NULL,lease_until=NULL
           WHERE id=? AND lease_token=? AND status='running'`,
-          [`试题保存失败：${error instanceof Error ? error.message : "数据库异常"}`.slice(0, 2000), unit.id, unit.lease_token]);
+          [failure.message, JSON.stringify(state), unit.id, unit.lease_token]);
         await refreshJob(db, unit.job_id);
       });
     }

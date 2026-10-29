@@ -4720,7 +4720,10 @@ type QuestionGenerationJob = {
     globalRunning: number;
     recentErrors: Array<{ code: string; attempts: number; error: string }>;
   };
-  failedUnits: Array<{ id: string; code: string; type: string; remaining: number; error: string }>;
+  failedUnits: Array<{
+    id: string; code: string; type: string; remaining: number; error: string;
+    attempts?: number; failures?: Array<{ code: string; message: string }>; stopReason?: string; retryable?: boolean;
+  }>;
 };
 
 type GeneratedQuestion = {
@@ -5832,14 +5835,15 @@ function AuthoringTaskPanel() {
                   <details>
                     <summary className="cursor-pointer">查看 {generationJob.failedUnits.length} 个失败请求</summary>
                     {generationJob.failedUnits.map((unit) => (
-                      <p className="mb-0 mt-2" key={unit.id}>{unit.code} · {unit.type === "mixed" ? "混合题型" : unit.type === "single" ? "单选" : unit.type === "multiple" ? "多选" : "判断"} · 缺 {unit.remaining} 题：{unit.error}</p>
+                      <p className="mb-0 mt-2" key={unit.id}>{unit.code} · {unit.type === "mixed" ? "混合题型" : unit.type === "single" ? "单选" : unit.type === "multiple" ? "多选" : unit.type === "practical" ? "实操" : "判断"} · 缺 {unit.remaining} 题{unit.attempts !== undefined ? ` · 累计${unit.attempts}次` : ""}：{unit.error}{unit.retryable === false ? " · 不可自动补题，需人工处理" : ""}</p>
                     ))}
                   </details>
                   <button
                     className="mt-3 rounded-lg bg-[#2e66dd] px-4 py-2 text-white disabled:bg-[#9aaae0]"
-                    disabled={isConfirmingPlan || generationActive}
+                    disabled={isConfirmingPlan || generationActive || generationJob.failedUnits.every((unit) => unit.retryable === false)}
                     onClick={() => void retryFailedGeneration()} type="button"
                   >{isConfirmingPlan ? "正在重试..." : "仅重试失败部分"}</button>
+                  <p className="mb-0 mt-2">重试先分析未覆盖知识角度，每次仅补1题；连续两次新增0题停止。累计最多6次精准补题、12次执行，达到上限或依据不足时需人工处理。</p>
                 </div>
               ) : null}
               {progressError ? <p className="mb-0 mt-3 text-sm text-red-600" role="alert">{progressError}</p> : null}

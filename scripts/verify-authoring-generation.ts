@@ -37,6 +37,7 @@ async function main() {
     await rawQuery(rewrite(await readFile(join(process.cwd(), "database/migrations/0010_authoring_mixed_requests.sql"), "utf8")));
     await rawQuery(rewrite(await readFile(join(process.cwd(), "database/migrations/0017_skill_question_generation.sql"), "utf8")));
     await rawQuery(rewrite(await readFile(join(process.cwd(), "database/migrations/0019_authoring_generation_termination.sql"), "utf8")));
+    await rawQuery(rewrite(await readFile(join(process.cwd(), "database/migrations/0020_authoring_generation_retry_strategy.sql"), "utf8")));
     const execute = admin.execute.bind(admin);
     admin.execute = ((sql: string, values?: Parameters<typeof admin.execute>[1]) => execute(rewrite(sql), values)) as typeof admin.execute;
     process.env.AUTHORING_GENERATION_WORKER_DISABLED = "1";
@@ -101,6 +102,17 @@ async function main() {
     await admin.execute("INSERT INTO model_connection_settings(id,provider,base_url,model_name,api_key) VALUES(1,'mock','https://mock.invalid/v1','mock','not-a-real-key')");
     let fail = true;
     let calls = 0;
+    let angleCalls = 0;
+    const angleResponse = (prompt: Record<string, unknown>) => {
+      angleCalls++;
+      const previous = prompt.已有试题 as Array<{ index: number }>;
+      const sources = prompt.可用依据 as Array<{ id: string; content: string }>;
+      assert.ok(sources.length > 0);
+      return Response.json({ choices: [{ message: { content: JSON.stringify({
+        covered: previous.map((entry) => ({ index: entry.index, angle: `已覆盖考核内容${entry.index}` })),
+        remaining: [{ angle: `隔离补题角度${angleCalls}`, sourceId: sources[0].id, quote: sources[0].content }],
+      }) } }] });
+    };
     let holdNext = false;
     let releaseHeld = () => {};
     let notifyHeld = () => {};
@@ -126,7 +138,13 @@ async function main() {
       }
       const request = JSON.parse(String(init?.body));
       const prompt = JSON.parse(request.messages[1].content);
+      if (prompt.可用依据) return angleResponse(prompt);
       const code: string = prompt["考评点"].code;
+      if (prompt.补题策略) {
+        assert.equal(prompt.本次必须生成数, 1);
+        assert.equal(prompt.补题策略.本次仅补一题, true);
+        assert.ok(prompt.补题策略.尚未覆盖的知识角度.quote);
+      }
       assert.equal(prompt["冻结考评点与标准依据"].point.standardSource.evidence, `隔离测试标准依据${code}`);
       assert.ok(prompt["试题质量标准"].length > 0);
       if (code === "P-1") {
@@ -210,11 +228,20 @@ async function main() {
     fail = false;
     const callsBefore = calls;
     await startGeneration(planId, actorId, true);
-    assert.equal(await runGenerationTick(), true);
+    for (let iteration = 0; iteration < 4; iteration++) {
+      await admin.execute("UPDATE authoring_generation_units SET next_attempt_at=UTC_TIMESTAMP(3) WHERE job_id=? AND status='queued'", [started.jobId]);
+      assert.equal(await runGenerationTick(), true);
+    }
     const complete = await getGenerationState(planId);
     assert.equal(complete.job?.status, "succeeded");
     assert.equal(complete.job?.generated, 1200);
-    assert.equal(calls - callsBefore, 1);
+    assert.equal(calls - callsBefore, 8, "Each missing question uses one angle analysis and one targeted generation.");
+    const [retryUnits] = await admin.execute<(RowDataPacket & { attempts: number; retry_state_json: unknown })[]>(
+      "SELECT attempts,retry_state_json FROM authoring_generation_units WHERE job_id=? AND point_code='P-17'", [started.jobId],
+    );
+    assert.equal(retryUnits[0].attempts, 7, "Manual retry preserves all previous attempts.");
+    const retryMeta = typeof retryUnits[0].retry_state_json === "string" ? JSON.parse(retryUnits[0].retry_state_json) : retryUnits[0].retry_state_json;
+    assert.equal(retryMeta.targetedAttempts, 6);
     const [after] = await admin.execute<(RowDataPacket & { id: string })[]>("SELECT id FROM questions ORDER BY id");
     assert.ok(before.every((question) => after.some((current) => current.id === question.id)));
     const [counts] = await admin.execute<(RowDataPacket & { slots: number; hashes: number; unique_questions: number })[]>(
@@ -289,8 +316,9 @@ async function main() {
     const skillCalls = new Map<string, number>();
     globalThis.fetch = async (_, init) => {
       const body = JSON.parse(String(init?.body));
-      assert.match(body.messages[0].content, /实操题/);
       const prompt = JSON.parse(body.messages[1].content);
+      if (prompt.可用依据) return angleResponse(prompt);
+      assert.match(body.messages[0].content, /实操题/);
       assert.equal(prompt.冻结内容结构.totalMinutes, null);
       const code = prompt.鉴定点.code;
       const attempt = (skillCalls.get(code) ?? 0) + 1; skillCalls.set(code, attempt);
@@ -321,6 +349,66 @@ async function main() {
     const savedSource = typeof skillSaved[0].source_snapshot_json === "string" ? JSON.parse(skillSaved[0].source_snapshot_json) : skillSaved[0].source_snapshot_json;
     assert.equal(savedSource.structureVersionId, skillVersions.structure.id);
     assert.equal(savedSource.skillContext.point.sourceStandardRequirement.nodeKind, "skill_requirement");
+    // Isolated retry failures: semantic planning, format correction, permanent
+    // lack of evidence and cumulative limits must not corrupt saved questions.
+    const makeRetryPlan = async (name: string, code = "P-2") => {
+      const id = createUlid();
+      await admin.execute("INSERT INTO authoring_plans(id,project_id,name,raw_requirement,scope_json,quota_json,status,created_by) VALUES(?,?,?,?,?,?,'confirmed',?)",
+        [id, projectId, name, "测试精准重试", JSON.stringify(scope),
+          JSON.stringify({ points: [{ ...points[1], code, single: 1, judgement: 0, total: 1 }], qualityRequirements: [] }), actorId]);
+      return { id, jobId: (await startGeneration(id, actorId)).jobId };
+    };
+    const formatPlan = await makeRetryPlan("格式纠正");
+    let formatAttempts = 0;
+    let formatAngles = 0;
+    globalThis.fetch = async (_, init) => {
+      const body = JSON.parse(String(init?.body));
+      const prompt = JSON.parse(body.messages[1].content);
+      if (prompt.可用依据) { formatAngles++; return angleResponse(prompt); }
+      formatAttempts++;
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ questions: [{
+        assessmentPointCode: "P-2", questionType: "single", stem: "归档时应当如何核对捐赠凭证信息？",
+        options: ["A", "B", "C", "D"].map((key) => ({ key, content: `核对方法${key}` })),
+        answers: [formatAttempts <= 2 ? "X" : "A"], analysis: "按凭证信息要求核对。",
+      }] }) } }] });
+    };
+    await runGenerationTick();
+    await admin.execute("UPDATE authoring_generation_units SET next_attempt_at=UTC_TIMESTAMP(3) WHERE job_id=?", [formatPlan.jobId]);
+    await runGenerationTick();
+    const formatFailed = (await getGenerationState(formatPlan.id)).job!;
+    assert.equal(formatFailed.status, "partial");
+    assert.equal(formatFailed.failedUnits[0].failures[0].code, "invalid_answer");
+    assert.match(formatFailed.failedUnits[0].stopReason!, /连续两次/);
+    await startGeneration(formatPlan.id, actorId, true);
+    await runGenerationTick();
+    assert.equal((await getGenerationState(formatPlan.id)).job?.status, "succeeded");
+    assert.equal(formatAngles, 1, "Format-only errors reuse the selected angle, not replan.");
+    assert.equal(formatAttempts, 3);
+
+    const noBasisPlan = await makeRetryPlan("依据不足", "P-4");
+    await admin.execute("UPDATE authoring_generation_jobs SET snapshot_json=JSON_SET(snapshot_json,'$.nodes[0].theoryContext',JSON_OBJECT()) WHERE id=?", [noBasisPlan.jobId]);
+    let noBasisCalls = 0;
+    globalThis.fetch = async () => {
+      noBasisCalls++;
+      return Response.json({ choices: [{ message: { content: '{"questions":[]}' } }] });
+    };
+    await runGenerationTick();
+    await admin.execute("UPDATE authoring_generation_units SET next_attempt_at=UTC_TIMESTAMP(3) WHERE job_id=?", [noBasisPlan.jobId]);
+    await runGenerationTick();
+    const noBasisFailed = (await getGenerationState(noBasisPlan.id)).job!;
+    assert.equal(noBasisFailed.failedUnits[0].failures[0].code, "insufficient_basis");
+    assert.equal(noBasisFailed.failedUnits[0].retryable, false);
+    assert.equal(noBasisCalls, 1, "No model call after discovering absent frozen evidence.");
+    await assert.rejects(startGeneration(noBasisPlan.id, actorId, true), /不能继续/);
+
+    const limitPlan = await makeRetryPlan("累计上限");
+    await admin.execute("UPDATE authoring_generation_units SET attempts=12 WHERE job_id=?", [limitPlan.jobId]);
+    assert.equal(await runGenerationTick(), false);
+    assert.equal((await getGenerationState(limitPlan.id)).job?.failedUnits[0].retryable, false);
+    await assert.rejects(startGeneration(limitPlan.id, actorId, true), /不能继续/);
+    assert.equal(noBasisCalls, 1, "Limit is checked before any model call.");
+    await admin.execute("UPDATE authoring_plans SET status='cancelled' WHERE id IN (?,?,?)", [formatPlan.id, noBasisPlan.id, limitPlan.id]);
+    await admin.execute("UPDATE authoring_generation_jobs SET status='cancelled' WHERE id IN (?,?,?)", [formatPlan.jobId, noBasisPlan.jobId, limitPlan.jobId]);
     const { terminateGeneration } = await import("../src/modules/authoring/generation/termination");
     await assert.rejects(terminateGeneration(skillPlanId, actorId), /已完成任务/);
     // Leave one successful unit queued to emulate a slow response arriving after termination.
@@ -385,6 +473,7 @@ async function main() {
     console.info("并发验证通过：两路同时执行、第三路被数据库全局容量拒绝、混合题型按槽位配额保存。");
     console.info("理论来源验证通过：有教材节点仅使用冻结来源的关联章节，排除其他教材版本；无教材节点传入标准依据，通用质量标准默认值生效。");
     console.info("排序问题修复后验证：32KB排序缓冲区及大JSON快照下，领取与1200题执行正常，不增大数据库全局排序内存。");
+    console.info("精准重试验证通过：混合请求按实际缺额题型逐题补齐、原文引用角度分析、两次零产出熔断、手动重试累计次数保留及6次精准补题边界。");
   } finally {
     globalThis.fetch = originalFetch;
     if (globalThis.__itembankMysqlPool) await globalThis.__itembankMysqlPool.end();
