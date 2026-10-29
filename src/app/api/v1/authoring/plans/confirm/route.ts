@@ -7,6 +7,7 @@ import { assertOutlineConfirmed } from "@/modules/blueprints/point-review";
 import { quotaPointSchema, quotaTotal, validateQuota } from "@/modules/authoring/generation/contracts";
 import { loadSkillPlanBasis } from "@/modules/authoring/skill-plan";
 import { isLegalPoint } from "@/modules/authoring/legal-topics";
+import { getActiveProjectIdForUpdate } from "@/modules/authoring/occupations/service";
 import { createUlid } from "@/shared/database/ulid";
 import { withTransaction } from "@/shared/database/mysql";
 
@@ -51,11 +52,8 @@ export async function POST(request: Request) {
     }
     validateQuota(data.points, data.levelCode, data.assessmentMode);
     const result = await withTransaction(async (connection) => {
-      const [projects] = await connection.execute<(RowDataPacket & { id: string })[]>(
-        "SELECT id FROM projects WHERE status = 'active' ORDER BY created_at LIMIT 2 FOR UPDATE"
-      );
-      if (projects.length !== 1) throw new Error("当前项目上下文无效，无法启动命题任务。");
-      const projectId = projects[0].id;
+      const projectId = await getActiveProjectIdForUpdate(connection);
+      if (!projectId) throw new Error("当前没有启用的业务项目，无法启动命题任务。");
       const [occupations] = await connection.execute<(RowDataPacket & { id: string; name: string })[]>(
         "SELECT id, name FROM project_occupations WHERE project_id = ? AND name = ? AND status = 'active' LIMIT 1 FOR UPDATE",
         [projectId, data.occupation]

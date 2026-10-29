@@ -3,6 +3,7 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { SkillStandardUpload, SkillWeightMatrix, SkillStructureMatrix, type ImportedSkillStandard } from "./skill-standard-upload";
 import { SkillOutlinePanel } from "./skill-outline-panel";
+import { SkillStructureEditor } from "./skill-structure-editor";
 import { ScoreRubric } from "@/components/questions/score-rubric";
 import { formatDirectionCode, type OccupationDirection } from "@/modules/authoring/occupations/directions";
 import type { TheoryWeightScope } from "@/modules/blueprints/theory-weights/standard";
@@ -1777,16 +1778,18 @@ function SkillCompilationWorkspace({
               第二步 · 操作技能考评内容结构表
             </h2>
             <p className="m-0 mt-2 text-sm text-[#6f7f96]">
-              根据第一步权重自动形成各等级内容结构。标准未明确的时间与选考规则显示待核对。
+              按职业标准权重形成内容结构，补读原文考核方式与总时长下限；选考方式和分项时间可在右侧维护。
             </p>
           </div>
-          {!importedStandard ? <button
+          {importedStandard ? <SkillStructureEditor key={profession.id} data={importedStandard} occupationId={profession.id}
+            onSaved={(data) => { setImportedStandard(data); setSkillStructureSnapshot(null); }} /> : <button
             className="rounded-lg bg-[#3f60e8] px-5 py-3 text-sm font-medium text-white shadow-[0_8px_16px_rgba(63,96,232,0.18)] hover:bg-[#3354d8]"
             onClick={() => setIsStructureOverviewOpen(true)}
+            disabled={isLoadingStandard || !skillStructureSnapshot}
             type="button"
           >
             ♢ 维护内容结构
-          </button> : null}
+          </button>}
         </div>
         {importedStandard ? <SkillStructureMatrix data={importedStandard} /> : <div className="overflow-x-auto">
           <table className="min-w-[1000px] w-full border-collapse text-left text-sm">

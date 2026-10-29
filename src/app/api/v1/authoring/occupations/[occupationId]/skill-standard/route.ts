@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { getVerifiedSession } from "@/auth";
-import { getSkillStandard, importSkillStandard, listSkillStandards } from "@/modules/blueprints/skill-standard-import";
+import { getSkillStandard, importSkillStandard, listSkillStandards, saveStandardStructure } from "@/modules/blueprints/skill-standard-import";
 import { ensureSharedOccupationStandard } from "@/modules/blueprints/shared-standard";
+import { structureEditSchema } from "@/modules/blueprints/skill-structures/standard-edit";
 
 export const runtime = "nodejs";
 
@@ -42,5 +43,18 @@ export async function POST(request: Request, { params }: { params: { occupationI
     return NextResponse.json({ data }, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: { message: error instanceof Error ? error.message : "标准识别失败。" } }, { status: 422 });
+  }
+}
+
+export async function PUT(request: Request, { params }: { params: { occupationId: string } }) {
+  const auth = await authorize();
+  if (auth.rejection) return auth.rejection;
+  try {
+    const parsed = structureEditSchema.safeParse(await request.json());
+    if (!parsed.success) return NextResponse.json({ error: { message: "请完整填写选考方式、各范围时间、考核方式和总考试时间。" } }, { status: 400 });
+    const data = await saveStandardStructure(params.occupationId, parsed.data, auth.actorId!);
+    return NextResponse.json({ data });
+  } catch (error) {
+    return NextResponse.json({ error: { message: error instanceof Error ? error.message : "内容结构保存失败。" } }, { status: 422 });
   }
 }

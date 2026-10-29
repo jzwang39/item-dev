@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { basename, extname } from "node:path";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { extractDocxText, extractPdfText } from "@/modules/documents/extraction/service";
-import { query } from "@/shared/database/mysql";
+import { query, withTransaction } from "@/shared/database/mysql";
 import { createUlid } from "@/shared/database/ulid";
-import { parseSkillStandard, skillLevels, type SkillStandardData } from "./skill-standard";
+import { parseSkillAssessmentRules, parseSkillStandard, skillLevels, type SkillStandardData, type StandardScope } from "./skill-standard";
+import { applyStructureEdit, type StructureEdit } from "./skill-structures/standard-edit";
 
 export async function listSkillStandards(occupationId: string) {
   return query<(RowDataPacket & { id: string; name: string; original_name: string })[]>(
@@ -28,7 +29,71 @@ export async function getSkillStandard(occupationId: string) {
      WHERE b.occupation_id=? AND b.blueprint_kind='theory_weight' AND b.assessment_mode='skill' LIMIT 1`, [occupationId],
   );
   const snapshot = rows[0] ? typeof rows[0].snapshot_json === "string" ? JSON.parse(rows[0].snapshot_json) : rows[0].snapshot_json : null;
-  return snapshot?.columns ? { ...snapshot, versionId: rows[0].id, versionNo: rows[0].version_no } : null;
+  if (!snapshot?.columns) return null;
+  const [structures, segments] = await Promise.all([
+    query<(RowDataPacket & { id: string; level_code: string; snapshot_json: unknown })[]>(
+      `SELECT v.id,b.level_code,v.snapshot_json FROM blueprints b JOIN blueprint_versions v ON v.id=b.current_version_id
+       JOIN project_occupations po ON po.id=b.occupation_id AND po.project_id=b.project_id AND po.status='active'
+       JOIN projects p ON p.id=b.project_id AND p.status='active'
+       WHERE b.occupation_id=? AND b.blueprint_kind='skill_structure' AND b.assessment_mode='skill'`, [occupationId]),
+    snapshot.sourceVersionId ? query<(RowDataPacket & { content_excerpt: string })[]>(
+      "SELECT content_excerpt FROM source_segments WHERE source_version_id=? ORDER BY ordinal", [snapshot.sourceVersionId],
+    ) : Promise.resolve([]),
+  ]);
+  const rules = parseSkillAssessmentRules(segments.map((segment) => segment.content_excerpt).join("\n"));
+  const decode = (value: unknown) => typeof value === "string" ? JSON.parse(value) : value;
+  const scopes = (snapshot.scopes as StandardScope[]).map((scope) => {
+    const current = structures.find((item) => item.level_code === scope.column.levelCode);
+    const stored = current ? decode(current.snapshot_json) : null;
+    // A structure from a different source must not override the current standard.
+    const matchingSource = typeof snapshot.fileObjectId === "string" && stored?.fileObjectId === snapshot.fileObjectId;
+    const saved = matchingSource ? stored?.standardScopes?.find((item: StandardScope) => item.column.key === scope.column.key) : null;
+    const base = saved ?? scope;
+    const assessmentRules = base.assessmentRules ?? rules;
+    return { ...base, assessmentRules,
+      rows: base.rows.map((row: StandardScope["rows"][number]) => ({ ...row, method: row.method ?? assessmentRules.method })) };
+  });
+  const incomplete = scopes.some((scope) => scope.rows.some((row: StandardScope["rows"][number]) => !row.selection || row.minutes === null || !row.method));
+  return { ...snapshot, scopes, warnings: incomplete ? snapshot.warnings : [],
+    versionId: rows[0].id, versionNo: rows[0].version_no,
+    structureVersions: Object.fromEntries(structures.map((item) => [item.level_code, item.id])) };
+}
+
+export async function saveStandardStructure(occupationId: string, input: StructureEdit, actorId: string) {
+  const current = await getSkillStandard(occupationId);
+  const scope = current?.scopes.find((item: StandardScope) => item.column.key === input.scopeKey);
+  if (!scope) throw new Error("当前职业标准没有该等级或方向的考评范围。");
+  const edited = applyStructureEdit(scope, input);
+  await withTransaction(async (db) => {
+    const [weights] = await db.execute<(RowDataPacket & { project_id: string; current_version_id: string })[]>(
+      `SELECT b.project_id,b.current_version_id FROM blueprints b
+       JOIN project_occupations po ON po.id=b.occupation_id AND po.project_id=b.project_id AND po.status='active'
+       JOIN projects p ON p.id=b.project_id AND p.status='active'
+       WHERE b.occupation_id=? AND b.blueprint_kind='theory_weight' AND b.assessment_mode='skill' FOR UPDATE`, [occupationId],
+    );
+    if (weights[0]?.current_version_id !== input.standardVersionId)
+      throw new Error("职业标准已更新，请刷新后重新维护内容结构。");
+    const [structures] = await db.execute<(RowDataPacket & { current_version_id: string; snapshot_json: unknown })[]>(
+      `SELECT b.current_version_id,v.snapshot_json FROM blueprints b JOIN blueprint_versions v ON v.id=b.current_version_id
+       WHERE b.project_id=? AND b.occupation_id=? AND b.blueprint_kind='skill_structure'
+       AND b.assessment_mode='skill' AND b.level_code=? FOR UPDATE`,
+      [weights[0].project_id, occupationId, scope.column.levelCode],
+    );
+    if (structures[0]?.current_version_id !== input.structureVersionId)
+      throw new Error("内容结构已被更新，请刷新后重新维护。");
+    const scopes = current.scopes.filter((item: StandardScope) => item.column.levelCode === scope.column.levelCode)
+      .map((item: StandardScope) => item.column.key === input.scopeKey ? edited : item);
+    const stored = typeof structures[0].snapshot_json === "string" ? JSON.parse(structures[0].snapshot_json) : structures[0].snapshot_json;
+    const after = { ...stored, fileObjectId: current.fileObjectId, sourceVersionId: current.sourceVersionId,
+      sourceName: current.sourceName, rows: scopes[0].rows, totalMinutes: scopes[0].totalMinutes,
+      standardScopes: scopes, maintainedBy: actorId, maintainedAt: new Date().toISOString(), configurationSource: "管理员确认" };
+    const versionNo = await publish(db, weights[0].project_id, occupationId, "skill_structure", scope.column.levelCode, after, actorId);
+    await db.execute(`INSERT INTO audit_logs(id,project_id,actor_id,action,object_type,object_id,before_json,after_json,result)
+      VALUES(?,?,?,'blueprint.skill_structure.save','blueprint_version',?,?,?,'success')`,
+    [createUlid(), weights[0].project_id, actorId, input.structureVersionId,
+      JSON.stringify(stored), JSON.stringify({ ...after, versionNo })]);
+  });
+  return getSkillStandard(occupationId);
 }
 
 export async function importSkillStandard(occupationId: string, input: { file?: File; sourceVersionId?: string; preview?: boolean }, actorId: string) {

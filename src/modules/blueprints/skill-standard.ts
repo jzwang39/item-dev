@@ -3,11 +3,37 @@ export type SkillColumn = { key: string; levelCode: string; label: string; direc
 export type StandardWeight = { name: string; weights: Record<string, number>; columnWeights: Record<string, number | null> };
 export type StandardScope = {
   column: SkillColumn; totalMinutes: number | null;
+  assessmentRules?: SkillAssessmentRules;
   rows: { code: string; name: string; score: number; selection: string | null; minutes: number | null; method: string | null }[];
+};
+export type SkillAssessmentRules = {
+  minimumMinutes: number | null;
+  method: string | null;
+  timeEvidence: string | null;
+  methodEvidence: string | null;
 };
 export type SkillStandardData = { columns: SkillColumn[]; items: StandardWeight[]; scopes: StandardScope[]; warnings: string[] };
 const labels = ["五级/初级工", "四级/中级工", "三级/高级工", "二级/技师", "一级/高级技师"];
 const cell = "(?:—|--|-|\\d+(?:\\.\\d+)?%?)";
+
+export function parseSkillAssessmentRules(input: string): SkillAssessmentRules {
+  const text = input.normalize("NFKC").replace(/\s+/g, "");
+  // Read only the official assessment sections, not training hours or theory exams.
+  const section = (title: string) => {
+    const heading = new RegExp(`1\\.9\\.\\d+${title}`).exec(text);
+    return heading ? text.slice(heading.index + heading[0].length).split(/1\.9\.\d+/)[0] : "";
+  };
+  const methodSection = section("鉴定方式");
+  const timeSection = section("鉴定时间");
+  const method = methodSection.match(/技能考核(?:主要)?(?:采用|以)([^;。]+?)(?:等方式(?:为主|进行)?|方式(?:为主|进行))/);
+  const time = timeSection.match(/技能考核时间不少于(\d+(?:\.\d+)?)(?:min|分钟)/i);
+  return {
+    minimumMinutes: time ? Number(time[1]) : null,
+    method: method ? method[1].replace(/[,，]$/, "") : null,
+    timeEvidence: time?.[0] ?? null,
+    methodEvidence: method?.[0] ?? null,
+  };
+}
 
 export function parseSkillStandard(input: string): SkillStandardData {
   let text = input.normalize("NFKC").replace(/[－–―─]/g, "—").replace(/—+/g, "—").replace(/\r/g, "\n");
@@ -65,10 +91,12 @@ export function parseSkillStandard(input: string): SkillStandardData {
     if (total !== 0 && Math.abs(total - 100) > 0.0001) throw new Error(`${column.label} ${column.direction}合计${total}%，应为100%，本次不保存。`);
   }
   if (!columns.some((column) => items.some((item) => (item.columnWeights[column.key] ?? 0) > 0))) throw new Error("技能权重全部为空，本次不保存。");
-  const scopes = columns.filter((column) => items.some((item) => (item.columnWeights[column.key] ?? 0) > 0)).map((column) => ({
+  const assessmentRules = parseSkillAssessmentRules(text);
+  const scopes: StandardScope[] = columns.filter((column) => items.some((item) => (item.columnWeights[column.key] ?? 0) > 0)).map((column) => ({
+    assessmentRules,
     column, totalMinutes: null as number | null, rows: items.map((item, index) => ({
       code: `S-${String(index + 1).padStart(3, "0")}`, name: item.name, score: item.columnWeights[column.key] ?? 0,
-      selection: null as string | null, minutes: null as number | null, method: null as string | null,
+      selection: null as string | null, minutes: null as number | null, method: assessmentRules.method,
     })).filter((row) => row.score > 0),
   }));
   // Explicit long-form structure rows are read only within the structure table:

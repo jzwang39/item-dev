@@ -3,7 +3,9 @@
 import { useEffect, useState } from "react";
 import type { SkillStandardData } from "@/modules/blueprints/skill-standard";
 
-export type ImportedSkillStandard = SkillStandardData & { sourceName: string; versionNo: number };
+export type ImportedSkillStandard = SkillStandardData & {
+  sourceName: string; versionNo: number; versionId?: string; structureVersions?: Record<string, string>;
+};
 type StandardSource = { id: string; name: string; original_name: string };
 const button = "rounded-lg bg-[#3f60e8] px-4 py-3 text-sm font-medium text-white disabled:opacity-50";
 
@@ -120,6 +122,14 @@ export function SkillStructureMatrix({ data }: { data: SkillStandardData }) {
   const direction = directions.includes(selected) ? selected : directions[0] ?? "通用";
   const scopes = data.scopes.filter((scope) => scope.column.direction === direction || scope.column.direction === "通用");
   return <div>
+    {scopes.some((scope) => scope.assessmentRules?.timeEvidence || scope.assessmentRules?.methodEvidence) ? (
+      <div className="bg-[#f2f6ff] px-6 py-3 text-sm leading-7 text-[#55729a]">
+        {Array.from(new Set(scopes.flatMap((scope) => [
+          scope.assessmentRules?.timeEvidence, scope.assessmentRules?.methodEvidence,
+        ]).filter(Boolean))).map((evidence) => <p className="m-0" key={evidence}>原文规定：{evidence}</p>)}
+        <p className="m-0">总时长下限不等于各范围考试时间；选考方式与分项时间需管理员确认。</p>
+      </div>
+    ) : null}
     {directions.length ? <div className="flex gap-2 p-5 text-sm">职业方向：{directions.map((item) => <button type="button" key={item} onClick={() => setSelected(item)} className={`rounded-lg border px-3 py-2 ${item === direction ? "bg-[#3f60e8] text-white" : "bg-white"}`}>{item}</button>)}</div> : null}
     {data.warnings.map((warning) => <p className="bg-[#f2f6ff] px-6 py-3 text-sm text-[#55729a]" key={warning}>{warning}</p>)}
     <div className="overflow-x-auto"><table className="w-full min-w-[1100px] border-collapse text-center text-sm">
@@ -130,9 +140,11 @@ export function SkillStructureMatrix({ data }: { data: SkillStandardData }) {
         {data.items.map((item) => {
           const row = scope.rows.find((entry) => entry.name === item.name);
           const value = row ? [row.selection, `${row.score}`, row.minutes, row.method][index] : "—";
-          return <td key={item.name} className="p-4">{value ?? "待核对"}</td>;
+          return <td key={item.name} className="p-4">{value === "required" ? "必考" : value === "optional" ? "选考" : value ?? "待核对"}</td>;
         })}
-        <td className="p-4">{index === 0 ? `${scope.rows.length}项` : index === 1 ? "100%" : index === 2 ? (scope.totalMinutes === null ? "待核对" : `${scope.totalMinutes}分钟`) : "—"}</td>
+        <td className="p-4">{index === 0 ? `${scope.rows.length}项` : index === 1 ? "100%" : index === 2 ? (scope.totalMinutes === null
+          ? scope.assessmentRules?.minimumMinutes ? `不少于${scope.assessmentRules.minimumMinutes}分钟（原文）` : "待核对"
+          : `${scope.totalMinutes}分钟（已配置）`) : "—"}</td>
       </tr>))}</tbody>
     </table></div>
   </div>;

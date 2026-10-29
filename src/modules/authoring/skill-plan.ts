@@ -1,5 +1,6 @@
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import type { Scope } from "./generation/contracts";
+import { parseSkillAssessmentRules, type SkillAssessmentRules } from "@/modules/blueprints/skill-standard";
 
 type Version = { id: string; versionNo: number };
 type SkillNode = RowDataPacket & {
@@ -9,11 +10,13 @@ type StructureScope = {
   column: { direction: string; levelCode: string };
   rows: Array<{ name: string; score: number; minutes?: number | null; method?: string | null; selection?: string | null }>;
   totalMinutes?: number | null;
+  assessmentRules?: SkillAssessmentRules;
 };
 export type SkillStructureBasis = {
   rows?: StructureScope["rows"];
   standardScopes?: StructureScope[];
   totalMinutes?: number | null;
+  sourceVersionId?: string;
 };
 export function decode<T>(value: unknown): T {
   return (typeof value === "string" ? JSON.parse(value) : value) as T;
@@ -72,6 +75,17 @@ export async function loadSkillPlanBasis(db: PoolConnection, occupationId: strin
   const weightTotal = weights.items.reduce((sum, row) => sum + (row.weights[level] ?? 0), 0);
   if (Math.abs(weightTotal - 100) > 0.001) throw new Error(`技能要求权重合计为${weightTotal}%，应为100%。`);
   const structure = decode<SkillStructureBasis>(rows[2].snapshot_json);
+  if (structure.sourceVersionId) {
+    const [segments] = await db.execute<(RowDataPacket & { content_excerpt: string })[]>(
+      "SELECT content_excerpt FROM source_segments WHERE source_version_id=? ORDER BY ordinal", [structure.sourceVersionId],
+    );
+    const rules = parseSkillAssessmentRules(segments.map((segment) => segment.content_excerpt).join("\n"));
+    // Enrich from the frozen source only; never substitute current administrator settings.
+    for (const scope of structure.standardScopes ?? []) {
+      scope.assessmentRules ??= rules;
+      for (const row of scope.rows) row.method ??= scope.assessmentRules.method;
+    }
+  }
   const scopes = validateSkillStructure(structure, nodes, level);
   for (const node of nodes) {
     const point = decode<{ standardText?: string; sourceStandardRequirement?: { evidence?: string }; sourceKnowledgePoint?: { evidence?: string } }>(node.requirement_json) ?? {};

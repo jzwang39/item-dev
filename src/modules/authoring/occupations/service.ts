@@ -259,7 +259,7 @@ async function getActiveProjectId(): Promise<string | null> {
   return rows[0]?.id ?? null;
 }
 
-async function getActiveProjectIdForUpdate(connection: PoolConnection): Promise<string | null> {
+export async function getActiveProjectIdForUpdate(connection: PoolConnection): Promise<string | null> {
   const [rows] = await connection.execute<ProjectRow[]>(
     `${activeOccupationProjectsSql} FOR UPDATE`
   );

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseSkillStandard } from "./skill-standard";
+import { parseSkillAssessmentRules, parseSkillStandard } from "./skill-standard";
 import { readFile } from "node:fs/promises";
 
 const five = `4.2 技能要求权重表
@@ -116,4 +116,25 @@ test("invalid totals, duplicate projects and conflicting structure reject public
   assert.throws(() => parseSkillStandard(five.replace("设备维护与保养", "轴类工件加工")), /重复/);
   assert.throws(() => parseSkillStandard(`${five}\n操作技能考评内容结构表\n五级/初级工 轴类工件加工 必考 50 80 分钟 实操`), /不一致/);
   assert.throws(() => parseSkillStandard("没有权重表"), /未找到/);
+});
+
+test("读取原文通用鉴定方式和总时长下限，不推算选考方式或分项时间", () => {
+  const prose = `1. 8 培训参考学时 五级不少于180标准学时。
+1. 9. 2 鉴定方式
+理论知识考试以笔试、机考等方式为主；技能考核主要采用现场操作、模拟操作等方式进行，主要考核技能水平；综合评审通常采取答辩。
+1. 9. 3 考评人员配比 1:5。
+1. 9. 4 鉴定时间
+理论知识考试时间不少于90 min，技能考核时间不少于60 min，综合评审时间不少于30 min。
+1. 9. 5 鉴定场所设备
+${five}`;
+  const data = parseSkillStandard(prose);
+  for (const scope of data.scopes) {
+    assert.equal(scope.assessmentRules?.minimumMinutes, 60);
+    assert.equal(scope.assessmentRules?.method, "现场操作、模拟操作");
+    assert.equal(scope.totalMinutes, null);
+    assert.ok(scope.rows.every((row) => row.method === "现场操作、模拟操作" && row.selection === null && row.minutes === null));
+  }
+  assert.deepEqual(parseSkillAssessmentRules("培训学时不少于180分钟，理论知识考试时间不少于90min。"), {
+    minimumMinutes: null, method: null, timeEvidence: null, methodEvidence: null,
+  });
 });

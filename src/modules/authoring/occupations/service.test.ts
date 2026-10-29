@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import type { Pool } from "mysql2/promise";
-import { createOccupation, listActiveOccupations, updateOccupation } from "./service";
+import type { Pool, PoolConnection } from "mysql2/promise";
+import { createOccupation, getActiveProjectIdForUpdate, listActiveOccupations, updateOccupation } from "./service";
 
 function mockDatabase(context: TestContext, businessProjectCount: number) {
   const previous = globalThis.__itembankMysqlPool;
@@ -60,3 +60,19 @@ test("多个真实业务项目仍拒绝任意选取，避免写错项目", async
   await assert.rejects(updateOccupation("occupation", { name: "修改职业", code: "EDIT" }, "admin"), /多个启用项目/);
   assert.ok(!calls.some((call) => call.sql.includes("INSERT INTO project_occupations")));
 });
+
+for (const businessProjectCount of [0, 1, 2]) {
+  test(`命题确认事务解析业务项目：${businessProjectCount}个业务项目与法规内部项目共存`, async (context) => {
+    const calls = mockDatabase(context, businessProjectCount);
+    const connection = await globalThis.__itembankMysqlPool!.getConnection() as PoolConnection;
+    if (businessProjectCount === 2) {
+      await assert.rejects(getActiveProjectIdForUpdate(connection), /多个启用项目/);
+    } else {
+      assert.equal(await getActiveProjectIdForUpdate(connection), businessProjectCount === 1 ? "business-0" : null);
+    }
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].sql, /code <> 'SYSTEM-GENERIC-LEGAL'/);
+    assert.match(calls[0].sql, /FOR UPDATE$/);
+    assert.ok(!calls.some((call) => /INSERT|UPDATE projects/.test(call.sql)));
+  });
+}
