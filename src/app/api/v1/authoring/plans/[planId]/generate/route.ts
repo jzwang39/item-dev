@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getVerifiedSession } from "@/auth";
 import { ensureGenerationWorker, getGenerationState, startGeneration } from "@/modules/authoring/generation/service";
+import { terminateGeneration } from "@/modules/authoring/generation/termination";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +29,10 @@ export async function POST(request: Request, { params }: { params: { planId: str
   try {
     const body = await request.text();
     const action = body ? (JSON.parse(body) as { action?: string }).action : undefined;
+    if (action === "terminate") {
+      const summary = await terminateGeneration(params.planId, auth.actorId!);
+      return NextResponse.json({ data: { summary, ...await getGenerationState(params.planId) } });
+    }
     if (action && action !== "retry_failed") return NextResponse.json({ error: { message: "不支持的任务操作。" } }, { status: 400 });
     const data = await startGeneration(params.planId, auth.actorId!, action === "retry_failed");
     return NextResponse.json({ data }, { status: 202 });

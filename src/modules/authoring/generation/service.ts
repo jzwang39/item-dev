@@ -12,6 +12,8 @@ import { loadSkillPlanBasis } from "../skill-plan";
 import { skillQuestionPrompt } from "./skill-prompt";
 import { qualityStandardConfigs, qualityStandardContent } from "../quality-standard";
 import { assertFrozenPlanBasis, theoryPointContext } from "./plan-basis";
+import { readGenerationActivity } from "./activity";
+import { registerGenerationRequest } from "./cancellation";
 
 function json<T>(value: T | string): T {
   return typeof value === "string" ? JSON.parse(value) as T : value;
@@ -106,8 +108,8 @@ export async function startGeneration(planId: string, actorId: string, retryFail
 }
 
 export async function getGenerationState(planId: string) {
-  const jobs = await query<(RowDataPacket & { id: string; status: string; target_count: number })[]>(
-    "SELECT id,status,target_count FROM authoring_generation_jobs WHERE plan_id=?", [planId],
+  const jobs = await query<(RowDataPacket & { id: string; status: string; target_count: number; termination_summary_json: unknown })[]>(
+    "SELECT id,status,target_count,termination_summary_json FROM authoring_generation_jobs WHERE plan_id=?", [planId],
   );
   if (!jobs[0]) return { job: null };
   const job = jobs[0];
@@ -127,10 +129,12 @@ export async function getGenerationState(planId: string) {
   );
   const generated = batches.reduce((sum, batch) => sum + Number(batch.generated_count), 0);
   const pending = batches.reduce((sum, batch) => sum + Number(batch.pending), 0);
-  const status = generated === Number(job.target_count) ? "succeeded" : pending ? job.status === "queued" ? "queued" : "running" : "partial";
+  const status = job.status === "cancelled" ? "cancelled" : generated === Number(job.target_count) ? "succeeded" : pending ? job.status === "queued" ? "queued" : "running" : "partial";
   return {
     job: {
       id: job.id, status, target: Number(job.target_count), generated,
+      activity: await readGenerationActivity(job.id),
+      terminationSummary: job.termination_summary_json ? json(job.termination_summary_json) : null,
       totalBatches: batches.length,
       completedBatches: batches.filter((batch) => Number(batch.generated_count) === Number(batch.target)).length,
       currentBatch: batches.find((batch) => Number(batch.running))?.ordinal ?? batches.find((batch) => Number(batch.pending))?.ordinal ?? null,
@@ -163,8 +167,10 @@ async function claimUnit(): Promise<Unit | null> {
       "SELECT COUNT(*) AS count FROM authoring_generation_units WHERE status='running'",
     );
     if (Number(running[0].count) >= GENERATION_CONCURRENCY) return null;
-    const [rows] = await db.execute<Unit[]>(
-      `SELECT u.*,j.snapshot_json,j.plan_id,j.created_by FROM authoring_generation_units u
+    // Never include snapshot JSON in filesort: a single large snapshot can
+    // exceed MySQL's sort buffer even with LIMIT 1.
+    const [rows] = await db.execute<(RowDataPacket & { id: string; job_id: string })[]>(
+      `SELECT u.id,u.job_id FROM authoring_generation_units u
        JOIN authoring_generation_batches b ON b.id=u.batch_id
        JOIN authoring_generation_jobs j ON j.id=u.job_id
        JOIN authoring_plans p ON p.id=j.plan_id AND p.status='confirmed'
@@ -172,7 +178,14 @@ async function claimUnit(): Promise<Unit | null> {
        ORDER BY j.created_at,b.ordinal,u.ordinal LIMIT 1 FOR UPDATE SKIP LOCKED`,
     );
     if (!rows[0]) return null;
-    const unit = rows[0];
+    const [units] = await db.execute<Unit[]>(
+      `SELECT u.id,u.job_id,u.batch_id,u.point_code,u.question_type,u.attempts,
+              j.snapshot_json,j.plan_id,j.created_by
+       FROM authoring_generation_units u JOIN authoring_generation_jobs j ON j.id=u.job_id
+       WHERE u.id=? AND j.id=? FOR UPDATE`, [rows[0].id, rows[0].job_id],
+    );
+    const unit = units[0];
+    if (!unit) throw new Error("领取的命题请求或关联任务不存在。");
     unit.lease_token = createUlid();
     unit.attempts = Number(unit.attempts) + 1;
     await db.execute("UPDATE authoring_generation_units SET status='running',attempts=?,lease_token=?,lease_until=DATE_ADD(UTC_TIMESTAMP(3),INTERVAL 180 SECOND) WHERE id=?",
@@ -185,7 +198,7 @@ async function refreshJob(db: PoolConnection, jobId: string) {
   const [counts] = await db.execute<(RowDataPacket & { pending: number; failed: number })[]>(
     "SELECT SUM(status IN ('queued','running')) AS pending,SUM(status='failed') AS failed FROM authoring_generation_units WHERE job_id=?", [jobId],
   );
-  await db.execute("UPDATE authoring_generation_jobs SET status=? WHERE id=?",
+  await db.execute("UPDATE authoring_generation_jobs SET status=? WHERE id=? AND status<>'cancelled'",
     [Number(counts[0].pending) ? "running" : Number(counts[0].failed) ? "partial" : "succeeded", jobId]);
 }
 
@@ -195,7 +208,8 @@ async function saveOutput(unit: Unit, questions: GeneratedQuestion[], errorMessa
     // Claiming and saving use the same leading lock; network calls stay outside
     // these short transactions so both model requests still run in parallel.
     await db.execute("SELECT id FROM authoring_generation_capacity WHERE id=1 FOR UPDATE");
-    await db.execute("SELECT id FROM authoring_generation_jobs WHERE id=? FOR UPDATE", [unit.job_id]);
+    const [jobs] = await db.execute<(RowDataPacket & { status: string })[]>("SELECT status FROM authoring_generation_jobs WHERE id=? FOR UPDATE", [unit.job_id]);
+    if (!jobs[0] || jobs[0].status === "cancelled") return;
     const [leases] = await db.execute<(RowDataPacket & { lease_token: string; status: string })[]>(
       "SELECT lease_token,status FROM authoring_generation_units WHERE id=? FOR UPDATE", [unit.id],
     );
@@ -271,7 +285,8 @@ function endpoint(model: Snapshot["model"]) {
   return { url: url.toString(), anthropic };
 }
 
-async function requestQuestions(unit: Unit) {
+async function requestQuestions(unit: Unit, cancellation: AbortSignal) {
+  cancellation.throwIfAborted();
   const snapshot = json<Snapshot>(unit.snapshot_json);
   const connection = await getSavedModelConnection();
   if (!connection || connection.provider !== snapshot.model.provider || connection.baseUrl !== snapshot.model.baseUrl) {
@@ -333,7 +348,7 @@ async function requestQuestions(unit: Unit) {
           ? { model: snapshot.model.model, max_tokens: 8192, system: instruction, messages: [{ role: "user", content: prompt }] }
           : { model: snapshot.model.model, temperature: unit.attempts > 1 ? 0.7 : 0.5, max_tokens: 8192, response_format: { type: "json_object" },
             messages: [{ role: "system", content: instruction }, { role: "user", content: prompt }] }),
-        signal: AbortSignal.timeout(90000),
+        signal: AbortSignal.any([cancellation, AbortSignal.timeout(90000)]),
       });
       if (!response.ok) {
         if (response.status === 429) {
@@ -351,6 +366,7 @@ async function requestQuestions(unit: Unit) {
       return parsed.valid;
     } catch (error) {
       last = error;
+      cancellation.throwIfAborted();
       if (error instanceof NonRetryableError) throw error;
       if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
     }
@@ -362,15 +378,20 @@ class NonRetryableError extends Error {}
 export async function runGenerationTick() {
   const unit = await claimUnit();
   if (!unit) return false;
+  const request = registerGenerationRequest(unit.id, unit.job_id);
   const heartbeat = setInterval(() => {
-    void query("UPDATE authoring_generation_units SET lease_until=DATE_ADD(UTC_TIMESTAMP(3),INTERVAL 180 SECOND) WHERE id=? AND lease_token=? AND status='running'",
-      [unit.id, unit.lease_token]).catch(() => undefined);
+    void query<(RowDataPacket & { id: string })[]>("SELECT id FROM authoring_generation_units WHERE id=? AND lease_token=? AND status='running'",
+      [unit.id, unit.lease_token]).then(async (rows) => {
+        if (!rows.length) request.controller.abort(new Error("命题请求已终止或租约已失效。"));
+        else await query("UPDATE authoring_generation_units SET lease_until=DATE_ADD(UTC_TIMESTAMP(3),INTERVAL 180 SECOND) WHERE id=? AND lease_token=? AND status='running'",
+          [unit.id, unit.lease_token]);
+      }).catch(() => undefined);
   }, 30000);
   heartbeat.unref();
   try {
     let output: GeneratedQuestion[] = [];
     let message = "";
-    try { output = await requestQuestions(unit); }
+    try { output = await requestQuestions(unit, request.controller.signal); }
     catch (error) { message = error instanceof Error ? error.message : "模型请求失败"; }
     try {
       await saveOutput(unit, output, message);
@@ -388,6 +409,7 @@ export async function runGenerationTick() {
     }
   } finally {
     clearInterval(heartbeat);
+    request.release();
   }
   return true;
 }

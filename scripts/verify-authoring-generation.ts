@@ -17,6 +17,8 @@ async function main() {
     "blueprint_nodes", "blueprint_version_sources", "system_settings", "model_connection_settings",
     "authoring_plans", "questions", "question_versions", "question_options",
     "question_assessment_points", "question_quality_checks", "question_status_events", "audit_logs", "outline_point_reviews",
+    "question_source_refs", "question_version_tags", "review_assignments", "review_records",
+    "question_review_confirmations", "paper_items", "question_revision_links",
   ];
   const jobTables = ["authoring_generation_jobs", "authoring_generation_batches", "authoring_generation_units", "authoring_generation_slots", "authoring_generation_capacity"];
   const tables = [...baseTables, ...jobTables];
@@ -34,6 +36,7 @@ async function main() {
     await rawQuery(migration);
     await rawQuery(rewrite(await readFile(join(process.cwd(), "database/migrations/0010_authoring_mixed_requests.sql"), "utf8")));
     await rawQuery(rewrite(await readFile(join(process.cwd(), "database/migrations/0017_skill_question_generation.sql"), "utf8")));
+    await rawQuery(rewrite(await readFile(join(process.cwd(), "database/migrations/0019_authoring_generation_termination.sql"), "utf8")));
     const execute = admin.execute.bind(admin);
     admin.execute = ((sql: string, values?: Parameters<typeof admin.execute>[1]) => execute(rewrite(sql), values)) as typeof admin.execute;
     process.env.AUTHORING_GENERATION_WORKER_DISABLED = "1";
@@ -41,6 +44,7 @@ async function main() {
     const pool = getPool();
     pool.on("connection", (connection) => {
       connection.query("SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'ONLY_FULL_GROUP_BY')");
+      connection.query("SET SESSION sort_buffer_size=32768");
     });
     const poolExecute = pool.execute.bind(pool);
     pool.execute = ((sql: string, values?: Parameters<typeof pool.execute>[1]) => poolExecute(rewrite(sql), values)) as typeof pool.execute;
@@ -151,6 +155,22 @@ async function main() {
     assert.equal(started.job?.totalBatches, 13);
     const repeated = await startGeneration(planId, actorId);
     assert.equal(repeated.jobId, started.jobId);
+    // Reproduce production's low sort-buffer failure using disposable data only.
+    await admin.execute("UPDATE authoring_generation_jobs SET snapshot_json=JSON_SET(snapshot_json,'$.sortRegressionPadding',?) WHERE id=?",
+      ["x".repeat(300_000), started.jobId]);
+    await admin.execute("SET SESSION sort_buffer_size=32768");
+    await assert.rejects(admin.execute(
+      `SELECT u.*,j.snapshot_json,j.plan_id,j.created_by FROM authoring_generation_units u
+       JOIN authoring_generation_batches b ON b.id=u.batch_id
+       JOIN authoring_generation_jobs j ON j.id=u.job_id
+       JOIN authoring_plans p ON p.id=j.plan_id AND p.status='confirmed'
+       WHERE u.status='queued' AND u.next_attempt_at<=UTC_TIMESTAMP(3) AND j.status IN ('queued','running')
+       ORDER BY j.created_at,b.ordinal,u.ordinal LIMIT 1 FOR UPDATE SKIP LOCKED`,
+    ), (error: unknown) => {
+      assert.equal((error as { code: string }).code, "ER_OUT_OF_SORTMEMORY");
+      return true;
+    });
+    console.info("排序问题修复前复现：32KB排序缓冲区、大JSON快照，旧领取查询报ER_OUT_OF_SORTMEMORY。");
     // An old worker returns after its lease was recovered by a new worker.
     // Only the new token may commit; the delayed response must be ignored.
     holdNext = true;
@@ -301,11 +321,70 @@ async function main() {
     const savedSource = typeof skillSaved[0].source_snapshot_json === "string" ? JSON.parse(skillSaved[0].source_snapshot_json) : skillSaved[0].source_snapshot_json;
     assert.equal(savedSource.structureVersionId, skillVersions.structure.id);
     assert.equal(savedSource.skillContext.point.sourceStandardRequirement.nodeKind, "skill_requirement");
+    const { terminateGeneration } = await import("../src/modules/authoring/generation/termination");
+    await assert.rejects(terminateGeneration(skillPlanId, actorId), /已完成任务/);
+    // Leave one successful unit queued to emulate a slow response arriving after termination.
+    await admin.execute("UPDATE authoring_generation_jobs SET status='running' WHERE id=?", [started.jobId]);
+    await admin.execute(`UPDATE authoring_generation_units SET status='queued',next_attempt_at=UTC_TIMESTAMP(3)
+      WHERE job_id=? AND point_code='P-1'`, [started.jobId]);
+    const [cancelUnits] = await admin.execute<(RowDataPacket & { id: string })[]>(
+      "SELECT id FROM authoring_generation_units WHERE job_id=? AND point_code='P-1' LIMIT 1", [started.jobId],
+    );
+    await admin.execute("INSERT INTO authoring_generation_slots(id,job_id,unit_id,ordinal,question_type) VALUES(?,?,?,1201,'single')",
+      [createUlid(), started.jobId, cancelUnits[0].id]);
+    const protectedQuestion = (await getPlanQuestionRows(planId))[0];
+    const [protectedVersions] = await admin.execute<(RowDataPacket & { current_version_id: string })[]>(
+      "SELECT current_version_id FROM questions WHERE id=?", [protectedQuestion.id],
+    );
+    await admin.execute("INSERT INTO question_review_confirmations(question_version_id,confirmed_by,opinion) VALUES(?,?,'受保护试题')",
+      [protectedVersions[0].current_version_id, actorId]);
+    let releaseCancelled = () => {};
+    let enteredCancelled = () => {};
+    const cancelledEntered = new Promise<void>((resolve) => { enteredCancelled = resolve; });
+    const cancelledRelease = new Promise<void>((resolve) => { releaseCancelled = resolve; });
+    let cancelledSignal: AbortSignal | null = null;
+    globalThis.fetch = async (_, init) => {
+      cancelledSignal = init?.signal ?? null;
+      enteredCancelled();
+      await cancelledRelease;
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ questions: [] }) } }] });
+    };
+    const lateResponse = runGenerationTick();
+    await cancelledEntered;
+    const termination = await terminateGeneration(planId, actorId);
+    assert.deepEqual(termination, { deletedQuestions: 1199, preservedQuestions: 1 });
+    assert.ok((cancelledSignal as AbortSignal | null)?.aborted, "In-flight local request is aborted.");
+    releaseCancelled();
+    await lateResponse;
+    assert.deepEqual(await terminateGeneration(planId, actorId), termination, "Termination is idempotent.");
+    assert.equal((await getGenerationState(planId)).job?.status, "cancelled");
+    await assert.rejects(startGeneration(planId, actorId, true), /未确认/);
+    assert.equal(await runGenerationTick(), false, "Cancelled task is never claimed again.");
+    assert.deepEqual((await getPlanQuestionRows(planId)).map((question) => question.id), [protectedQuestion.id]);
+    for (const table of ["authoring_generation_slots", "authoring_generation_units", "authoring_generation_batches"]) {
+      const [remaining] = await admin.execute<(RowDataPacket & { count: number })[]>(`SELECT COUNT(*) AS count FROM ${table} WHERE job_id=?`, [started.jobId]);
+      assert.equal(remaining[0].count, 0);
+    }
+    for (const table of ["question_options", "question_assessment_points", "question_quality_checks", "question_versions"]) {
+      const key = table === "question_versions" ? "id" : "question_version_id";
+      const [orphans] = await admin.execute<(RowDataPacket & { count: number })[]>(
+        table === "question_versions"
+          ? "SELECT COUNT(*) AS count FROM question_versions WHERE question_id NOT IN (SELECT id FROM questions)"
+          : `SELECT COUNT(*) AS count FROM ${table} WHERE ${key} NOT IN (SELECT id FROM question_versions)`,
+      );
+      assert.equal(orphans[0].count, 0, `${table} has no leftover data.`);
+    }
+    // Skill pending-review drafts without actual review records are also removable.
+    await admin.execute("UPDATE authoring_generation_jobs SET status='partial' WHERE id=?", [skillStarted.jobId]);
+    assert.deepEqual(await terminateGeneration(skillPlanId, actorId), { deletedQuestions: 6, preservedQuestions: 0 });
+    assert.equal((await getPlanQuestionRows(skillPlanId)).length, 0);
+    console.info("终止验证通过：1199题草稿及关联数据清理、1题受保护数据保留、实操草稿清理、撤销请求、迟到结果拦截、幂等终止及禁止再次生成。");
     console.info("操作技能隔离验证通过：三个工作要求层级、仅已确认细目表可执行、内容结构及方向校验、实操配额6题、缺额补齐、重复启动幂等、评分标准保存、待审核状态和来源冻结。");
     console.info("隔离验证通过：1200题/13批、部分保存、失败后继续、仅补失败4题、重复启动幂等、过期租约恢复、旧令牌迟到结果拦截、1200个唯一题目。");
     console.info("成果读取验证通过：ONLY_FULL_GROUP_BY、空计划、执行中草稿、多考评点关联、历史版本隔离、无考评点关联。");
     console.info("并发验证通过：两路同时执行、第三路被数据库全局容量拒绝、混合题型按槽位配额保存。");
     console.info("理论来源验证通过：有教材节点仅使用冻结来源的关联章节，排除其他教材版本；无教材节点传入标准依据，通用质量标准默认值生效。");
+    console.info("排序问题修复后验证：32KB排序缓冲区及大JSON快照下，领取与1200题执行正常，不增大数据库全局排序内存。");
   } finally {
     globalThis.fetch = originalFetch;
     if (globalThis.__itembankMysqlPool) await globalThis.__itembankMysqlPool.end();

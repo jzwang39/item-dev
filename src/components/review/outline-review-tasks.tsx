@@ -23,6 +23,7 @@ export function OutlineReviewTasks({ role }: Readonly<{ role: "admin" | "expert"
   const [decision, setDecision] = useState("approve");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
+  const [exportingId, setExportingId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [experts, setExperts] = useState<Array<{ id: string; name: string }>>([]);
   const [expertId, setExpertId] = useState("");
@@ -54,6 +55,31 @@ export function OutlineReviewTasks({ role }: Readonly<{ role: "admin" | "expert"
     } catch (error) { setNotice(error instanceof Error ? error.message : "操作失败。"); }
     finally { setBusy(false); }
   };
+  const exportOutline = async (id: string) => {
+    setExportingId(id);
+    setNotice("");
+    try {
+      const response = await fetch(`/api/v1/review/outlines/export?versionId=${encodeURIComponent(id)}`, {
+        cache: "no-store", signal: AbortSignal.timeout(30000),
+      });
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error?.message ?? "细目表导出失败。");
+      }
+      const blob = await response.blob();
+      const encoded = response.headers.get("Content-Disposition")?.match(/filename\*=UTF-8''(.+)$/)?.[1];
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = encoded ? decodeURIComponent(encoded) : "评价要素细目表.xlsx";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      setNotice(error instanceof Error && error.name === "TimeoutError" ? "导出超时，请重试。" : error instanceof Error ? error.message : "细目表导出失败。");
+    } finally { setExportingId(null); }
+  };
   const versions = [...new Set(points.map((point) => point.versionId))].map((id) => {
     const rows = points.filter((point) => point.versionId === id);
     return { ...rows[0], rows, assigned: rows.some((point) => point.expertId) };
@@ -82,6 +108,7 @@ export function OutlineReviewTasks({ role }: Readonly<{ role: "admin" | "expert"
                 {role === "admin" ? <>
                   <button className={button} disabled={busy || version.assigned || !version.rows.some((point) => ["pending", "returned"].includes(point.status))} onClick={() => { if (window.confirm("按版本批量同意全部未通过考评点，进入待管理员确认？")) void act(version.versionId, "approve"); }}>全部审核通过</button>
                   <button className={button} disabled={busy || !version.rows.some((point) => point.status === "awaiting_confirmation") || version.rows.some((point) => !["awaiting_confirmation", "confirmed"].includes(point.status))} onClick={() => { if (window.confirm("确认本版本全部考评点，允许用于后续出题？")) void act(version.versionId, "confirm"); }}>确认</button>
+                  <button className={button} disabled={busy || exportingId !== null || !version.rows.every((point) => point.status === "confirmed")} title={version.rows.every((point) => point.status === "confirmed") ? "导出本版本细目表 Excel" : "全部考评点确认后方可导出"} onClick={() => void exportOutline(version.versionId)}>{exportingId === version.versionId ? "导出中..." : "导出"}</button>
                 </> : null}
               </div></td>
             </tr>

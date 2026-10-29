@@ -4701,17 +4701,25 @@ type HistoryPlan = {
   created_at: string;
   updated_at: string;
   question_count: number;
-  generation_status?: "queued" | "running" | "partial" | "succeeded" | null;
+  generation_status?: "queued" | "running" | "partial" | "succeeded" | "cancelled" | null;
 };
 
 type QuestionGenerationJob = {
   id: string;
-  status: "queued" | "running" | "partial" | "succeeded";
+  status: "queued" | "running" | "partial" | "succeeded" | "cancelled";
+  terminationSummary?: { deletedQuestions: number; preservedQuestions: number } | null;
   target: number;
   generated: number;
   totalBatches: number;
   completedBatches: number;
   currentBatch: number | null;
+  activity?: {
+    state: "running" | "queued" | "retry_wait" | "rate_limited" | "recovering" | "disabled" | "idle";
+    queued: number;
+    running: number;
+    globalRunning: number;
+    recentErrors: Array<{ code: string; attempts: number; error: string }>;
+  };
   failedUnits: Array<{ id: string; code: string; type: string; remaining: number; error: string }>;
 };
 
@@ -4776,8 +4784,10 @@ function AuthoringTaskPanel() {
   const [executionError, setExecutionError] = useState("");
   const [generationJob, setGenerationJob] = useState<QuestionGenerationJob | null>(null);
   const [progressError, setProgressError] = useState("");
+  const [terminatingPlanId, setTerminatingPlanId] = useState<string | null>(null);
   const [sessionExpired, setSessionExpired] = useState(false);
   const manualCheckById = useRef(new Map<string, string>());
+  const terminatedPlans = useRef(new Set<string>());
   const generationActive = generationJob?.status === "queued" || generationJob?.status === "running";
   const [isQualityStandardOpen, setIsQualityStandardOpen] = useState(false);
   const [qualityStandardKind, setQualityStandardKind] = useState<"theory" | "skill">("theory");
@@ -4789,11 +4799,11 @@ function AuthoringTaskPanel() {
     useState(false);
   const [isSavingQualityStandard, setIsSavingQualityStandard] = useState(false);
   const getHistoryStage = (plan: HistoryPlan) => {
+    if (plan.generation_status === "cancelled" || plan.status === "cancelled") return "已终止";
     if (plan.generation_status === "queued" || plan.generation_status === "running") return "生成中";
     if (plan.generation_status === "partial") return "部分失败";
     if (plan.generation_status === "succeeded") return "已完成";
     if (plan.question_count > 0) return "已完成";
-    if (plan.status === "cancelled") return "已暂停";
     return "待执行";
   };
   const rows = taskHistory.filter(
@@ -4955,6 +4965,7 @@ function AuthoringTaskPanel() {
           return;
         }
         if (!response.ok || !payload.data) throw new Error(payload.error?.message ?? "生成进度读取失败。");
+        if (terminatedPlans.current.has(confirmedPlanId)) return;
         setSessionExpired(false);
         const data = payload.data;
         setProgressError("");
@@ -4976,6 +4987,37 @@ function AuthoringTaskPanel() {
     void poll();
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [confirmedPlanId, generationJob?.status]);
+  const terminateTask = async (planId: string) => {
+    if (terminatingPlanId || !window.confirm("确认终止命题任务？\n将停止后续生成，清理本任务未审定的原始草稿及批次数据，无法恢复或重试。\n已审核、修订、确认、入库或用于试卷的试题保留，终止操作会留痕。")) return;
+    setTerminatingPlanId(planId);
+    setExecutionError("");
+    try {
+      const response = await fetch(`/api/v1/authoring/plans/${planId}/generate`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "terminate" }),
+      });
+      const payload = await response.json() as {
+        data?: { job: QuestionGenerationJob; summary: { deletedQuestions: number; preservedQuestions: number } };
+        error?: { message?: string };
+      };
+      if (!response.ok || !payload.data) throw new Error(payload.error?.message ?? "任务终止失败。");
+      terminatedPlans.current.add(planId);
+      if (confirmedPlanId === planId) {
+        setGenerationJob(payload.data.job);
+        const results = await fetch(`/api/v1/authoring/plans/${planId}`, { cache: "no-store" });
+        if (results.ok) {
+          const data = await results.json() as { data?: { questions: GeneratedQuestion[] } };
+          setExecutionQuestions(data.data?.questions ?? []);
+        }
+        manualCheckById.current.clear();
+        setManualChecks([]);
+      }
+      setNotice(`任务已终止：清理 ${payload.data.summary.deletedQuestions} 道草稿，保留 ${payload.data.summary.preservedQuestions} 道已进入业务流程的试题。`);
+      await loadTaskHistory();
+    } catch (error) {
+      setExecutionError(error instanceof Error ? error.message : "任务终止失败。");
+    } finally { setTerminatingPlanId(null); }
+  };
   const trackExecution = (planId: string | null) => {
     const url = new URL(window.location.href);
     if (planId) url.searchParams.set("executionPlan", planId);
@@ -5738,14 +5780,23 @@ function AuthoringTaskPanel() {
               </p>
             </div>
             <span className="rounded-xl bg-[#fff4df] px-4 py-2 text-sm text-[#a96f13]">
-              {generationActive ? "后台生成中" : generationJob?.status === "partial" ? "尚未完成" : "待人工核查"}
+              {generationJob?.status === "cancelled" ? "已终止" : generationActive ? "后台生成中" : generationJob?.status === "partial" ? "尚未完成" : "待人工核查"}
             </span>
           </div>
           {generationJob ? (
             <div className="mt-6 rounded-xl border border-[#d6e3ff] bg-[#f5f8ff] p-5">
               <div className="flex flex-wrap justify-between gap-3 text-[#385578]">
                 <span>
-                  {generationJob.status === "succeeded" ? "全部试题已生成" : generationJob.status === "partial" ? "部分请求失败，已保留成功草稿" : "正在自动分批生成试题"}
+                  {generationJob.status === "cancelled" ? "任务已终止，不再生成试题" : generationJob.status === "succeeded" ? "全部试题已生成" : generationJob.status === "partial" ? "部分请求失败，已保留成功草稿"
+                    : generationJob.activity ? {
+                      running: "正在执行请求（准备资料、调用模型或保存试题）",
+                      queued: "等待后台领取（全局最多2路请求，较早任务优先）",
+                      retry_wait: "等待下次执行时间，尚未发起请求",
+                      rate_limited: "模型限流，等待冷却后继续",
+                      recovering: "请求租约已过期，等待后台恢复",
+                      disabled: "后台工作器已禁用，请检查服务器配置",
+                      idle: "正在汇总生成状态",
+                    }[generationJob.activity.state] : "正在自动分批生成试题"}
                 </span>
                 <strong>已生成 {generationJob.generated} / {generationJob.target} 道 · {Math.floor(generationJob.generated * 100 / Math.max(1, generationJob.target))}%</strong>
               </div>
@@ -5757,8 +5808,25 @@ function AuthoringTaskPanel() {
               </div>
               <p className="mb-0 mt-3 text-sm text-[#6980a4]">
                 {generationJob.currentBatch ? `当前第 ${generationJob.currentBatch} / ${generationJob.totalBatches} 批；` : ""}
-                已完成 {generationJob.completedBatches} / {generationJob.totalBatches} 批。每批最多100题，每点合并题型生成，最多2路并发；刷新或关闭页面不会中断。
+                {generationJob.status === "cancelled" ? "任务批次和请求已清理。" : `已完成 ${generationJob.completedBatches} / ${generationJob.totalBatches} 批。每批最多100题，每点合并题型生成，最多2路并发；刷新或关闭页面不会中断。`}
               </p>
+              {generationJob.status === "cancelled" && generationJob.terminationSummary ? (
+                <p className="mb-0 mt-3 text-sm text-[#6980a4]">已清理 {generationJob.terminationSummary.deletedQuestions} 道草稿；保留 {generationJob.terminationSummary.preservedQuestions} 道受保护试题。终止记录已留存。</p>
+              ) : null}
+              {(generationActive || generationJob.status === "partial") && confirmedPlanId ? (
+                <button type="button" className="mt-3 rounded-lg border border-[#f0c8ce] px-4 py-2 text-[#cf4d58] disabled:opacity-50"
+                  disabled={Boolean(terminatingPlanId)} onClick={() => void terminateTask(confirmedPlanId)}>
+                  {terminatingPlanId === confirmedPlanId ? "终止清理中..." : "终止任务"}
+                </button>
+              ) : null}
+              {generationActive && generationJob.activity ? (
+                <div className="mt-3 text-sm text-[#6980a4]">
+                  <p className="m-0">本任务：执行中 {generationJob.activity.running} 个请求，排队 {generationJob.activity.queued} 个请求；全局执行中 {generationJob.activity.globalRunning} / 2 个请求。</p>
+                  {generationJob.activity.recentErrors.map((error, index) => (
+                    <p className="mb-0 mt-2 text-[#a6711f]" key={`${error.code}-${index}`}>最近错误 · {error.code} · 第{error.attempts}次尝试：{error.error}</p>
+                  ))}
+                </div>
+              ) : null}
               {generationJob.failedUnits.length ? (
                 <div className="mt-4 text-sm text-[#a6711f]">
                   <details>
@@ -6027,9 +6095,11 @@ function AuthoringTaskPanel() {
                       </button>
                       <button
                         className="ml-3 rounded-xl border border-[#f0c8ce] bg-white px-4 py-2.5 text-sm font-medium text-[#cf4d58]"
+                        disabled={Boolean(terminatingPlanId) || !["queued", "running", "partial"].includes(row.generation_status ?? "")}
+                        onClick={() => void terminateTask(row.id)}
                         type="button"
                       >
-                        删除
+                        {terminatingPlanId === row.id ? "终止清理中..." : row.generation_status === "cancelled" ? "已终止" : "终止任务"}
                       </button>
                     </td>
                   </tr>
