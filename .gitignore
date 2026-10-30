@@ -2,7 +2,8 @@
 node_modules/
 .next/
 out/
-docs/
+docs/*
+!docs/业务数据清理工具.md
 .data/
 *.tsbuildinfo
 
