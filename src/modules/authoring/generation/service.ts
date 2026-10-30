@@ -10,6 +10,7 @@ import { isLegalPoint } from "@/modules/authoring/legal-topics";
 import { buildBatches, GENERATION_CONCURRENCY, parseQuestions, questionTypes, quotaTotal, stemHash, validateQuota, type QuotaPoint, type Scope, type Snapshot, type QuestionType } from "./contracts";
 import { loadSkillPlanBasis } from "../skill-plan";
 import { skillQuestionPrompt } from "./skill-prompt";
+import { skillStemQualityError } from "./skill-stem-quality";
 import { readSkillQualityStandard, type AppliedSkillQualityStandard } from "./skill-quality-standard";
 import { qualityStandardConfigs, qualityStandardContent } from "../quality-standard";
 import { assertFrozenPlanBasis, theoryPointContext } from "./plan-basis";
@@ -277,6 +278,8 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
     let saved = 0;
     for (const question of questions) {
       if (!slots.length) break;
+      const stemError = question.questionType === "practical" ? skillStemQualityError(question.stem, snapshot.scope.occupation) : undefined;
+      if (stemError) { failures.push(validationFailure(stemError)); continue; }
       const hash = stemHash(question.stem);
       const [duplicates] = await db.execute<RowDataPacket[]>("SELECT id FROM authoring_generation_slots WHERE job_id=? AND stem_hash=? LIMIT 1", [unit.job_id, hash]);
       if (duplicates.length) { failures.push({ code: "duplicate", message: "题干与本任务已有题重复。" }); continue; }
@@ -453,7 +456,7 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
   }
   const content = await callGenerationModel(snapshot, connection.apiKey, { instruction, prompt }, cancellation);
   let parsed: ReturnType<typeof parseQuestions>;
-  try { parsed = parseQuestions(content, node.code, snapshot.scope.assessmentMode === "操作技能" ? "practical" : state.targeted ? requested[0].question_type : unit.question_type); }
+  try { parsed = parseQuestions(content, node.code, snapshot.scope.assessmentMode === "操作技能" ? "practical" : state.targeted ? requested[0].question_type : unit.question_type, snapshot.scope.occupation); }
   catch (error) { throw new GenerationFailure("invalid_json", error instanceof Error ? error.message : "试题 JSON 无效。"); }
   const failures = parsed.invalidReasons.map(validationFailure);
   if (!parsed.valid.length && !failures.length) failures.push({ code: "invalid_content", message: "模型未返回试题，新增有效题为0。" });

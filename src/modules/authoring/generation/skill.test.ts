@@ -4,6 +4,7 @@ import { buildBatches, parseQuestions, validateQuota, type Snapshot } from "./co
 import { practicalQuota } from "./quota";
 import { skillQuestionPrompt } from "./skill-prompt";
 import { validateSkillStructure } from "../skill-plan";
+import { keepSelectedAngle, retryState, validationFailure } from "./retry-policy";
 
 const point = { code: "D1-A-A-001", name: "募捐宣传资料准备", single: 0, multiple: 0, judgement: 0, practical: 1, total: 1 };
 const question = {
@@ -15,6 +16,26 @@ const question = {
     { item: "材料整理", score: 60, standard: "分类清晰，宣传材料完整，提交成果可使用。" },
   ] },
 };
+test("第9条硬校验拒绝身份和等级铺垫，保留同批合规题，不自动改写题干", () => {
+  for (const prefix of [
+    "作为劝募员，", "作为劝募员5级操作技能，", "作为劝募员５级操作技能的评估者，",
+    "作为劝募员四级/中级工，", "作为一名劝募员，", "身为劝募员，",
+    "你是一名劝募员，", "作为 劝 募 员，", "作为\u200b劝募员，",
+  ]) {
+    const result = parseQuestions(JSON.stringify({ questions: [{ ...question, stem: prefix + question.stem }, question] }), point.code, "practical", "劝募员");
+    assert.equal(result.valid.length, 1, prefix);
+    assert.equal(result.valid[0].stem, question.stem);
+    assert.match(result.invalidReasons[0], /质量标准第9条/);
+    assert.equal(validationFailure(result.invalidReasons[0]).code, "invalid_identity");
+  }
+  const other = parseQuestions(JSON.stringify({ questions: [{ ...question, stem: "作为养老护理员四级，" + question.stem }] }), point.code, "practical", "养老护理员");
+  assert.equal(other.valid.length, 0);
+  for (const stem of ["根据劝募员技能要求，" + question.stem, "将清单作为资料核对依据，" + question.stem]) {
+    assert.equal(parseQuestions(JSON.stringify({ questions: [{ ...question, stem }] }), point.code, "practical", "劝募员").valid.length, 1);
+  }
+  const state = { ...retryState(null), selectedAngle: { angle: "归档步骤", sourceId: "a", quote: "归档核对资料" }, failures: [validationFailure("题干出现身份铺垫")] };
+  assert.equal(keepSelectedAngle(state), true, "Identity errors correct wording without wasting the selected knowledge angle.");
+});
 test("操作技能默认每点1题，明确题量覆盖默认，不套用理论题型", () => {
   assert.equal(practicalQuota("生成操作技能试题", { single: 0, multiple: 0, judgement: 0 }).practical, 1);
   assert.equal(practicalQuota("每个考评点至少2道题", { single: 0, multiple: 0, judgement: 0, practical: 6 }).practical, 2);

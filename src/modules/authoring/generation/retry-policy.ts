@@ -4,7 +4,7 @@ import type { GeneratedQuestion, QuestionType } from "./contracts";
 export const MAX_TOTAL_ATTEMPTS = 12;
 export const MAX_TARGETED_ATTEMPTS = 6;
 export const MAX_ZERO_OUTPUTS = 2;
-export type FailureCode = "duplicate" | "invalid_json" | "invalid_type" | "invalid_options" | "invalid_answer"
+export type FailureCode = "duplicate" | "invalid_json" | "invalid_type" | "invalid_options" | "invalid_answer" | "invalid_identity"
   | "invalid_rubric" | "invalid_content" | "insufficient_basis" | "angle_plan_invalid"
   | "network_timeout" | "network_error" | "rate_limited" | "model_error"
   | "connection_changed" | "save_error" | "lease_expired";
@@ -28,7 +28,7 @@ export function retryState(value: unknown): RetryState {
   };
 }
 export function validationFailure(message: string): RetryFailure {
-  const code: FailureCode = /重复/.test(message) ? "duplicate"
+  const code: FailureCode = /身份铺垫/.test(message) ? "invalid_identity" : /重复/.test(message) ? "duplicate"
     : /考评点|题型与请求|题型没有|questionType|assessmentPointCode/.test(message) ? "invalid_type"
     : /scoreRubric|评分/.test(message) ? "invalid_rubric"
     : /answers|答案/.test(message) ? "invalid_answer"
@@ -144,7 +144,7 @@ export function retryQuestionFeedback(state: RetryState, angle: KnowledgeAngle, 
 }
 export function keepSelectedAngle(state: RetryState) {
   return !!state.selectedAngle && state.failures.length > 0 && state.failures.every((failure) => [
-    "invalid_json", "invalid_type", "invalid_options", "invalid_answer", "invalid_rubric",
+    "invalid_json", "invalid_type", "invalid_options", "invalid_answer", "invalid_rubric", "invalid_identity",
     "network_timeout", "network_error", "rate_limited", "lease_expired",
   ].includes(failure.code));
 }

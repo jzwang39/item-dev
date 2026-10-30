@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { skillStemQualityError } from "./skill-stem-quality";
 
 export const questionTypes = ["single", "multiple", "judgement", "practical"] as const;
 export type QuestionType = typeof questionTypes[number];
@@ -109,7 +110,7 @@ export function stemHash(stem: string) {
   return createHash("sha256").update(stem.normalize("NFKC").replace(/\s+/g, "").toLowerCase()).digest("hex");
 }
 
-export function parseQuestions(content: string, code: string, requestedType: QuestionType | "mixed") {
+export function parseQuestions(content: string, code: string, requestedType: QuestionType | "mixed", occupation?: string) {
   const trimmed = content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   let payload: unknown;
   try {
@@ -144,6 +145,11 @@ export function parseQuestions(content: string, code: string, requestedType: Que
       continue;
     }
     const type = question.questionType;
+    const stemError = type === "practical" ? skillStemQualityError(question.stem, occupation) : undefined;
+    if (stemError) {
+      invalidReasons.push(stemError);
+      continue;
+    }
     if (type !== "practical") question.answers = question.answers.map((answer) => answer.toUpperCase());
     const optionKeys = new Set(question.options.map((option) => option.key));
     const answers = new Set(question.answers);

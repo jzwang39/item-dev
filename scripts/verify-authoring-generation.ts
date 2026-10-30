@@ -328,10 +328,14 @@ async function main() {
       assert.equal(prompt.冻结内容结构.totalMinutes, null);
       const code = prompt.鉴定点.code;
       const attempt = (skillCalls.get(code) ?? 0) + 1; skillCalls.set(code, attempt);
+      if (code === "SK-1" && attempt > 1) {
+        assert.equal(prompt.补题策略.上次具体错误[0].code, "invalid_identity");
+        assert.match(prompt.补题策略.上次具体错误[0].message, /身份铺垫/);
+      }
       const count = code === "SK-0" && attempt === 1 ? 1 : prompt.本次实操题数;
       const questions = Array.from({ length: count }, (_, index) => ({
         assessmentPointCode: code, questionType: "practical", options: [],
-        stem: `请依据模拟资料完成${code}第${attempt}次第${index + 1}项宣传资料准备任务，提交分类清单和完整成果。`,
+        stem: `${code === "SK-1" && attempt === 1 && index === 0 ? "作为测试职业5级操作技能的评估者，" : ""}请依据模拟资料完成${code}第${attempt}次第${index + 1}项宣传资料准备任务，提交分类清单和完整成果。`,
         answers: ["核对模拟资料的内容和完整性。", "整理资料并提交分类清单。"], analysis: "根据技能原文要求评价准备工作的成果。",
         scoreRubric: { totalScore: 100, criteria: [{ item: "核对与准备", score: 100, standard: "资料完整，分类清晰，成果与题设要求一致。" }] },
       }));
@@ -348,9 +352,11 @@ async function main() {
     }
     assert.equal((await getGenerationState(skillPlanId)).job?.generated, 6);
     assert.equal(skillCalls.get("SK-0"), 2, "Only the missing practical slot should be retried.");
+    assert.equal(skillCalls.get("SK-1"), 2, "Identity-prefixed question is rejected and only its missing slot is retried.");
     const skillResults = await getPlanQuestionRows(skillPlanId);
     assert.ok(skillResults.every((row) => row.question_type === "实操题" && row.current_status === "pending_review"));
     assert.ok(skillResults.every((row) => !!row.score_rubric_json));
+    assert.ok(skillResults.every((row) => !row.stem.includes("作为测试职业")));
     const [skillSaved] = await admin.execute<(RowDataPacket & { assessment_mode: string; source_snapshot_json: unknown; score_rubric_json: unknown })[]>(
       "SELECT q.assessment_mode,v.source_snapshot_json,v.score_rubric_json FROM questions q JOIN question_versions v ON v.id=q.current_version_id WHERE q.id=?", [skillResults[0].id]);
     assert.equal(skillSaved[0].assessment_mode, "skill");

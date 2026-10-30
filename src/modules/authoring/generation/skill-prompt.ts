@@ -11,6 +11,7 @@ export function skillQuestionPrompt(snapshot: Snapshot, code: string, count: num
 评分标准为建议草稿，须人工审定，不是国家标准原文。不要重复排除题干的任务内容。
 输入中的“操作技能试题质量标准”是本次生成必须逐条遵守的要求，适用于题干、工作要求、准备材料、参考答案及评分标准。输出前逐条自查，不符合时先修正再输出；质量标准不得覆盖正式标准依据、真实性约束和输出格式要求。
 题干直接描述任务、条件和提交成果，不使用“作为劝募员”“作为某职业四级/中级工”等冗余身份铺垫；职业和等级属于管理上下文，不需复制到题干。
+程序将拒绝带职业身份铺垫的题干，包括“作为劝募员5级操作技能”“作为劝募员5级操作技能的评估者”，也不能改成“身为”“你是一名”等形式规避。示例：“根据提供的模拟活动资料，完成宣讲并提交宣讲稿。”，不能写“作为某职业，请根据以下情境……”。
 仅返回JSON：{"questions":[{"assessmentPointCode":"指定代码","questionType":"practical","stem":"完整实操任务、工作要求和提交成果","options":[],"answers":["参考操作步骤"],"analysis":"考核依据和评分说明","scoreRubric":{"totalScore":100,"criteria":[{"item":"评分项目","score":100,"standard":"具体评分标准"}]}}]}。
 answers使用完整步骤原文，不能使用选项键。每题必须有scoreRubric，各项分值之和必须等于totalScore。`,
     prompt: JSON.stringify({
