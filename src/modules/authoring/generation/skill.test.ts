@@ -5,6 +5,7 @@ import { practicalQuota } from "./quota";
 import { skillQuestionPrompt } from "./skill-prompt";
 import { validateSkillStructure } from "../skill-plan";
 import { keepSelectedAngle, retryState, validationFailure } from "./retry-policy";
+import { cleanSkillStem } from "./skill-stem-quality";
 
 const point = { code: "D1-A-A-001", name: "募捐宣传资料准备", single: 0, multiple: 0, judgement: 0, practical: 1, total: 1 };
 const question = {
@@ -16,23 +17,31 @@ const question = {
     { item: "材料整理", score: 60, standard: "分类清晰，宣传材料完整，提交成果可使用。" },
   ] },
 };
-test("第9条硬校验拒绝身份和等级铺垫，保留同批合规题，不自动改写题干", () => {
+test("身份和等级铺垫自动清理后通过，保留原题干留痕和正常任务内容", () => {
   for (const prefix of [
     "作为劝募员，", "作为劝募员5级操作技能，", "作为劝募员５级操作技能的评估者，",
     "作为劝募员四级/中级工，", "作为一名劝募员，", "身为劝募员，",
     "你是一名劝募员，", "作为 劝 募 员，", "作为\u200b劝募员，",
   ]) {
-    const result = parseQuestions(JSON.stringify({ questions: [{ ...question, stem: prefix + question.stem }, question] }), point.code, "practical", "劝募员");
+    const result = parseQuestions(JSON.stringify({ questions: [{ ...question, stem: prefix + question.stem }] }), point.code, "practical", "劝募员");
     assert.equal(result.valid.length, 1, prefix);
     assert.equal(result.valid[0].stem, question.stem);
-    assert.match(result.invalidReasons[0], /质量标准第9条/);
-    assert.equal(validationFailure(result.invalidReasons[0]).code, "invalid_identity");
+    assert.equal(result.invalidReasons.length, 0);
+    assert.equal(result.valid[0].originalStem, prefix + question.stem);
+    assert.equal(cleanSkillStem(result.valid[0].stem, "劝募员"), question.stem);
   }
   const other = parseQuestions(JSON.stringify({ questions: [{ ...question, stem: "作为养老护理员四级，" + question.stem }] }), point.code, "practical", "养老护理员");
-  assert.equal(other.valid.length, 0);
+  assert.equal(other.valid.length, 1);
+  assert.equal(other.valid[0].stem, question.stem);
   for (const stem of ["根据劝募员技能要求，" + question.stem, "将清单作为资料核对依据，" + question.stem]) {
     assert.equal(parseQuestions(JSON.stringify({ questions: [{ ...question, stem }] }), point.code, "practical", "劝募员").valid.length, 1);
   }
+  assert.equal(cleanSkillStem("作为劝募员，请核对金额、用途，提交清单。"), "请核对金额、用途，提交清单。");
+  assert.equal(cleanSkillStem("作为劝募员，" + question.stem + "\n作为劝募员5级操作技能，请提交附件。"), question.stem + "\n请提交附件。");
+  assert.equal(cleanSkillStem("请将材料作为劝募员审核的依据，核对金额。"), "请将材料作为劝募员审核的依据，核对金额。");
+  const duplicates = parseQuestions(JSON.stringify({ questions: [{ ...question, stem: "作为劝募员，" + question.stem }, question] }), point.code, "practical");
+  assert.equal(duplicates.valid.length, 1);
+  assert.match(duplicates.invalidReasons[0], /重复/);
   const state = { ...retryState(null), selectedAngle: { angle: "归档步骤", sourceId: "a", quote: "归档核对资料" }, failures: [validationFailure("题干出现身份铺垫")] };
   assert.equal(keepSelectedAngle(state), true, "Identity errors correct wording without wasting the selected knowledge angle.");
 });

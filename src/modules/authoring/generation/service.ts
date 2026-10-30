@@ -10,7 +10,7 @@ import { isLegalPoint } from "@/modules/authoring/legal-topics";
 import { buildBatches, GENERATION_CONCURRENCY, parseQuestions, questionTypes, quotaTotal, stemHash, validateQuota, type QuotaPoint, type Scope, type Snapshot, type QuestionType } from "./contracts";
 import { loadSkillPlanBasis } from "../skill-plan";
 import { skillQuestionPrompt } from "./skill-prompt";
-import { skillStemQualityError } from "./skill-stem-quality";
+import { cleanSkillStem } from "./skill-stem-quality";
 import { readSkillQualityStandard, type AppliedSkillQualityStandard } from "./skill-quality-standard";
 import { qualityStandardConfigs, qualityStandardContent } from "../quality-standard";
 import { assertFrozenPlanBasis, theoryPointContext } from "./plan-basis";
@@ -278,8 +278,13 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
     let saved = 0;
     for (const question of questions) {
       if (!slots.length) break;
-      const stemError = question.questionType === "practical" ? skillStemQualityError(question.stem, snapshot.scope.occupation) : undefined;
-      if (stemError) { failures.push(validationFailure(stemError)); continue; }
+      if (question.questionType === "practical") {
+        const cleaned = cleanSkillStem(question.stem, snapshot.scope.occupation);
+        if (cleaned !== question.stem) {
+          question.originalStem ??= question.stem;
+          question.stem = cleaned;
+        }
+      }
       const hash = stemHash(question.stem);
       const [duplicates] = await db.execute<RowDataPacket[]>("SELECT id FROM authoring_generation_slots WHERE job_id=? AND stem_hash=? LIMIT 1", [unit.job_id, hash]);
       if (duplicates.length) { failures.push({ code: "duplicate", message: "题干与本任务已有题重复。" }); continue; }
@@ -299,6 +304,7 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
         skillContext: node.skillContext, skillStructure: snapshot.skillStructure,
         assessmentPointCode: node.code, generatedAt: new Date().toISOString(),
         retryAngle: output.state.selectedAngle, retryCovered: output.state.covered,
+        stemCleanup: question.originalStem ? { originalStem: question.originalStem, cleanedStem: question.stem, rule: "remove_identity_intro" } : undefined,
         appliedSkillQualityStandard: unit.appliedSkillQualityStandard,
       };
       await db.execute(`INSERT INTO questions(id,project_id,question_no,occupation_id,level_code,assessment_mode,question_type,current_version_id,current_status)

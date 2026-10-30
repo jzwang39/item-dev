@@ -328,10 +328,6 @@ async function main() {
       assert.equal(prompt.冻结内容结构.totalMinutes, null);
       const code = prompt.鉴定点.code;
       const attempt = (skillCalls.get(code) ?? 0) + 1; skillCalls.set(code, attempt);
-      if (code === "SK-1" && attempt > 1) {
-        assert.equal(prompt.补题策略.上次具体错误[0].code, "invalid_identity");
-        assert.match(prompt.补题策略.上次具体错误[0].message, /身份铺垫/);
-      }
       const count = code === "SK-0" && attempt === 1 ? 1 : prompt.本次实操题数;
       const questions = Array.from({ length: count }, (_, index) => ({
         assessmentPointCode: code, questionType: "practical", options: [],
@@ -352,11 +348,17 @@ async function main() {
     }
     assert.equal((await getGenerationState(skillPlanId)).job?.generated, 6);
     assert.equal(skillCalls.get("SK-0"), 2, "Only the missing practical slot should be retried.");
-    assert.equal(skillCalls.get("SK-1"), 2, "Identity-prefixed question is rejected and only its missing slot is retried.");
+    assert.equal(skillCalls.get("SK-1"), 1, "Identity-prefixed question is cleaned and saved without a retry.");
     const skillResults = await getPlanQuestionRows(skillPlanId);
     assert.ok(skillResults.every((row) => row.question_type === "实操题" && row.current_status === "pending_review"));
     assert.ok(skillResults.every((row) => !!row.score_rubric_json));
     assert.ok(skillResults.every((row) => !row.stem.includes("作为测试职业")));
+    const [cleanedRows] = await admin.execute<(RowDataPacket & { source_snapshot_json: unknown })[]>(
+      "SELECT v.source_snapshot_json FROM questions q JOIN question_versions v ON v.id=q.current_version_id WHERE JSON_UNQUOTE(JSON_EXTRACT(v.source_snapshot_json,'$.jobId'))=? AND JSON_EXTRACT(v.source_snapshot_json,'$.stemCleanup') IS NOT NULL", [skillStarted.jobId]);
+    assert.equal(cleanedRows.length, 1);
+    const cleanupSource = typeof cleanedRows[0].source_snapshot_json === "string" ? JSON.parse(cleanedRows[0].source_snapshot_json) : cleanedRows[0].source_snapshot_json;
+    assert.match(cleanupSource.stemCleanup.originalStem, /^作为测试职业5级操作技能的评估者/);
+    assert.ok(!cleanupSource.stemCleanup.cleanedStem.includes("作为测试职业"));
     const [skillSaved] = await admin.execute<(RowDataPacket & { assessment_mode: string; source_snapshot_json: unknown; score_rubric_json: unknown })[]>(
       "SELECT q.assessment_mode,v.source_snapshot_json,v.score_rubric_json FROM questions q JOIN question_versions v ON v.id=q.current_version_id WHERE q.id=?", [skillResults[0].id]);
     assert.equal(skillSaved[0].assessment_mode, "skill");

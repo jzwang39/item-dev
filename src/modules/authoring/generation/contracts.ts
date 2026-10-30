@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { skillStemQualityError } from "./skill-stem-quality";
+import { cleanSkillStem } from "./skill-stem-quality";
 
 export const questionTypes = ["single", "multiple", "judgement", "practical"] as const;
 export type QuestionType = typeof questionTypes[number];
@@ -104,7 +104,7 @@ const questionSchema = z.object({
   analysis: z.string().trim().min(1).max(20000),
   scoreRubric: scoreRubricSchema.optional(),
 });
-export type GeneratedQuestion = z.infer<typeof questionSchema>;
+export type GeneratedQuestion = z.infer<typeof questionSchema> & { originalStem?: string };
 
 export function stemHash(stem: string) {
   return createHash("sha256").update(stem.normalize("NFKC").replace(/\s+/g, "").toLowerCase()).digest("hex");
@@ -130,8 +130,10 @@ export function parseQuestions(content: string, code: string, requestedType: Que
   for (const value of raw) {
     const item = value && typeof value === "object" ? value as Record<string, unknown> : {};
     const answer = item.answers ?? item.answer ?? item["答案"];
+    const originalStem = typeof item.stem === "string" ? item.stem : undefined;
     const parsed = questionSchema.safeParse({
       ...item,
+      stem: item.questionType === "practical" && originalStem !== undefined ? cleanSkillStem(originalStem, occupation) : item.stem,
       answers: typeof answer === "string" ? [answer] : answer,
       analysis: item.analysis ?? item.explanation ?? item["解析"],
     });
@@ -139,17 +141,13 @@ export function parseQuestions(content: string, code: string, requestedType: Que
       invalidReasons.push(parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; "));
       continue;
     }
-    const question = parsed.data;
+    const question: GeneratedQuestion = parsed.data;
+    if (originalStem !== undefined && question.questionType === "practical" && question.stem !== originalStem.trim()) question.originalStem = originalStem;
     if (question.assessmentPointCode !== code || (requestedType !== "mixed" && question.questionType !== requestedType)) {
       invalidReasons.push("考评点代码或题型与请求不符");
       continue;
     }
     const type = question.questionType;
-    const stemError = type === "practical" ? skillStemQualityError(question.stem, occupation) : undefined;
-    if (stemError) {
-      invalidReasons.push(stemError);
-      continue;
-    }
     if (type !== "practical") question.answers = question.answers.map((answer) => answer.toUpperCase());
     const optionKeys = new Set(question.options.map((option) => option.key));
     const answers = new Set(question.answers);
