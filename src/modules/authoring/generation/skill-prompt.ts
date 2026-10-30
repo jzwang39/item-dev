@@ -18,7 +18,7 @@ answers使用完整步骤原文，不能使用选项键。每题必须有scoreRu
       用户需求: snapshot.requirement, 职业: snapshot.scope.occupation, 技能等级: snapshot.scope.levelCode,
       鉴定点: { code: node.code, name: node.name }, 冻结标准与归属: node.skillContext,
       冻结内容结构: snapshot.skillStructure, 本次实操题数: count,
-      质量要求: snapshot.qualityRequirements, 试题质量标准: snapshot.qualityStandard, 排除题干: previous,
+      质量要求: snapshot.qualityRequirements, 排除题干: previous,
       操作技能试题质量标准: snapshot.skillQualityStandard ?? "",
     }),
   };

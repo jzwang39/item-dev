@@ -85,20 +85,19 @@ export async function startGeneration(planId: string, actorId: string, retryFail
     const [sources] = await db.execute<(RowDataPacket & { source_version_id: string })[]>(
       "SELECT source_version_id FROM blueprint_version_sources WHERE blueprint_version_id=?", [scope.blueprintVersions.outline.id],
     );
-    const [settings] = await db.execute<(RowDataPacket & { setting_key: string; setting_value_json: unknown })[]>(
-      "SELECT setting_key, setting_value_json FROM system_settings WHERE setting_key IN (?, ?)",
-      [qualityStandardConfigs.theory.settingKey, qualityStandardConfigs.skill.settingKey],
+    const standardConfig = scope.assessmentMode === "操作技能" ? qualityStandardConfigs.skill : qualityStandardConfigs.theory;
+    const [settings] = await db.execute<(RowDataPacket & { setting_value_json: unknown })[]>(
+      "SELECT setting_value_json FROM system_settings WHERE setting_key = ?",
+      [standardConfig.settingKey],
     );
-    const savedSettings = new Map(settings.map((setting) => [setting.setting_key, setting.setting_value_json]));
+    const standardContent = qualityStandardContent(settings[0]?.setting_value_json, standardConfig.defaultContent);
     const snapshot: Snapshot = {
       projectId: plan.project_id, requirement: plan.raw_requirement, scope,
       points: quota.points.map((point) => ({ ...point, total: quotaTotal(point) })),
       skillStructure: skillBasis?.structure,
       qualityRequirements: quota.qualityRequirements ?? [],
-      qualityStandard: qualityStandardContent(savedSettings.get(qualityStandardConfigs.theory.settingKey), qualityStandardConfigs.theory.defaultContent),
-      skillQualityStandard: scope.assessmentMode === "操作技能"
-        ? qualityStandardContent(savedSettings.get(qualityStandardConfigs.skill.settingKey), qualityStandardConfigs.skill.defaultContent)
-        : undefined,
+      qualityStandard: scope.assessmentMode === "操作技能" ? "" : standardContent,
+      skillQualityStandard: scope.assessmentMode === "操作技能" ? standardContent : undefined,
       sourceVersionIds: sources.map((source) => source.source_version_id),
       nodes: quota.points.map((point) => {
         const node = byCode.get(point.code)!;

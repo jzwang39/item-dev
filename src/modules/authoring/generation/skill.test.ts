@@ -114,10 +114,35 @@ test("技能提示使用冻结来源和结构，保留综合层级，不虚构�
   assert.match(output.prompt, /真实依据/);
   assert.match(output.prompt, /已生成题干/);
   assert.equal(JSON.parse(output.prompt).操作技能试题质量标准, snapshot.skillQualityStandard);
-  assert.equal(JSON.parse(output.prompt).试题质量标准, "通用质量要求");
+  assert.equal(Object.hasOwn(JSON.parse(output.prompt), "试题质量标准"), false);
+  assert.doesNotMatch(output.prompt, /通用质量要求/);
   assert.match(output.instruction, /质量标准不得覆盖正式标准依据/);
   assert.equal(JSON.parse(skillQuestionPrompt({ ...snapshot, skillQualityStandard: undefined }, point.code, 1, []).prompt).操作技能试题质量标准, "");
   assert.throws(() => skillQuestionPrompt({ ...snapshot, skillStructure: undefined }, point.code, 1, []), /冻结/);
+});
+
+test("技能批量生成及单题补题均忽略历史快照中的理论质量标准", () => {
+  const snapshot = {
+    requirement: "按鉴定点生成实操题",
+    scope: { occupation: "测试职业", levelCode: "level_4" },
+    nodes: [{ code: point.code, name: point.name, skillContext: { evidence: "正式标准依据" } }],
+    skillStructure: { totalMinutes: null },
+    qualityRequirements: ["提交成果可核验"],
+    qualityStandard: "理论标准：选择题选项应具有合理干扰性",
+    skillQualityStandard: "技能标准：参考答案须包含完整操作步骤",
+  } as unknown as Snapshot;
+  for (const count of [3, 1]) {
+    const output = skillQuestionPrompt(snapshot, point.code, count, ["已生成任务"]);
+    const payload = JSON.parse(output.prompt);
+    assert.equal(payload.操作技能试题质量标准, snapshot.skillQualityStandard);
+    assert.equal(Object.hasOwn(payload, "试题质量标准"), false);
+    assert.doesNotMatch(output.prompt, /理论标准|选择题选项/);
+    assert.deepEqual(payload.质量要求, snapshot.qualityRequirements);
+    assert.deepEqual(payload.冻结内容结构, snapshot.skillStructure);
+    assert.equal(payload.用户需求, snapshot.requirement);
+    assert.equal(payload.本次实操题数, count);
+    assert.deepEqual(payload.排除题干, ["已生成任务"]);
+  }
 });
 
 test("真实标准与模型：三级技能、二级综合、一级综合各生成一题，仅验证不入库", {
