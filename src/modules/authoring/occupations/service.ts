@@ -185,6 +185,45 @@ export async function updateOccupation(
   });
 }
 
+export async function archiveOccupation(
+  occupationId: string,
+  actorId: string,
+): Promise<Occupation> {
+  return withTransaction(async (connection) => {
+    const projectId = await getActiveProjectIdForUpdate(connection);
+    if (!projectId) throw new OccupationOperationError("当前项目不存在，无法删除职业。");
+    const [rows] = await connection.execute<OccupationRow[]>(
+      `SELECT id, name, code, status FROM project_occupations
+       WHERE id = ? AND project_id = ? FOR UPDATE`,
+      [occupationId, projectId],
+    );
+    const existing = rows[0];
+    if (!existing) throw new OccupationOperationError("职业不存在或不属于当前项目。");
+    const [directions] = await connection.execute<DirectionRow[]>(
+      `SELECT id, occupation_id, name, ordinal, status
+       FROM project_occupation_directions WHERE occupation_id = ? ORDER BY ordinal FOR UPDATE`,
+      [occupationId],
+    );
+    const before = withDirections(existing, directions);
+    if (existing.status === "archived") return before;
+    // Archive the occupation only. Historical versions and their foreign keys
+    // must remain available for question, paper and review traceability.
+    await connection.execute(
+      `UPDATE project_occupations SET status = 'archived', row_version = row_version + 1
+       WHERE id = ? AND project_id = ?`,
+      [occupationId, projectId],
+    );
+    const archived = { ...before, status: "archived" as const };
+    await connection.execute(
+      `INSERT INTO audit_logs (
+        id, project_id, actor_id, action, object_type, object_id, before_json, after_json, result
+      ) VALUES (?, ?, ?, 'occupation.archive', 'project_occupation', ?, ?, ?, 'success')`,
+      [createUlid(), projectId, actorId, occupationId, JSON.stringify(before), JSON.stringify(archived)],
+    );
+    return archived;
+  });
+}
+
 function withDirections(
   occupation: Pick<OccupationRow, "id" | "name" | "code" | "status">,
   directions: readonly StoredOccupationDirection[],

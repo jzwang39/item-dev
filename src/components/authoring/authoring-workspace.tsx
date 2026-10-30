@@ -3035,6 +3035,8 @@ function BlueprintPanel() {
   const [professions, setProfessions] = useState<Profession[]>([]);
   const [isLoadingProfessions, setIsLoadingProfessions] = useState(false);
   const [listError, setListError] = useState("");
+  const [deletingProfessionId, setDeletingProfessionId] = useState<string | null>(null);
+  const deletingProfession = useRef(false);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [editingProfession, setEditingProfession] = useState<Profession | null>(
     null,
@@ -3110,6 +3112,34 @@ function BlueprintPanel() {
     setFormError("");
     setEditingProfession(profession);
     setIsCreateModalOpen(true);
+  }
+
+  async function deleteProfession(profession: Profession) {
+    if (deletingProfession.current || !window.confirm(
+      `确认删除职业“${profession.name}”？\n该职业将从理论知识和操作技能列表中移除，历史细目表、试题和审定记录保留。`,
+    )) return;
+    deletingProfession.current = true;
+    setDeletingProfessionId(profession.id);
+    setListError("");
+    try {
+      const response = await fetch(`/api/v1/authoring/occupations/${profession.id}`, {
+        method: "DELETE",
+        signal: AbortSignal.timeout(30_000),
+      });
+      const body = await response.json() as { data?: Profession; error?: { message?: string } };
+      if (!response.ok || body.data?.id !== profession.id || body.data.status !== "archived") {
+        throw new Error(body.error?.message ?? "职业删除失败，请重试。");
+      }
+      setProfessions((current) => current.filter((item) => item.id !== profession.id));
+      setCompilingProfession((current) => current?.id === profession.id ? null : current);
+      setCompilingSkillProfession((current) => current?.id === profession.id ? null : current);
+    } catch (error) {
+      setListError(error instanceof Error && error.name !== "TimeoutError"
+        ? error.message : "职业删除请求超时，请刷新列表确认结果后重试。");
+    } finally {
+      deletingProfession.current = false;
+      setDeletingProfessionId(null);
+    }
   }
 
   async function saveProfession(event: FormEvent<HTMLFormElement>) {
@@ -3271,6 +3301,12 @@ function BlueprintPanel() {
             </button>
           </div>
 
+          {listError ? (
+            <p className="m-0 border-b border-[#f2dfe2] bg-[#fff8f8] px-8 py-4 text-sm text-[#d96a74]" role="alert">
+              {listError}
+            </p>
+          ) : null}
+
           <div className="overflow-x-auto">
             <table className="min-w-[760px] w-full border-collapse text-left">
               <thead className="bg-[#fafbfe] text-xs font-medium text-[#93a0b3]">
@@ -3298,6 +3334,7 @@ function BlueprintPanel() {
                       <div className="flex items-center gap-2">
                         <button
                           className="rounded-lg bg-[#3f60e8] px-3.5 py-2 text-xs font-medium text-white hover:bg-[#3354d8]"
+                          disabled={Boolean(deletingProfessionId)}
                           onClick={() => {
                             if (selectedFlow === "理论知识")
                               setCompilingProfession(profession);
@@ -3310,16 +3347,19 @@ function BlueprintPanel() {
                         </button>
                         <button
                           className="rounded-lg border border-[#dfe5ef] bg-white px-3.5 py-2 text-xs font-medium text-[#60708a] hover:border-[#aabcf5] hover:text-[#3f60e8]"
+                          disabled={Boolean(deletingProfessionId)}
                           onClick={() => openEditModal(profession)}
                           type="button"
                         >
                           编辑
                         </button>
                         <button
-                          className="rounded-lg border border-[#f2dfe2] bg-[#fff8f8] px-3.5 py-2 text-xs font-medium text-[#d96a74] hover:bg-[#fff0f1]"
+                          className="rounded-lg border border-[#f2dfe2] bg-[#fff8f8] px-3.5 py-2 text-xs font-medium text-[#d96a74] hover:bg-[#fff0f1] disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={Boolean(deletingProfessionId)}
+                          onClick={() => void deleteProfession(profession)}
                           type="button"
                         >
-                          删除
+                          {deletingProfessionId === profession.id ? "删除中..." : "删除"}
                         </button>
                       </div>
                     </td>
@@ -3331,8 +3371,7 @@ function BlueprintPanel() {
                       className="px-6 py-12 text-center text-sm text-[#8b96a8]"
                       colSpan={4}
                     >
-                      {listError ||
-                        (keyword ? "未找到匹配的职业" : "暂未创建职业")}
+                      {keyword ? "未找到匹配的职业" : "暂未创建职业"}
                     </td>
                   </tr>
                 ) : null}
