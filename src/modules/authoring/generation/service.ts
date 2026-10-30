@@ -10,6 +10,7 @@ import { isLegalPoint } from "@/modules/authoring/legal-topics";
 import { buildBatches, GENERATION_CONCURRENCY, parseQuestions, questionTypes, quotaTotal, stemHash, validateQuota, type QuotaPoint, type Scope, type Snapshot, type QuestionType } from "./contracts";
 import { loadSkillPlanBasis } from "../skill-plan";
 import { skillQuestionPrompt } from "./skill-prompt";
+import { readSkillQualityStandard, type AppliedSkillQualityStandard } from "./skill-quality-standard";
 import { qualityStandardConfigs, qualityStandardContent } from "../quality-standard";
 import { assertFrozenPlanBasis, theoryPointContext } from "./plan-basis";
 import { readGenerationActivity } from "./activity";
@@ -26,6 +27,7 @@ type Unit = RowDataPacket & {
   attempts: number; lease_token: string; snapshot_json: Snapshot | string; plan_id: string; created_by: string | null;
   retry_state_json: RetryState | string | null;
   error_message: string | null;
+  appliedSkillQualityStandard?: AppliedSkillQualityStandard;
 };
 
 export async function startGeneration(planId: string, actorId: string, retryFailed = false) {
@@ -294,6 +296,7 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
         skillContext: node.skillContext, skillStructure: snapshot.skillStructure,
         assessmentPointCode: node.code, generatedAt: new Date().toISOString(),
         retryAngle: output.state.selectedAngle, retryCovered: output.state.covered,
+        appliedSkillQualityStandard: unit.appliedSkillQualityStandard,
       };
       await db.execute(`INSERT INTO questions(id,project_id,question_no,occupation_id,level_code,assessment_mode,question_type,current_version_id,current_status)
         VALUES(?,?,?,?,?,?,?,?,?)`, [questionId, snapshot.projectId, `AI-${unit.plan_id}-${String(slot.ordinal).padStart(4, "0")}`,
@@ -426,7 +429,23 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
     教材片段: excerpts, 排除题干: previous.map((item) => item.stem), 补齐次数: unit.attempts,
   });
   if (snapshot.scope.assessmentMode === "操作技能") {
+    const standard = await readSkillQualityStandard();
+    snapshot.skillQualityStandard = standard.content;
+    unit.appliedSkillQualityStandard = standard;
     ({ instruction, prompt } = skillQuestionPrompt(snapshot, node.code, requested.length, previous.map((item) => item.stem)));
+    // Record every actual generation attempt, including ones yielding no valid
+    // questions. The initial job snapshot remains unchanged for provenance.
+    await withTransaction(async (db) => {
+      await db.execute("SELECT id FROM authoring_generation_capacity WHERE id=1 FOR UPDATE");
+      const [leases] = await db.execute<RowDataPacket[]>(
+        "SELECT id FROM authoring_generation_units WHERE id=? AND lease_token=? AND status='running' FOR UPDATE",
+        [unit.id, unit.lease_token],
+      );
+      if (!leases.length) throw new GenerationFailure("lease_expired", "质量标准读取后任务已停止或租约失效，不再生成。");
+      await audit(db, snapshot.projectId, unit.created_by, unit.plan_id, "authoring.plan.skill_quality_applied", {
+        jobId: unit.job_id, unitId: unit.id, attempts: unit.attempts, standard,
+      });
+    });
   }
   if (state.selectedAngle) {
     instruction += "\n本次为精准补题，只生成一道指定题型的新题。必须使用补题策略指定的知识角度和原文依据，检查与已有题的实质内容差异，并针对上次具体错误修正，不得忽略质量标准。";

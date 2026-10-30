@@ -5140,7 +5140,9 @@ function AuthoringTaskPanel() {
         throw new Error(payload.error?.message ?? "保存试题质量标准失败。");
       setQualityStandard(payload.data?.content ?? qualityStandard);
       setIsQualityStandardOpen(false);
-      setNotice(`${qualityStandardTitle}已保存，后续${qualityStandardKind === "skill" ? "操作技能" : ""}命题时将作为生成约束。`);
+      setNotice(qualityStandardKind === "skill"
+        ? `${qualityStandardTitle}已保存，后续每次生成和补题请求将使用最新标准；已发出的请求和已有试题不变。`
+        : `${qualityStandardTitle}已保存，后续命题时将作为生成约束。`);
     } catch (error) {
       setQualityStandardError(
         error instanceof Error ? error.message : "保存试题质量标准失败。",
@@ -6542,7 +6544,7 @@ function AuthoringTaskPanel() {
                   {qualityStandardTitle}
                 </h2>
                 <p className="m-0 mt-2 text-[15px] text-[#7185a5]">
-                  保存后覆盖当前标准，并在后续{qualityStandardKind === "skill" ? "操作技能" : ""} AI 命题时作为质量约束使用。
+                  {qualityStandardKind === "skill" ? "保存后，每次操作技能生成和补题请求使用最新标准；已发出的请求和已有试题不变。" : "保存后覆盖当前标准，并在后续 AI 命题时作为质量约束使用。"}
                 </p>
               </div>
               <button

@@ -315,11 +315,16 @@ async function main() {
       await assert.rejects(() => loadSkillPlanBasis(validationConnection, occupationId, "level_4", { ...skillVersions, structure: { id: createUlid(), versionNo: 1 } }), /内容结构表/);
     } finally { validationConnection.release(); }
     const skillCalls = new Map<string, number>();
+    const firstSkillStandard = "技能质量标准初版：评分须对应提交成果。";
+    const latestSkillStandard = "技能质量标准新版：题干不出现作为测试职业等身份铺垫，评分须具体。";
+    await admin.execute("INSERT INTO system_settings(setting_key,setting_value_json) VALUES(?,?) ON DUPLICATE KEY UPDATE setting_value_json=VALUES(setting_value_json)",
+      ["authoring.skill_question_quality_standard", JSON.stringify({ content: firstSkillStandard })]);
     globalThis.fetch = async (_, init) => {
       const body = JSON.parse(String(init?.body));
       const prompt = JSON.parse(body.messages[1].content);
       if (prompt.可用依据) return angleResponse(prompt);
       assert.match(body.messages[0].content, /实操题/);
+      assert.equal(prompt.操作技能试题质量标准, latestSkillStandard, "Every generation including retries reads the latest saved standard.");
       assert.equal(prompt.冻结内容结构.totalMinutes, null);
       const code = prompt.鉴定点.code;
       const attempt = (skillCalls.get(code) ?? 0) + 1; skillCalls.set(code, attempt);
@@ -334,6 +339,8 @@ async function main() {
     };
     const skillStarted = await startGeneration(skillPlanId, actorId);
     assert.equal(skillStarted.job?.target, 6);
+    await admin.execute("UPDATE system_settings SET setting_value_json=?,row_version=row_version+1 WHERE setting_key=?",
+      [JSON.stringify({ content: latestSkillStandard }), "authoring.skill_question_quality_standard"]);
     assert.equal((await startGeneration(skillPlanId, actorId)).jobId, skillStarted.jobId);
     for (let iteration = 0; iteration < 10; iteration++) {
       await admin.execute("UPDATE authoring_generation_units SET next_attempt_at=UTC_TIMESTAMP(3) WHERE job_id=? AND status='queued'", [skillStarted.jobId]);
@@ -348,6 +355,12 @@ async function main() {
       "SELECT q.assessment_mode,v.source_snapshot_json,v.score_rubric_json FROM questions q JOIN question_versions v ON v.id=q.current_version_id WHERE q.id=?", [skillResults[0].id]);
     assert.equal(skillSaved[0].assessment_mode, "skill");
     const savedSource = typeof skillSaved[0].source_snapshot_json === "string" ? JSON.parse(skillSaved[0].source_snapshot_json) : skillSaved[0].source_snapshot_json;
+    assert.equal(savedSource.appliedSkillQualityStandard.content, latestSkillStandard);
+    assert.equal(savedSource.appliedSkillQualityStandard.source, "saved");
+    const [initialSkillSnapshot] = await admin.execute<(RowDataPacket & { snapshot_json: unknown })[]>(
+      "SELECT snapshot_json FROM authoring_generation_jobs WHERE id=?", [skillStarted.jobId]);
+    const initialSnapshot = typeof initialSkillSnapshot[0].snapshot_json === "string" ? JSON.parse(initialSkillSnapshot[0].snapshot_json) : initialSkillSnapshot[0].snapshot_json;
+    assert.equal(initialSnapshot.skillQualityStandard, firstSkillStandard, "Initial snapshot remains unchanged.");
     assert.equal(savedSource.structureVersionId, skillVersions.structure.id);
     assert.equal(savedSource.skillContext.point.sourceStandardRequirement.nodeKind, "skill_requirement");
     // Isolated retry failures: semantic planning, format correction, permanent
