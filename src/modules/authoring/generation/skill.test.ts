@@ -38,12 +38,32 @@ test("身份和等级铺垫自动清理后通过，保留原题干留痕和正�
   }
   assert.equal(cleanSkillStem("作为劝募员，请核对金额、用途，提交清单。"), "请核对金额、用途，提交清单。");
   assert.equal(cleanSkillStem("作为劝募员，" + question.stem + "\n作为劝募员5级操作技能，请提交附件。"), question.stem + "\n请提交附件。");
-  assert.equal(cleanSkillStem("请将材料作为劝募员审核的依据，核对金额。"), "请将材料作为劝募员审核的依据，核对金额。");
+  assert.equal(cleanSkillStem("请将材料作为审核的依据，核对金额。"), "请将材料作为审核的依据，核对金额。");
   const duplicates = parseQuestions(JSON.stringify({ questions: [{ ...question, stem: "作为劝募员，" + question.stem }, question] }), point.code, "practical");
   assert.equal(duplicates.valid.length, 1);
   assert.match(duplicates.invalidReasons[0], /重复/);
   const state = { ...retryState(null), selectedAngle: { angle: "归档步骤", sourceId: "a", quote: "归档核对资料" }, failures: [validationFailure("题干出现身份铺垫")] };
   assert.equal(keepSelectedAngle(state), true, "Identity errors correct wording without wasting the selected knowledge angle.");
+});
+test("题干任意位置的身份铺垫全部清理，保留条件、列表及正文标点", () => {
+  const cases = [
+    ["根据提供的公益项目资料，作为劝募员，进行公益项目调查，并提交调查报告。",
+      "根据提供的公益项目资料，进行公益项目调查，并提交调查报告。"],
+    ["根据提供的模拟活动资料，作为劝募员5级操作技能，完成以下任务： 1. 分析模拟活动资料，提出募捐活动建议。 2. 编写募捐活动方案，包括活动目标、活动内容、活动时间、活动地点、活动预算等。 3. 提交募捐活动方案。",
+      "根据提供的模拟活动资料，完成以下任务： 1. 分析模拟活动资料，提出募捐活动建议。 2. 编写募捐活动方案，包括活动目标、活动内容、活动时间、活动地点、活动预算等。 3. 提交募捐活动方案。"],
+    ["请作为劝募员进行调查，作为劝募员５级操作技能，提交报告。",
+      "请进行调查，提交报告。"],
+    ["1. 核对资料。\n2. 根据题设，作为 劝 募 员 四级/中级工，整理材料。\n3. 提交成果。",
+      "1. 核对资料。\n2. 根据题设，整理材料。\n3. 提交成果。"],
+    ["调查报告作为劝募员", "调查报告"],
+  ];
+  for (const [original, expected] of cases) {
+    assert.equal(cleanSkillStem(original, "劝募员"), expected);
+    assert.equal(cleanSkillStem(expected, "劝募员"), expected);
+  }
+  const result = parseQuestions(JSON.stringify({ questions: [{ ...question, stem: cases[1][0] }] }), point.code, "practical", "劝募员");
+  assert.equal(result.valid[0].stem, cases[1][1]);
+  assert.equal(result.valid[0].originalStem, cases[1][0]);
 });
 test("操作技能默认每点1题，明确题量覆盖默认，不套用理论题型", () => {
   assert.equal(practicalQuota("生成操作技能试题", { single: 0, multiple: 0, judgement: 0 }).practical, 1);
