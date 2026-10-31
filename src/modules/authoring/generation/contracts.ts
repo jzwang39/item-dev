@@ -104,13 +104,26 @@ const questionSchema = z.object({
   analysis: z.string().trim().min(1).max(20000),
   scoreRubric: scoreRubricSchema.optional(),
 });
-export type GeneratedQuestion = z.infer<typeof questionSchema> & { originalStem?: string };
+export type GeneratedQuestion = z.infer<typeof questionSchema> & {
+  originalStem?: string;
+  formatRepairs?: { originalAnswers: unknown; originalOptions: unknown; rule: "normalize_judgement" };
+};
+
+function judgementAnswer(value: unknown): string | undefined {
+  if (value === true) return "正确";
+  if (value === false) return "错误";
+  if (typeof value !== "string") return;
+  const text = value.trim().toLowerCase();
+  if (["正确", "对", "true", "√"].includes(text)) return "正确";
+  if (["错误", "错", "false", "×"].includes(text)) return "错误";
+}
 
 export function stemHash(stem: string) {
   return createHash("sha256").update(stem.normalize("NFKC").replace(/\s+/g, "").toLowerCase()).digest("hex");
 }
 
-export function parseQuestions(content: string, code: string, requestedType: QuestionType | "mixed", occupation?: string) {
+export function parseQuestions(content: string, code: string, requestedType: QuestionType | "mixed", occupation?: string,
+  normalization: { judgement?: boolean } = {}) {
   const trimmed = content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   let payload: unknown;
   try {
@@ -130,11 +143,22 @@ export function parseQuestions(content: string, code: string, requestedType: Que
   for (const value of raw) {
     const item = value && typeof value === "object" ? value as Record<string, unknown> : {};
     const answer = item.answers ?? item.answer ?? item["答案"];
+    const answerList = Array.isArray(answer) ? answer : [answer];
+    const normalizedAnswer = normalization.judgement && item.questionType === "judgement" && answerList.length === 1
+      ? judgementAnswer(answerList[0]) : undefined;
+    // Only remove redundant true/false choices; arbitrary options may carry
+    // essential conditions and must still fail structural validation.
+    const redundantOptions = normalizedAnswer && Array.isArray(item.options) && item.options.length > 0
+      && item.options.length <= 2 && item.options.every((option) => option && typeof option === "object"
+        && judgementAnswer((option as Record<string, unknown>).content));
+    const formatRepairs = normalizedAnswer && (answerList[0] !== normalizedAnswer || redundantOptions)
+      ? { originalAnswers: answer, originalOptions: item.options, rule: "normalize_judgement" as const } : undefined;
     const originalStem = typeof item.stem === "string" ? item.stem : undefined;
     const parsed = questionSchema.safeParse({
       ...item,
+      options: redundantOptions ? [] : item.options,
       stem: item.questionType === "practical" && originalStem !== undefined ? cleanSkillStem(originalStem, occupation) : item.stem,
-      answers: typeof answer === "string" ? [answer] : answer,
+      answers: normalizedAnswer ? [normalizedAnswer] : typeof answer === "string" ? [answer] : answer,
       analysis: item.analysis ?? item.explanation ?? item["解析"],
     });
     if (!parsed.success) {
@@ -142,6 +166,7 @@ export function parseQuestions(content: string, code: string, requestedType: Que
       continue;
     }
     const question: GeneratedQuestion = parsed.data;
+    if (formatRepairs) question.formatRepairs = formatRepairs;
     if (originalStem !== undefined && question.questionType === "practical" && question.stem !== originalStem.trim()) question.originalStem = originalStem;
     if (question.assessmentPointCode !== code || (requestedType !== "mixed" && question.questionType !== requestedType)) {
       invalidReasons.push("考评点代码或题型与请求不符");

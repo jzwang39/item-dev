@@ -4,10 +4,12 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from "react"
 import { SkillStandardUpload, SkillWeightMatrix, SkillStructureMatrix, type ImportedSkillStandard } from "./skill-standard-upload";
 import { SkillOutlinePanel } from "./skill-outline-panel";
 import { SkillStructureEditor } from "./skill-structure-editor";
+import { SupplementButton } from "./supplement-button";
 import { ScoreRubric } from "@/components/questions/score-rubric";
 import { formatDirectionCode, type OccupationDirection } from "@/modules/authoring/occupations/directions";
 import type { TheoryWeightScope } from "@/modules/blueprints/theory-weights/standard";
 import { isTheoryOutlineGenerationLevel } from "@/modules/blueprints/theory-outline-generation/policy";
+import type { QualityRelaxation } from "@/modules/authoring/generation/quality-policy";
 
 const tabs = ["考评蓝图", "命题任务", "资料依据", "质量检查"] as const;
 
@@ -4777,6 +4779,7 @@ type GeneratedQuestion = {
   analysis: string;
   scoreRubric?: unknown;
   autoCheck: "通过基础检查" | "需人工复核";
+  qualityRelaxations?: QualityRelaxation[];
   status?: "draft" | "pending_review" | "returned" | "approved" | "archived";
 };
 
@@ -4829,6 +4832,7 @@ function AuthoringTaskPanel() {
   const [progressError, setProgressError] = useState("");
   const [terminatingPlanId, setTerminatingPlanId] = useState<string | null>(null);
   const [stoppingPlanId, setStoppingPlanId] = useState<string | null>(null);
+  const [supplementingPlanId, setSupplementingPlanId] = useState<string | null>(null);
   const [sessionExpired, setSessionExpired] = useState(false);
   const manualCheckById = useRef(new Map<string, string>());
   const terminatedPlans = useRef(new Set<string>());
@@ -5033,7 +5037,7 @@ function AuthoringTaskPanel() {
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [confirmedPlanId, generationJob?.status]);
   const stopKeepTask = async (planId: string) => {
-    if (stoppingPlanId || terminatingPlanId || !window.confirm("确认停止生成并保留成果？\n将停止排队和在途请求，失败请求不再处理，保留全部已保存试题和缺口记录。\n本任务无法恢复生成或重试；保留试题可继续人工核查和专家审定。")) return;
+    if (stoppingPlanId || terminatingPlanId || supplementingPlanId || !window.confirm("确认停止生成并保留成果？\n将关闭排队和在途请求，保留全部已保存试题和缺口记录。\n原请求不会恢复；题量不足时，可在停止后点击“补题”创建新的缺额请求。保留试题可继续核查和审定。")) return;
     setStoppingPlanId(planId);
     setExecutionError("");
     setProgressError("");
@@ -5063,7 +5067,7 @@ function AuthoringTaskPanel() {
     } finally { setStoppingPlanId(null); }
   };
   const terminateTask = async (planId: string) => {
-    if (terminatingPlanId || stoppingPlanId || !window.confirm("确认终止命题任务？\n将停止后续生成，清理本任务未审定的原始草稿及批次数据，无法恢复或重试。\n已审核、修订、确认、入库或用于试卷的试题保留，终止操作会留痕。")) return;
+    if (terminatingPlanId || stoppingPlanId || supplementingPlanId || !window.confirm("确认终止命题任务？\n将停止后续生成，清理本任务未审定的原始草稿及批次数据，无法恢复或重试。\n已审核、修订、确认、入库或用于试卷的试题保留，终止操作会留痕。")) return;
     setTerminatingPlanId(planId);
     setExecutionError("");
     try {
@@ -5305,6 +5309,39 @@ function AuthoringTaskPanel() {
     } finally {
       setIsConfirmingPlan(false);
     }
+  };
+  const supplementGeneration = async (planId: string) => {
+    if (supplementingPlanId || stoppingPlanId || terminatingPlanId || isSavingHandoff || !window.confirm("确认按计划最低题量补题？\n仅补齐各考评点、各题型尚未生成的题数，已有试题和审核状态不变。\n将创建一轮新的补题请求，原停止请求及其累计失败记录保留；补题继续遵循数据库中的对应质量标准。")) return;
+    setSupplementingPlanId(planId);
+    setExecutionError("");
+    setProgressError("");
+    try {
+      const response = await fetch(`/api/v1/authoring/plans/${planId}/generate`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "supplement" }), signal: AbortSignal.timeout(30_000),
+      });
+      const payload = await response.json() as {
+        data?: { job: QuestionGenerationJob; summary: { target: number; preservedQuestions: number; missingQuestions: number } };
+        error?: { message?: string };
+      };
+      if (!response.ok || !payload.data) throw new Error(payload.error?.message ?? "补题启动失败。");
+      // Stop-response fencing applies to the old requests, not this new round.
+      terminatedPlans.current.delete(planId);
+      if (confirmedPlanId !== planId) setExecutionQuestions([]);
+      setConfirmedPlanId(planId);
+      setGenerationJob(payload.data.job);
+      setHistoryPlanId(null);
+      setGeneratedPlan(null);
+      setIsViewingHistoryResult(false);
+      trackExecution(planId);
+      setNotice(`已启动补题：计划最低${payload.data.summary.target}道，保留${payload.data.summary.preservedQuestions}道，本轮补齐${payload.data.summary.missingQuestions}道。`);
+      await loadTaskHistory();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "补题启动失败。";
+      setExecutionError(message);
+      setProgressError(message);
+      setNotice(message);
+    } finally { setSupplementingPlanId(null); }
   };
   const saveExpertHandoff = async () => {
     if (!confirmedPlanId) {
@@ -5885,7 +5922,7 @@ function AuthoringTaskPanel() {
               </div>
               <p className="mb-0 mt-3 text-sm text-[#6980a4]">
                 {generationJob.currentBatch ? `当前第 ${generationJob.currentBatch} / ${generationJob.totalBatches} 批；` : ""}
-                {generationJob.status === "stopped" ? "所有未完成请求已关闭，不再生成或重试。" : generationJob.status === "cancelled" ? "任务批次和请求已清理。" : `已完成 ${generationJob.completedBatches} / ${generationJob.totalBatches} 批。每批最多100题，每点合并题型生成，最多2路并发；刷新或关闭页面不会中断。`}
+                {generationJob.status === "stopped" ? "原未完成请求已关闭；题量不足时可点击补题创建新请求。" : generationJob.status === "cancelled" ? "任务批次和请求已清理。" : `已完成 ${generationJob.completedBatches} / ${generationJob.totalBatches} 批。每批最多100题，每点合并题型生成，最多2路并发；刷新或关闭页面不会中断。`}
               </p>
               {generationJob.status === "cancelled" && generationJob.terminationSummary ? (
                 <p className="mb-0 mt-3 text-sm text-[#6980a4]">已清理 {generationJob.terminationSummary.deletedQuestions} 道草稿；保留 {generationJob.terminationSummary.preservedQuestions} 道受保护试题。终止记录已留存。</p>
@@ -5893,14 +5930,20 @@ function AuthoringTaskPanel() {
               {generationJob.status === "stopped" && generationJob.stopSummary ? (
                 <p className="mb-0 mt-3 text-sm text-[#6980a4]">原计划 {generationJob.stopSummary.target} 道，保留 {generationJob.stopSummary.preservedQuestions} 道，未生成 {generationJob.stopSummary.missingQuestions} 道。缺口及失败记录已留存。</p>
               ) : null}
-              {(generationActive || generationJob.status === "partial") && confirmedPlanId ? (
+              {(generationActive || generationJob.status === "partial" || generationJob.status === "stopped") && confirmedPlanId ? (
                 <div className="mt-3 flex flex-wrap gap-3">
                 <button type="button" className="rounded-lg border border-[#b9cae5] bg-white px-4 py-2 text-[#385578] disabled:opacity-50"
-                  disabled={Boolean(stoppingPlanId || terminatingPlanId)} onClick={() => void stopKeepTask(confirmedPlanId)}>
-                  {stoppingPlanId === confirmedPlanId ? "停止生成中..." : "停止生成，保留成果"}
+                  disabled={Boolean(stoppingPlanId || terminatingPlanId || supplementingPlanId) || generationJob.status === "stopped"} onClick={() => void stopKeepTask(confirmedPlanId)}>
+                  {stoppingPlanId === confirmedPlanId ? "停止生成中..." : generationJob.status === "stopped" ? "已停止，保留成果" : "停止生成，保留成果"}
                 </button>
+                <SupplementButton
+                  className="rounded-lg border border-[#b9cae5] bg-white px-4 py-2 text-[#385578] disabled:opacity-50"
+                  enabled={generationJob.status === "stopped" && generationJob.generated < generationJob.target && !stoppingPlanId && !terminatingPlanId && !supplementingPlanId && !isSavingHandoff}
+                  busy={supplementingPlanId === confirmedPlanId}
+                  onClick={() => void supplementGeneration(confirmedPlanId)}
+                />
                 <button type="button" className="rounded-lg border border-[#f0c8ce] px-4 py-2 text-[#cf4d58] disabled:opacity-50"
-                  disabled={Boolean(terminatingPlanId || stoppingPlanId)} onClick={() => void terminateTask(confirmedPlanId)}>
+                  disabled={Boolean(terminatingPlanId || stoppingPlanId || supplementingPlanId) || generationJob.status === "stopped"} onClick={() => void terminateTask(confirmedPlanId)}>
                   {terminatingPlanId === confirmedPlanId ? "终止清理中..." : "终止任务"}
                 </button>
                 </div>
@@ -5924,10 +5967,10 @@ function AuthoringTaskPanel() {
                   {generationJob.status !== "stopped" ? <>
                   <button
                     className="mt-3 rounded-lg bg-[#2e66dd] px-4 py-2 text-white disabled:bg-[#9aaae0]"
-                    disabled={isConfirmingPlan || Boolean(stoppingPlanId || terminatingPlanId) || generationActive || generationJob.failedUnits.every((unit) => unit.retryable === false)}
+                    disabled={isConfirmingPlan || Boolean(stoppingPlanId || terminatingPlanId || supplementingPlanId) || generationActive || generationJob.failedUnits.every((unit) => unit.retryable === false)}
                     onClick={() => void retryFailedGeneration()} type="button"
                   >{isConfirmingPlan ? "正在重试..." : "仅重试失败部分"}</button>
-                  <p className="mb-0 mt-2">重试先分析未覆盖知识角度，每次仅补1题；连续两次新增0题停止。累计最多6次精准补题、12次执行，达到上限或依据不足时需人工处理。</p>
+                  <p className="mb-0 mt-2">每次仅补1题，按对应质量标准选择不同考查任务；理论可采用同一知识的不同考查任务。连续两次新增0题停止，每个请求累计最多6次精准补题、12次执行。</p>
                   </> : null}
                 </div>
               ) : null}
@@ -6007,6 +6050,11 @@ function AuthoringTaskPanel() {
                     <p className="m-0 mt-2 text-sm text-[#50627e]">
                       答案：{item.answers.join("、")}；解析：{item.analysis}
                     </p>
+                    {item.qualityRelaxations?.map((entry, noteIndex) => (
+                      <p className="m-0 mt-2 text-sm text-[#a6711f]" key={noteIndex}>
+                        补题说明：仅放宽知识角度独立性。原因：{entry.reason}；考查任务：{entry.task}。请核查任务差异、答案及依据。
+                      </p>
+                    ))}
                     <ScoreRubric value={item.scoreRubric} />
                   </details>
                   <label className="ml-5 text-sm text-[#7185a5]">
@@ -6058,7 +6106,7 @@ function AuthoringTaskPanel() {
               disabled={
                 isSavingHandoff ||
                 Boolean(generationJob && !["succeeded", "stopped"].includes(generationJob.status)) ||
-                Boolean(stoppingPlanId || terminatingPlanId) ||
+                Boolean(stoppingPlanId || terminatingPlanId || supplementingPlanId) ||
                 !executionQuestions.length ||
                 manualChecks.some((item) => item === "待人工核查")
               }
@@ -6187,14 +6235,19 @@ function AuthoringTaskPanel() {
                       </button>
                       <button
                         className="ml-3 rounded-xl border border-[#b9cae5] bg-white px-4 py-2.5 text-sm font-medium text-[#385578] disabled:opacity-50"
-                        disabled={Boolean(stoppingPlanId || terminatingPlanId) || !["queued", "running", "partial"].includes(row.generation_status ?? "")}
+                        disabled={Boolean(stoppingPlanId || terminatingPlanId || supplementingPlanId) || !["queued", "running", "partial"].includes(row.generation_status ?? "")}
                         onClick={() => void stopKeepTask(row.id)} type="button"
                       >
                         {stoppingPlanId === row.id ? "停止生成中..." : row.generation_status === "stopped" ? "已停止，保留成果" : "停止生成，保留成果"}
                       </button>
+                      <SupplementButton
+                        enabled={row.generation_status === "stopped" && row.question_count < row.quota_json.minimumTotal && !stoppingPlanId && !terminatingPlanId && !supplementingPlanId && !isLoadingHistoryResult && !isSavingHandoff}
+                        busy={supplementingPlanId === row.id}
+                        onClick={() => void supplementGeneration(row.id)}
+                      />
                       <button
                         className="ml-3 rounded-xl border border-[#f0c8ce] bg-white px-4 py-2.5 text-sm font-medium text-[#cf4d58]"
-                        disabled={Boolean(terminatingPlanId || stoppingPlanId) || !["queued", "running", "partial"].includes(row.generation_status ?? "")}
+                        disabled={Boolean(terminatingPlanId || stoppingPlanId || supplementingPlanId) || !["queued", "running", "partial"].includes(row.generation_status ?? "")}
                         onClick={() => void terminateTask(row.id)}
                         type="button"
                       >

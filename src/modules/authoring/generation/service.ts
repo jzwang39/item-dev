@@ -7,17 +7,19 @@ import { buildChapterExcerptPool, selectBatchExcerpts } from "@/modules/blueprin
 import { query, withTransaction } from "@/shared/database/mysql";
 import { createUlid } from "@/shared/database/ulid";
 import { isLegalPoint } from "@/modules/authoring/legal-topics";
-import { buildBatches, GENERATION_CONCURRENCY, parseQuestions, questionTypes, quotaTotal, stemHash, validateQuota, type QuotaPoint, type Scope, type Snapshot, type QuestionType } from "./contracts";
+import { buildBatches, GENERATION_CONCURRENCY, parseQuestions, quotaTotal, stemHash, validateQuota, type QuotaPoint, type Scope, type Snapshot, type QuestionType } from "./contracts";
 import { loadSkillPlanBasis } from "../skill-plan";
 import { skillQuestionPrompt } from "./skill-prompt";
+import { theoryQuestionPrompt } from "./theory-prompt";
 import { cleanSkillStem } from "./skill-stem-quality";
-import { readSkillQualityStandard, type AppliedSkillQualityStandard } from "./skill-quality-standard";
+import { readGenerationQualityStandard, type AppliedQualityStandard } from "./skill-quality-standard";
 import { qualityStandardConfigs, qualityStandardContent } from "../quality-standard";
 import { assertFrozenPlanBasis, theoryPointContext } from "./plan-basis";
 import { readGenerationActivity } from "./activity";
 import { registerGenerationRequest } from "./cancellation";
+import { queueSupplementRound } from "./supplement";
 import { anglePlanningPrompt, angleSources, completeRetry, failureOf, GenerationFailure, keepSelectedAngle, MAX_TOTAL_ATTEMPTS, MAX_TARGETED_ATTEMPTS,
-  parseAnglePlan, prepareManualRetry, retryBlocked, retryQuestionFeedback, retryState, validationFailure,
+  parseAnglePlan, prepareManualRetry, recordQualityRelaxation, retryBlocked, retryQuestionFeedback, retryState, validationFailure,
   type RequestOutput, type RetryFailure, type RetryState } from "./retry-policy";
 
 function json<T>(value: T | string): T {
@@ -28,7 +30,7 @@ type Unit = RowDataPacket & {
   attempts: number; lease_token: string; snapshot_json: Snapshot | string; plan_id: string; created_by: string | null;
   retry_state_json: RetryState | string | null;
   error_message: string | null;
-  appliedSkillQualityStandard?: AppliedSkillQualityStandard;
+  appliedQualityStandard?: AppliedQualityStandard;
 };
 
 export async function startGeneration(planId: string, actorId: string, retryFailed = false) {
@@ -43,7 +45,8 @@ export async function startGeneration(planId: string, actorId: string, retryFail
     await assertFrozenPlanBasis(db, plan.project_id, scope);
     const [existing] = await db.execute<(RowDataPacket & { id: string; status: string })[]>("SELECT id,status FROM authoring_generation_jobs WHERE plan_id=?", [planId]);
     if (existing[0]) {
-      if (["stopped", "cancelled"].includes(existing[0].status)) throw new Error("任务已结束，不能恢复生成或重试；如需补题请新建计划。");
+      if (existing[0].status === "stopped") throw new Error("原请求已停止，不能恢复或原样重试；请使用“补题”创建新的缺额请求。");
+      if (existing[0].status === "cancelled") throw new Error("任务已终止，不能恢复生成或重试；如需补题请新建计划。");
       if (retryFailed) {
         const [active] = await db.execute<RowDataPacket[]>(
           "SELECT id FROM authoring_generation_units WHERE job_id=? AND status IN ('queued','running') LIMIT 1", [existing[0].id],
@@ -129,6 +132,14 @@ export async function startGeneration(planId: string, actorId: string, retryFail
   });
   ensureGenerationWorker();
   return { jobId: id, ...await getGenerationState(planId) };
+}
+
+export async function startSupplementGeneration(planId: string, actorId: string) {
+  const connection = await getSavedModelConnection();
+  if (!connection) throw new Error("未配置可用模型连接，请先保存模型设置。");
+  const result = await withTransaction((db) => queueSupplementRound(db, planId, actorId, connection));
+  ensureGenerationWorker();
+  return { ...result, ...await getGenerationState(planId) };
 }
 
 export async function getGenerationState(planId: string) {
@@ -226,6 +237,7 @@ async function claimUnit(): Promise<Unit | null> {
     const unit = units[0];
     if (!unit) throw new Error("领取的命题请求或关联任务不存在。");
     const state = retryState(unit.retry_state_json);
+    if (state.supplement) unit.created_by = state.supplement.actorId;
     if (!unit.retry_state_json && Number(unit.attempts) > 0 && unit.error_message) {
       state.targeted = true;
       state.failures = [validationFailure(unit.error_message)];
@@ -303,8 +315,14 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
         skillContext: node.skillContext, skillStructure: snapshot.skillStructure,
         assessmentPointCode: node.code, generatedAt: new Date().toISOString(),
         retryAngle: output.state.selectedAngle, retryCovered: output.state.covered,
+        supplement: output.state.supplement,
         stemCleanup: question.originalStem ? { originalStem: question.originalStem, cleanedStem: question.stem, rule: "remove_identity_intro" } : undefined,
-        appliedSkillQualityStandard: unit.appliedSkillQualityStandard,
+        formatRepairs: question.formatRepairs,
+        appliedQualityStandard: unit.appliedQualityStandard,
+        appliedSkillQualityStandard: skill ? unit.appliedQualityStandard : undefined,
+        qualityRelaxations: output.state.selectedAngle?.reusesKnowledge
+          ? output.state.qualityRelaxations?.filter((entry) => entry.knowledge === output.state.selectedAngle?.angle
+            && entry.task === output.state.selectedAngle?.task && entry.questionType === question.questionType) : [],
       };
       await db.execute(`INSERT INTO questions(id,project_id,question_no,occupation_id,level_code,assessment_mode,question_type,current_version_id,current_status)
         VALUES(?,?,?,?,?,?,?,?,?)`, [questionId, snapshot.projectId, `AI-${unit.plan_id}-${String(slot.ordinal).padStart(4, "0")}`,
@@ -320,6 +338,14 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
       await db.execute("INSERT INTO question_assessment_points(question_version_id,blueprint_node_id) VALUES(?,?)", [versionId, node.id]);
       await db.execute(`INSERT INTO question_quality_checks(id,question_version_id,check_round,check_code,severity,result,detail_json)
         VALUES(?,?,'rule','authoring.basic_structure','info','pass',?)`, [createUlid(), versionId, JSON.stringify({ planId: unit.plan_id, unitId: unit.id, optionsValid: true })]);
+      if (source.qualityRelaxations?.length) {
+        await db.execute(`INSERT INTO question_quality_checks(id,question_version_id,check_round,check_code,severity,result,detail_json)
+          VALUES(?,?,'rule','authoring.knowledge_variant','warning','manual_required',?)`,
+        [createUlid(), versionId, JSON.stringify({
+          message: "为满足缺额采用同一知识、不同考查任务，仅放宽知识独立性；请人工核查任务差异、答案和依据。",
+          relaxations: source.qualityRelaxations, standard: unit.appliedQualityStandard,
+        })]);
+      }
       await db.execute(`INSERT INTO question_status_events(id,question_id,question_version_id,from_status,to_status,reason,actor_id)
         VALUES(?,?,?,NULL,?,'分批AI生成，等待人工核查',?)`, [createUlid(), questionId, versionId, status, unit.created_by]);
       await db.execute("UPDATE authoring_generation_slots SET question_id=?,stem_hash=? WHERE id=?", [questionId, hash, slot.id]);
@@ -328,13 +354,16 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
     }
     if (slots.length && !failures.length && !saved) failures.push({ code: "invalid_content", message: "模型未返回可保存的试题。" });
     const result = completeRetry(output.state, unit.attempts, saved, slots.length, failures);
-    const details = [...new Set(failures.map((failure) => failure.message))].join("；") || "仅补缺额，下一次按新的知识角度补一道";
+    const details = [...new Set(failures.map((failure) => failure.message))].join("；") || "仅补缺额，下一次按对应质量标准和不同考查任务补一道";
     await db.execute(`UPDATE authoring_generation_units SET status=?,error_message=?,retry_state_json=?,lease_token=NULL,lease_until=NULL,
       next_attempt_at=DATE_ADD(UTC_TIMESTAMP(3),INTERVAL ? SECOND) WHERE id=?`,
     [result.status, result.status === "succeeded" ? null : `${details}；本次保存${saved}题，尚缺${slots.length}题${result.state.stopReason ? `；${result.state.stopReason}` : ""}`.slice(0, 2000),
       JSON.stringify(result.state), result.delay, unit.id]);
     await refreshJob(db, unit.job_id);
-    if (saved) await audit(db, snapshot.projectId, unit.created_by, unit.plan_id, "authoring.plan.batch_output_saved", { jobId: unit.job_id, batchId: unit.batch_id, unitId: unit.id, saved });
+    if (saved) await audit(db, snapshot.projectId, unit.created_by, unit.plan_id, "authoring.plan.batch_output_saved", {
+      jobId: unit.job_id, batchId: unit.batch_id, unitId: unit.id, saved,
+      qualityRelaxations: output.state.qualityRelaxations, standard: unit.appliedQualityStandard,
+    });
     if (result.status !== "succeeded") {
       await audit(db, snapshot.projectId, unit.created_by, unit.plan_id, "authoring.plan.retry_result", {
         jobId: unit.job_id, unitId: unit.id, missing: slots.length, saved, attempts: unit.attempts, ...result.state,
@@ -368,7 +397,6 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
   );
   if (!missing.length) return { questions: [], failures: [], state };
   const requested = state.targeted ? missing.slice(0, 1) : missing;
-  const quotas = Object.fromEntries(questionTypes.map((type) => [type, requested.filter((slot) => slot.question_type === type).length]));
   const node = snapshot.nodes.find((item) => item.code === unit.point_code)!;
   const [metadata] = await query<(RowDataPacket & { name: string; requirement_json: unknown; source_ref_json: unknown })[]>(
     "SELECT name,requirement_json,source_ref_json FROM blueprint_nodes WHERE id=?", [node.id],
@@ -392,6 +420,30 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
     })), node.name);
     excerpts = selectBatchExcerpts(pool, previous.length, Math.max(1, previous.length + missing.length), unit.attempts);
   }
+  const kind = snapshot.scope.assessmentMode === "操作技能" ? "skill" : "theory";
+  const standard = await readGenerationQualityStandard(kind);
+  unit.appliedQualityStandard = standard;
+  if (kind === "skill") {
+    snapshot.qualityStandard = "";
+    snapshot.skillQualityStandard = standard.content;
+  } else {
+    snapshot.qualityStandard = standard.content;
+    snapshot.skillQualityStandard = undefined;
+  }
+  // Record the exact standard before analysis as well as generation, without
+  // permitting a stopped task or an old lease to consume another model call.
+  await withTransaction(async (db) => {
+    await db.execute("SELECT id FROM authoring_generation_capacity WHERE id=1 FOR UPDATE");
+    const [leases] = await db.execute<RowDataPacket[]>(
+      "SELECT id FROM authoring_generation_units WHERE id=? AND lease_token=? AND status='running' FOR UPDATE",
+      [unit.id, unit.lease_token],
+    );
+    if (!leases.length) throw new GenerationFailure("lease_expired", "质量标准读取后任务已停止或租约失效，不再生成。");
+    await audit(db, snapshot.projectId, unit.created_by, unit.plan_id,
+      kind === "skill" ? "authoring.plan.skill_quality_applied" : "authoring.plan.theory_quality_applied", {
+        jobId: unit.job_id, unitId: unit.id, attempts: unit.attempts, standard,
+      });
+  });
   const reuseAngle = keepSelectedAngle(state);
   if (!reuseAngle) state.selectedAngle = undefined;
   unit.retry_state_json = state;
@@ -401,13 +453,15 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
     if (!sources.length) throw new GenerationFailure("insufficient_basis", "冻结教材和标准未提供可核验原文，不能为补题编造新角度。");
     const analysisPrompt = anglePlanningPrompt(node.code, node.name, requested[0].question_type, previous, sources, state, {
       职业: snapshot.scope.occupation, 等级: snapshot.scope.levelCode, 依据: context,
-    });
+    }, { kind, content: standard.content, requirements: snapshot.qualityRequirements });
     if (!reuseAngle) {
       const analysis = await callGenerationModel(snapshot, connection.apiKey, analysisPrompt, cancellation);
-      const plan = parseAnglePlan(analysis, previous.length, sources, state.attemptedAngles);
+      const variantType = kind === "theory" && requested[0].question_type !== "practical" ? requested[0].question_type : undefined;
+      const plan = parseAnglePlan(analysis, previous.length, sources, state.attemptedAngles, variantType);
       state.covered = plan.covered;
       state.selectedAngle = plan.selected;
       state.attemptedAngles = [...state.attemptedAngles, plan.selected];
+      recordQualityRelaxation(state, plan.selected, requested[0].question_type);
     }
     unit.retry_state_json = state;
     cancellation.throwIfAborted();
@@ -420,48 +474,17 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
     await query("UPDATE authoring_generation_units SET retry_state_json=? WHERE id=? AND lease_token=? AND status='running'",
       [JSON.stringify(state), unit.id, unit.lease_token]);
   }
-  let instruction = `你是职业技能理论知识试题编制助手。严格依据冻结考评点、关联标准依据及提供的教材片段编制中文试题草稿，覆盖指定题型和数量。
-有教材时只能使用关联教材片段和标准依据；没有教材时以关联标准条目为考核范围，结合适用职业等级的通用专业知识出题。不得编造法律条款、数值标准或机构制度，资料不足不得凑题。遵守输入中的试题质量标准，但不得改变指定题型或数量、越出正式标准范围。
-题目不得重复已生成题干，不得仅改写同一题。答案、解析必须明确且符合知识依据。只返回JSON：
-{"questions":[{"assessmentPointCode":"指定考评点代码","questionType":"single","stem":"真实中文题干","options":[{"key":"A","content":"真实选项"}],"answers":["A"],"analysis":"答案依据解析"}]}。
-严格按照“本次题型配额”分别生成各题型的缺额。mixed仅表示同一请求包含多题型，绝不能作为任何题目的questionType。
-每条questionType只能是single（单选）、multiple（多选）或judgement（判断），禁止中文题型值。
-先在考评点范围内选择不同的事实、条件、流程步骤或应用情境，每道题考查不同内容，不能复制题干或只换语序、正反问法。排除题干所考查的内容也不得重复。即使只补1题，也必须是新的知识角度。
-单选恰好4个不同选项和1个答案；多选至少4个不同选项和至少2个答案；答案键必须对应选项。判断options必须为[]，answers必须为["正确"]或["错误"]，不能写true/false、对/错或A/B。`;
-  let prompt = JSON.stringify({
-    用户需求: snapshot.requirement, 职业: snapshot.scope.occupation, 等级: snapshot.scope.levelCode,
-    考评点: { code: node.code, name: node.name }, 指定题型: state.targeted ? requested[0].question_type : unit.question_type, 本次必须生成数: requested.length,
-    本次题型配额: quotas,
-    质量要求: snapshot.qualityRequirements, 试题质量标准: snapshot.qualityStandard,
-    冻结考评点与标准依据: node.theoryContext,
-    教材片段: excerpts, 排除题干: previous.map((item) => item.stem), 补齐次数: unit.attempts,
-  });
-  if (snapshot.scope.assessmentMode === "操作技能") {
-    const standard = await readSkillQualityStandard();
-    snapshot.skillQualityStandard = standard.content;
-    unit.appliedSkillQualityStandard = standard;
-    ({ instruction, prompt } = skillQuestionPrompt(snapshot, node.code, requested.length, previous.map((item) => item.stem)));
-    // Record every actual generation attempt, including ones yielding no valid
-    // questions. The initial job snapshot remains unchanged for provenance.
-    await withTransaction(async (db) => {
-      await db.execute("SELECT id FROM authoring_generation_capacity WHERE id=1 FOR UPDATE");
-      const [leases] = await db.execute<RowDataPacket[]>(
-        "SELECT id FROM authoring_generation_units WHERE id=? AND lease_token=? AND status='running' FOR UPDATE",
-        [unit.id, unit.lease_token],
-      );
-      if (!leases.length) throw new GenerationFailure("lease_expired", "质量标准读取后任务已停止或租约失效，不再生成。");
-      await audit(db, snapshot.projectId, unit.created_by, unit.plan_id, "authoring.plan.skill_quality_applied", {
-        jobId: unit.job_id, unitId: unit.id, attempts: unit.attempts, standard,
-      });
-    });
-  }
+  let { instruction, prompt } = kind === "skill"
+    ? skillQuestionPrompt(snapshot, node.code, requested.length, previous.map((item) => item.stem))
+    : theoryQuestionPrompt(snapshot, node.code, requested.map((slot) => slot.question_type), previous, excerpts, unit.attempts, state.targeted);
   if (state.selectedAngle) {
-    instruction += "\n本次为精准补题，只生成一道指定题型的新题。必须使用补题策略指定的知识角度和原文依据，检查与已有题的实质内容差异，并针对上次具体错误修正，不得忽略质量标准。";
+    instruction += "\n本次为精准补题，只生成一道指定题型的新题。必须使用补题策略指定的知识、考查任务和原文依据；复用知识时须确保实际考查任务不同，不只改写原题。针对上次具体错误修正，不得忽略对应质量标准和正确性底线。";
     prompt = JSON.stringify({ ...JSON.parse(prompt), 补题策略: retryQuestionFeedback(state, state.selectedAngle, requested[0].question_type) });
   }
   const content = await callGenerationModel(snapshot, connection.apiKey, { instruction, prompt }, cancellation);
   let parsed: ReturnType<typeof parseQuestions>;
-  try { parsed = parseQuestions(content, node.code, snapshot.scope.assessmentMode === "操作技能" ? "practical" : state.targeted ? requested[0].question_type : unit.question_type, snapshot.scope.occupation); }
+  try { parsed = parseQuestions(content, node.code, snapshot.scope.assessmentMode === "操作技能" ? "practical" : state.targeted ? requested[0].question_type : unit.question_type,
+    snapshot.scope.occupation, { judgement: kind === "theory" }); }
   catch (error) { throw new GenerationFailure("invalid_json", error instanceof Error ? error.message : "试题 JSON 无效。"); }
   const failures = parsed.invalidReasons.map(validationFailure);
   if (!parsed.valid.length && !failures.length) failures.push({ code: "invalid_content", message: "模型未返回试题，新增有效题为0。" });

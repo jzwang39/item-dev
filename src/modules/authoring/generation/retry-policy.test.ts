@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   anglePlanningPrompt, angleSources, completeRetry, failureOf, GenerationFailure, keepSelectedAngle,
-  parseAnglePlan, prepareManualRetry, retryBlocked, retryDelay, retryState, validationFailure,
+  parseAnglePlan, prepareManualRetry, recordQualityRelaxation, retryBlocked, retryDelay, retryQuestionFeedback, retryState, validationFailure,
 } from "./retry-policy";
 
 test("失败原因区分重复、题型、选项、答案、评分、JSON及网络错误", () => {
@@ -95,4 +95,66 @@ test("补题分析传入题干、选项、答案、解析和错误反馈，而�
   assert.equal(data.已有试题[0].analysis, "依据分类规则");
   assert.equal(data.上次失败[0].code, "invalid_answer");
   assert.match(prompt.instruction, /不得跨考评点/);
+});
+
+const variant = {
+  angle: "凭证分类规则", sourceId: "textbook-1", quote: "捐赠凭证应按业务类型分类保存",
+  task: "根据给定业务类型辨析错误归档方法，与已有概念识别题不同",
+  reusesKnowledge: true, reason: "核心知识已覆盖，通过错误诊断补足判断题缺额",
+};
+
+test("理论同知识不同任务可补缺额，引用和放宽原因缺失仍拦截", () => {
+  const content = JSON.stringify({ covered: plan.covered, remaining: [variant] });
+  const result = parseAnglePlan(content, 1, sources, [], "judgement");
+  assert.equal(result.selected.reusesKnowledge, true);
+  assert.equal(result.selected.questionType, "judgement");
+  assert.equal(result.selected.task, variant.task);
+  assert.throws(() => parseAnglePlan(content, 1, sources, []), /候选角度重复/);
+  for (const extra of [{ task: undefined }, { reason: undefined }, { quote: "虚构法规原文不得用于命题" }]) {
+    assert.throws(() => parseAnglePlan(JSON.stringify({ remaining: [{ ...variant, ...extra }] }), 1, sources, [], "judgement"));
+  }
+  assert.throws(() => parseAnglePlan('{"remaining":[]}', 1, sources, [], "judgement"), /可用考查任务/);
+});
+
+test("理论覆盖清单仅辅助，不让漏列索引阻塞有效补题，技能仍严格校验", () => {
+  const result = parseAnglePlan(JSON.stringify({ remaining: [variant] }), 4, sources, [], "judgement");
+  assert.equal(result.selected.task, variant.task);
+  assert.throws(() => parseAnglePlan(JSON.stringify({ remaining: [variant] }), 4, sources, []), /未完整覆盖/);
+});
+
+test("理论优先新知识，跨题型可复用知识但同题型不能重复尝试相同任务", () => {
+  const result = parseAnglePlan(JSON.stringify({ ...plan, remaining: [variant, plan.remaining[0]] }), 1, sources, [], "single");
+  assert.equal(result.selected.angle, "归档核对要素");
+  const content = JSON.stringify({ ...plan, remaining: [variant] });
+  const attempted = [{ ...variant, questionType: "single" as const }];
+  assert.throws(() => parseAnglePlan(content, 1, sources, attempted, "single"), /候选角度重复/);
+  assert.equal(parseAnglePlan(content, 1, sources, attempted, "judgement").selected.reusesKnowledge, true);
+});
+
+test("理论和技能补题分析严格隔离标准，技能不启用理论放宽", () => {
+  for (const kind of ["theory", "skill"] as const) {
+    const prompt = anglePlanningPrompt("A", "凭证归档", kind === "skill" ? "practical" : "single",
+      [], sources, retryState(null), {}, { kind, content: `${kind}专用数据库标准`, requirements: ["准确"] });
+    const data = JSON.parse(prompt.prompt);
+    const key = kind === "skill" ? "操作技能试题质量标准" : "试题质量标准";
+    assert.equal(data[key], `${kind}专用数据库标准`);
+    assert.equal(Object.hasOwn(data, kind === "skill" ? "试题质量标准" : "操作技能试题质量标准"), false);
+    assert.match(prompt.instruction, kind === "skill" ? /不得套用理论同知识变式放宽/ : /同一知识、不同考查任务/);
+    assert.match(data.质量执行策略.不可放宽底线, /答案正确/);
+  }
+});
+
+test("同知识变式留痕包含原因、任务和题型，成功清除当前角度但保留历史", () => {
+  const state = retryState(null);
+  state.selectedAngle = variant;
+  recordQualityRelaxation(state, variant, "judgement");
+  assert.equal(state.qualityRelaxations?.length, 1);
+  assert.equal(state.qualityRelaxations?.[0].task, variant.task);
+  assert.equal(state.qualityRelaxations?.[0].questionType, "judgement");
+  assert.match(retryQuestionFeedback(state, variant, "judgement").要求, /仅放宽知识角度独立性/);
+  const completed = completeRetry(state, 2, 1, 0, []);
+  assert.equal(completed.state.selectedAngle, undefined);
+  assert.equal(completed.state.qualityRelaxations?.length, 1);
+  recordQualityRelaxation(state, variant, "practical");
+  assert.equal(state.qualityRelaxations?.length, 1);
 });

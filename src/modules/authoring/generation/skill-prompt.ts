@@ -1,4 +1,5 @@
 import type { Snapshot } from "./contracts";
+import { generationQualityPolicy } from "./quality-policy";
 
 export function skillQuestionPrompt(snapshot: Snapshot, code: string, count: number, previous: string[]) {
   const node = snapshot.nodes.find((item) => item.code === code);
@@ -20,6 +21,7 @@ answers使用完整步骤原文，不能使用选项键。每题必须有scoreRu
       冻结内容结构: snapshot.skillStructure, 本次实操题数: count,
       质量要求: snapshot.qualityRequirements, 排除题干: previous,
       操作技能试题质量标准: snapshot.skillQualityStandard ?? "",
+      质量执行策略: generationQualityPolicy("skill", previous.length > 0),
     }),
   };
 }

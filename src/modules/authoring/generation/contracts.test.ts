@@ -104,3 +104,38 @@ test("兼容JSON围栏及数组，明确拒绝没有试题数组的结果", () =
   assert.equal(parseQuestions(`\`\`\`json\n${JSON.stringify([question()])}\n\`\`\``, "A", "single").valid.length, 1);
   assert.throws(() => parseQuestions('{"data":{}}', "A", "single"));
 });
+
+test("判断题明确正误值和冗余正误选项规范化后校验，并保留原始值", () => {
+  for (const [answer, expected] of [["对", "正确"], ["错", "错误"], [true, "正确"], [false, "错误"], ["FALSE", "错误"]] as const) {
+    const options = [{ key: "A", content: "正确" }, { key: "B", content: "错误" }];
+    const result = parseQuestions(JSON.stringify({ questions: [question({
+      questionType: "judgement", answers: [answer], options,
+    })] }), "A", "judgement", undefined, { judgement: true });
+    assert.equal(result.valid.length, 1);
+    assert.deepEqual(result.valid[0].answers, [expected]);
+    assert.deepEqual(result.valid[0].options, []);
+    assert.deepEqual(result.valid[0].formatRepairs?.originalAnswers, [answer]);
+    assert.deepEqual(result.valid[0].formatRepairs?.originalOptions, options);
+  }
+});
+
+test("规范化不推断A/B或缺失、模糊及多个判断答案，不丢弃有实质内容的选项", () => {
+  for (const answers of [["A"], [], ["正确", "错误"], ["不一定"], undefined]) {
+    assert.equal(parseQuestions(JSON.stringify({ questions: [question({
+      questionType: "judgement", options: [], answers,
+    })] }), "A", "judgement", undefined, { judgement: true }).valid.length, 0);
+  }
+  const meaningfulOptions = [{ key: "A", content: "需满足条件才正确" }, { key: "B", content: "不满足条件则错误" }];
+  assert.equal(parseQuestions(JSON.stringify({ questions: [question({
+    questionType: "judgement", answers: ["对"], options: meaningfulOptions,
+  })] }), "A", "judgement", undefined, { judgement: true }).valid.length, 0);
+  assert.equal(parseQuestions(JSON.stringify({ questions: [question({
+    questionType: "single", answers: ["对"],
+  })] }), "A", "single", undefined, { judgement: true }).valid.length, 0);
+});
+
+test("判断格式修复仅在普通理论生成显式启用，不放宽法规智能体共享校验", () => {
+  const content = JSON.stringify({ questions: [question({ questionType: "judgement", answers: ["对"], options: [] })] });
+  assert.equal(parseQuestions(content, "A", "judgement").valid.length, 0);
+  assert.equal(parseQuestions(content, "A", "judgement", undefined, { judgement: true }).valid.length, 1);
+});

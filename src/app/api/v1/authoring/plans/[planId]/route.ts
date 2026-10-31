@@ -4,7 +4,7 @@ import { z } from "zod";
 
 import { getVerifiedSession } from "@/auth";
 import { getGenerationState } from "@/modules/authoring/generation/service";
-import { getPlanQuestionRows } from "@/modules/authoring/generation/results";
+import { getPlanQuestionRows, resultQualityRelaxations } from "@/modules/authoring/generation/results";
 import { quotaPointSchema, quotaTotal, validateQuota, type Scope } from "@/modules/authoring/generation/contracts";
 import { isLegalPoint } from "@/modules/authoring/legal-topics";
 import { createUlid } from "@/shared/database/ulid";
@@ -24,6 +24,7 @@ export async function GET(_: Request, { params }: Readonly<{ params: { planId: s
     const questions = rows.map((row) => {
       const content = typeof row.content_json === "string" ? JSON.parse(row.content_json) as { options?: Array<{ key: string; content: string }> } : row.content_json;
       const answer = typeof row.answer_json === "string" ? JSON.parse(row.answer_json) as { answers?: string[] } : row.answer_json;
+      const qualityRelaxations = resultQualityRelaxations(row.quality_relaxations_json);
       return {
         id: row.id,
         questionNo: row.question_no,
@@ -34,7 +35,8 @@ export async function GET(_: Request, { params }: Readonly<{ params: { planId: s
         answers: answer.answers ?? [],
         analysis: row.analysis_text ?? "",
         scoreRubric: typeof row.score_rubric_json === "string" ? JSON.parse(row.score_rubric_json) : row.score_rubric_json,
-        autoCheck: "通过基础检查" as const,
+        autoCheck: qualityRelaxations.length ? "需人工复核" as const : "通过基础检查" as const,
+        qualityRelaxations,
         status: row.current_status
       };
     });

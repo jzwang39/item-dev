@@ -1,5 +1,7 @@
 import { z } from "zod";
 import type { GeneratedQuestion, QuestionType } from "./contracts";
+import { generationQualityPolicy, type QualityRelaxation } from "./quality-policy";
+import type { QualityStandardKind } from "../quality-standard";
 
 export const MAX_TOTAL_ATTEMPTS = 12;
 export const MAX_TARGETED_ATTEMPTS = 6;
@@ -9,13 +11,18 @@ export type FailureCode = "duplicate" | "invalid_json" | "invalid_type" | "inval
   | "network_timeout" | "network_error" | "rate_limited" | "model_error"
   | "connection_changed" | "save_error" | "lease_expired";
 export type RetryFailure = { code: FailureCode; message: string };
-export type KnowledgeAngle = { angle: string; sourceId: string; quote: string };
+export type KnowledgeAngle = {
+  angle: string; sourceId: string; quote: string;
+  task?: string; reusesKnowledge?: boolean; reason?: string; questionType?: QuestionType;
+};
 export type RetryState = {
   targeted: boolean; targetedAttempts: number; zeroOutputs: number;
   failures: RetryFailure[]; attemptedAngles: KnowledgeAngle[]; selectedAngle?: KnowledgeAngle;
   covered?: Array<{ index: number; angle: string }>;
   stopReason?: string;
   manualRecovery?: boolean;
+  qualityRelaxations?: QualityRelaxation[];
+  supplement?: { roundId: string; previousUnitId: string; previousAttempts: number; actorId: string };
 };
 export class GenerationFailure extends Error {
   constructor(public code: FailureCode, message: string) { super(message); }
@@ -95,52 +102,86 @@ const angleSchema = z.object({
   angle: z.string().trim().min(2).max(300),
   sourceId: z.string().trim().min(1).max(500),
   quote: z.string().trim().min(4).max(2000),
+  task: z.string().trim().min(4).max(500).optional(),
+  reusesKnowledge: z.boolean().optional(),
+  reason: z.string().trim().min(4).max(1000).optional(),
 });
 const planSchema = z.object({
-  covered: z.array(z.object({ index: z.number().int().nonnegative(), angle: z.string().trim().min(2).max(300) })).max(500),
+  covered: z.array(z.object({ index: z.number().int().nonnegative(), angle: z.string().trim().min(2).max(300) })).max(500).default([]),
   remaining: z.array(angleSchema).max(12),
   reason: z.string().trim().max(1000).optional(),
 });
-export function parseAnglePlan(content: string, previousCount: number, sources: AngleSource[], attempted: KnowledgeAngle[]) {
+export function parseAnglePlan(content: string, previousCount: number, sources: AngleSource[], attempted: KnowledgeAngle[],
+  variantType?: Exclude<QuestionType, "practical">) {
   let parsed: z.infer<typeof planSchema>;
   try { parsed = planSchema.parse(JSON.parse(content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""))); }
   catch { throw new GenerationFailure("angle_plan_invalid", "知识角度分析返回格式无效，需重新分析。"); }
   const indexes = new Set(parsed.covered.map((entry) => entry.index));
-  if (parsed.covered.length !== previousCount || indexes.size !== previousCount || parsed.covered.some((entry) => entry.index >= previousCount)) {
+  if (!variantType && (parsed.covered.length !== previousCount || indexes.size !== previousCount || parsed.covered.some((entry) => entry.index >= previousCount))) {
     throw new GenerationFailure("angle_plan_invalid", "知识角度分析未完整覆盖已有试题，不能补题。");
   }
-  if (!parsed.remaining.length) throw new GenerationFailure("insufficient_basis", parsed.reason || "未找到有依据且尚未覆盖的知识角度，需人工处理。");
+  if (!parsed.remaining.length) throw new GenerationFailure("insufficient_basis", parsed.reason || "未找到有依据的可用考查任务，需人工处理。");
   const excluded = new Set([...parsed.covered.map((entry) => entry.angle), ...attempted.map((entry) => entry.angle)].map(normalized));
-  const candidates = parsed.remaining.filter((candidate) => !excluded.has(normalized(candidate.angle)));
-  const selected = candidates.find((candidate) => sources.some((source) => source.id === candidate.sourceId
-    && normalized(source.content).includes(normalized(candidate.quote))));
+  const candidates = parsed.remaining.filter((candidate) => {
+    if (!variantType) return !candidate.reusesKnowledge && !excluded.has(normalized(candidate.angle));
+    const reused = candidate.reusesKnowledge || excluded.has(normalized(candidate.angle));
+    if (reused && (!candidate.task || !candidate.reason)) return false;
+    return !attempted.some((entry) => entry.questionType === variantType && entry.task && candidate.task
+      && normalized(entry.angle) === normalized(candidate.angle) && normalized(entry.task) === normalized(candidate.task));
+  }).sort((a, b) => Number(!!a.reusesKnowledge || excluded.has(normalized(a.angle)))
+    - Number(!!b.reusesKnowledge || excluded.has(normalized(b.angle))));
+  const candidate = candidates.find((entry) => sources.some((source) => source.id === entry.sourceId
+    && normalized(source.content).includes(normalized(entry.quote))));
+  const selected = candidate ? {
+    ...candidate, questionType: variantType,
+    reusesKnowledge: !!candidate.reusesKnowledge || excluded.has(normalized(candidate.angle)),
+  } : undefined;
   if (!selected) throw new GenerationFailure("angle_plan_invalid", "候选角度重复或引用无法在冻结依据中核对，不能据此补题。");
-  return { covered: parsed.covered, selected };
+  return { covered: parsed.covered.filter((entry) => entry.index < previousCount), selected };
 }
 export function anglePlanningPrompt(code: string, name: string, type: QuestionType, previous: Array<{
   stem: string; content?: unknown; answer?: unknown; analysis?: string | null;
-}>, sources: AngleSource[], state: RetryState, context: unknown) {
+}>, sources: AngleSource[], state: RetryState, context: unknown,
+  quality?: { kind: QualityStandardKind; content: string; requirements: string[] }) {
+  const variants = quality?.kind === "theory" && type !== "practical";
   return {
     instruction: `你是职业技能命题补题分析助手。本次只分析知识角度，不生成试题。严格限制在指定考评点、等级和冻结依据范围内。
 逐题结合题干、选项、答案和解析提炼已经覆盖的实质知识内容。不要把换词、换句式、正反问法视为新角度。
-找出适合指定缺额题型、有明确依据、尚未被已有题覆盖且未被之前补题尝试使用的新角度；不得跨考评点、编造依据或降低质量。
-每个候选给出sourceId和来源中逐字可核验的quote。资料不足或无新角度时remaining返回[]并说明reason，禁止凑数。
-只返回JSON：{"covered":[{"index":0,"angle":"已覆盖知识内容"}],"remaining":[{"angle":"尚未覆盖知识内容","sourceId":"提供的来源ID","quote":"该来源原文"}],"reason":""}。
-covered必须包含所有已有试题的索引且不重复；无已有题时返回[]。`,
+不得跨考评点、编造依据或放宽答案正确、依据真实、内容可答等底线。每个候选给出sourceId和来源中逐字可核验的quote。
+只返回JSON：{"covered":[{"index":0,"angle":"已覆盖知识内容"}],"remaining":[{"angle":"考查知识内容","sourceId":"提供的来源ID","quote":"该来源原文"${variants ? ',"task":"具体考查任务及与已有题的差异","reusesKnowledge":false,"reason":"选择该任务或复用知识的原因"' : ""}}],"reason":""}。
+${variants ? `本次理论补题优先新知识，知识已覆盖时允许同一知识、不同考查任务。
+例如概念识别、条件辨析、流程关系、错误诊断；实际任务必须不同，不能只换词、答案位置或简单正反改写。跨题型允许围绕同一规则出题，但不复制已有陈述。
+remaining可以包含同知识变式，必须额外返回task（具体不同的考查任务）、reusesKnowledge（是否复用知识）及reason（放宽原因）。复用知识不能伪称新知识。
+covered仅为辅助分析，不替代输入中的完整已有试题；不因无法完整列出covered而拒绝有原文依据的补题。仅当原文确实无法支持准确的新题或不同考查任务时返回remaining=[]。`
+    : `找出适合指定缺额题型、有明确依据、尚未被已有题覆盖且未被之前补题尝试使用的新角度，按对应专项质量标准执行，不得套用理论同知识变式放宽。
+资料不足或无新角度时remaining返回[]并说明reason，禁止凑数。covered必须包含所有已有试题的索引且不重复；无已有题时返回[]。`}`,
     prompt: JSON.stringify({
       考评点: { code, name }, 指定缺额题型: type, 冻结范围: context,
       已有试题: previous.map((entry, index) => ({ index, ...entry })),
       可用依据: sources, 已尝试角度: state.attemptedAngles, 上次失败: state.failures,
+      ...(quality ? {
+        [quality.kind === "skill" ? "操作技能试题质量标准" : "试题质量标准"]: quality.content,
+        质量要求: quality.requirements, 质量执行策略: generationQualityPolicy(quality.kind, true),
+      } : {}),
     }),
   };
 }
 export function retryQuestionFeedback(state: RetryState, angle: KnowledgeAngle, type: QuestionType) {
   return {
-    本次仅补一题: true, 指定缺额题型: type, 尚未覆盖的知识角度: angle,
+    本次仅补一题: true, 指定缺额题型: type, 本次考查角度与依据: angle,
     已覆盖知识角度: state.covered ?? [], 已尝试角度: state.attemptedAngles.filter((entry) => normalized(entry.angle) !== normalized(angle.angle)),
     上次具体错误: state.failures,
-    要求: "严格按指定角度、题型及引用依据生成一道新题；不重复已有题的实质内容，不仅换词改写，不降低原质量标准。",
+    要求: angle.reusesKnowledge && type !== "practical"
+      ? "仅放宽知识角度独立性，按指定不同考查任务及原文依据生成一道新题；不只换词改写，不复制原题。遵循理论质量标准，答案正确、依据真实、内容可答等底线不可放宽。"
+      : "严格按指定角度、题型及引用依据生成一道新题；不重复已有题的实质内容，不仅换词改写，遵循对应质量标准。",
   };
+}
+export function recordQualityRelaxation(state: RetryState, angle: KnowledgeAngle, type: QuestionType) {
+  if (!angle.reusesKnowledge || type === "practical" || !angle.task || !angle.reason) return;
+  state.qualityRelaxations = [...(state.qualityRelaxations ?? []), {
+    rule: "knowledge_independence", reason: angle.reason, knowledge: angle.angle,
+    task: angle.task, questionType: type, recordedAt: new Date().toISOString(),
+  }];
 }
 export function keepSelectedAngle(state: RetryState) {
   return !!state.selectedAngle && state.failures.length > 0 && state.failures.every((failure) => [

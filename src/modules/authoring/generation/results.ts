@@ -1,6 +1,7 @@
 import type { RowDataPacket } from "mysql2/promise";
 
 import { query } from "@/shared/database/mysql";
+import type { QualityRelaxation } from "./quality-policy";
 
 type QuestionRow = RowDataPacket & {
   id: string;
@@ -13,7 +14,13 @@ type QuestionRow = RowDataPacket & {
   score_rubric_json: unknown;
   point_name: string | null;
   current_status: string;
+  quality_relaxations_json: string | QualityRelaxation[] | null;
 };
+
+export function resultQualityRelaxations(value: QuestionRow["quality_relaxations_json"]): QualityRelaxation[] {
+  const parsed = typeof value === "string" ? JSON.parse(value) : value;
+  return Array.isArray(parsed) ? parsed : [];
+}
 
 export async function getPlanQuestionRows(planId: string) {
   // Aggregate only the point names so multiple associations cannot duplicate
@@ -21,6 +28,7 @@ export async function getPlanQuestionRows(planId: string) {
   return query<QuestionRow[]>(
     `SELECT q.id, q.question_no, q.question_type, q.current_status,
             qv.stem, qv.content_json, qv.answer_json, qv.analysis_text, qv.score_rubric_json,
+            JSON_EXTRACT(qv.source_snapshot_json, '$.qualityRelaxations') AS quality_relaxations_json,
             (SELECT MIN(bn.name)
                FROM question_assessment_points qap
                INNER JOIN blueprint_nodes bn ON bn.id = qap.blueprint_node_id
