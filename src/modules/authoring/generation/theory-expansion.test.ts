@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { documentText, publicIpv4, trustedDocumentUrl } from "./external-document";
 import { factualTheorySources } from "./evidence-catalog";
 import { acquireTheoryExpansion, parseExpansionAudit } from "./theory-expansion";
-import { ensureTargetedBudget, recoverCuratedTheoryBasis, recoverNoTextbookTheory, theoryGenerationLimit } from "./targeted-budget";
+import { ensureTargetedBudget, recoverExpansionReviewProtocol, recoverCuratedTheoryBasis, recoverNoTextbookTheory, theoryGenerationLimit } from "./targeted-budget";
 import { curatedTheoryBasis } from "./curated-theory-basis";
 import { generateTargeted } from "./targeted-generation";
 import { completeRetry, retryState } from "./retry-policy";
@@ -40,6 +40,103 @@ function curatedFixture() {
     nodes: [{ ...snapshot.nodes[0], code: "B-C-AD-002", name: "新媒体传播规律" }] };
   return { ...input, snapshot: target, code: "B-C-AD-002" };
 }
+
+function malformedCuratedReview() {
+  const input = curatedFixture();
+  const basis = curatedTheoryBasis(input.snapshot, input.code)!;
+  const budget = input.state.budget!;
+  budget.calls = 2;
+  budget.theoryExpansion = {
+    version: 1, discoveryAttempts: 0, reviewAttempts: 2, sources: [], discoveryResponses: [], errors: [],
+    curatedBasisId: basis.id, documents: [{
+      id: "D1", url: basis.url, text: basis.text, retrievedAt: basis.retrievedAt, suggestedTitle: basis.title,
+      hash: createHash("sha256").update(basis.text).digest("hex"),
+    }], reviewResponses: [
+      audit({ quote: basis.text, standardAllowsExpansion: false, explanation: "该摘录符合质量标准，出版机构可信，并能支持具体命题。" }),
+      '{"answer":"短视频用户从信息接收者变为多重主体。"}',
+    ],
+  };
+  budget.slots.s.blocked = { code: "insufficient_basis", message: "核验已达2次" };
+  input.state.failures = [budget.slots.s.blocked];
+  return input;
+}
+
+test("实际否定布尔值仍拒绝，即使解释说符合标准也不自动翻转", () => {
+  const input = malformedCuratedReview();
+  const evidence = input.state.budget!.theoryExpansion!;
+  assert.equal(parseExpansionAudit(evidence.reviewResponses[0], evidence.documents).length, 0);
+  assert.throws(() => parseExpansionAudit(evidence.reviewResponses[1], evidence.documents));
+});
+
+test("两轮后一轮返回摘要时一次恢复核验，保留原文及否定响应、不增加调用预算", () => {
+  const input = malformedCuratedReview();
+  const budget = input.state.budget!;
+  const originals = JSON.stringify(budget.theoryExpansion!.reviewResponses);
+  assert.equal(recoverExpansionReviewProtocol(input.state, input.snapshot, input.code), true);
+  assert.equal(budget.theoryExpansion!.reviewAttempts, 2);
+  assert.equal(budget.calls, 2);
+  assert.equal(budget.maxCalls, 24);
+  assert.equal(JSON.stringify(budget.theoryExpansion!.reviewResponses), originals);
+  assert.equal(budget.slots.s.blocked, undefined);
+  assert.equal(budget.slots.s.generations, 0);
+  assert.equal(recoverExpansionReviewProtocol(input.state, input.snapshot, input.code), false);
+});
+
+test("明确内容否定、篡改正文、跨考点和预算耗尽不能获得格式恢复", () => {
+  const validDenial = malformedCuratedReview();
+  validDenial.state.budget!.theoryExpansion!.reviewResponses[1] = validDenial.state.budget!.theoryExpansion!.reviewResponses[0];
+  assert.equal(recoverExpansionReviewProtocol(validDenial.state, validDenial.snapshot, validDenial.code), false);
+  const tampered = malformedCuratedReview();
+  tampered.state.budget!.theoryExpansion!.documents[0].hash = "changed";
+  assert.equal(recoverExpansionReviewProtocol(tampered.state, tampered.snapshot, tampered.code), false);
+  const input = malformedCuratedReview();
+  assert.equal(recoverExpansionReviewProtocol(input.state, input.snapshot, "OTHER"), false);
+  input.state.budget!.calls = 24;
+  assert.equal(recoverExpansionReviewProtocol(input.state, input.snapshot, input.code), false);
+});
+
+test("修正核验提示后独立重判，只有完整真实通过才返回依据", async () => {
+  const input = malformedCuratedReview();
+  assert.equal(recoverExpansionReviewProtocol(input.state, input.snapshot, input.code), true);
+  let calls = 0;
+  const sources = await acquireTheoryExpansion(input, {
+    signal: new AbortController().signal, persist: async () => {},
+    call: async (_phase, prompt) => {
+      calls++;
+      assert.match(prompt.instruction, /不是教材|是否教材/);
+      assert.match(prompt.instruction, /逐项阅读标准/);
+      assert.match(prompt.instruction, /不自动翻转/);
+      assert.doesNotMatch(prompt.instruction, /"standardAllowsExpansion":false/);
+      return audit({ quote: input.state.budget!.theoryExpansion!.documents[0].text });
+    },
+  });
+  assert.equal(sources.length, 1);
+  assert.equal(calls, 1);
+  assert.equal(input.state.budget!.theoryExpansion!.reviewAttempts, 3);
+  assert.equal(input.state.budget!.theoryExpansion!.reviewResponses.length, 3);
+});
+
+test("恢复后仍否定标准允许或仍返回摘要时不得生成，再执行也不追加核验", async () => {
+  for (const malformed of [true, false]) {
+    const input = malformedCuratedReview();
+    assert.equal(recoverExpansionReviewProtocol(input.state, input.snapshot, input.code), true);
+    let calls = 0;
+    const dependencies = {
+      signal: new AbortController().signal, persist: async () => {},
+      call: async () => {
+        calls++;
+        return malformed ? '{"answer":"摘要"}'
+          : audit({ quote: input.state.budget!.theoryExpansion!.documents[0].text, standardAllowsExpansion: false });
+      },
+    };
+    assert.equal((await acquireTheoryExpansion(input, dependencies)).length, 0);
+    assert.match(input.state.budget!.theoryExpansion!.errors.at(-1)!, malformed ? /结构或引用无效/ : /standardAllowsExpansion/);
+    await assert.rejects(() => acquireTheoryExpansion(input, dependencies), /核验已达3次/);
+    assert.equal(calls, 1);
+    assert.equal(input.state.budget!.slots.s.generations, 0);
+    assert.equal(recoverExpansionReviewProtocol(input.state, input.snapshot, input.code), false);
+  }
+});
 
 test("定向资料只匹配劝募员无教材新媒体考评点，不跨职业、考点、技能或教材", () => {
   const input = curatedFixture();

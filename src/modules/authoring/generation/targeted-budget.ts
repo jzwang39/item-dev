@@ -6,6 +6,8 @@ import type { Snapshot } from "./contracts";
 import type { TheoryExpansionState } from "./theory-expansion";
 import { factualTheorySources } from "./evidence-catalog";
 import { curatedTheoryBasis } from "./curated-theory-basis";
+import { expansionReviewMalformed } from "./expansion-review-schema";
+import { createHash } from "node:crypto";
 
 export const MAX_SLOT_GENERATIONS = 3;
 export const MAX_SLOT_REPAIRS = 2;
@@ -133,6 +135,30 @@ export function recoverCuratedTheoryBasis(state: RetryState, snapshot: Pick<Snap
     slot.blocked = undefined;
     budget.history = [...budget.history.slice(-59), { phase: "analysis", slotId: id, at: new Date().toISOString(),
       outcome: "新媒体传播考评点定向资料一次恢复：保留两轮无效地址检索及全部调用计数，使用版本化学术正文重新核验，不新增额度。" }];
+  }
+  state.stopReason = undefined;
+  return true;
+}
+
+export function recoverExpansionReviewProtocol(state: RetryState, snapshot: Pick<Snapshot, "scope" | "nodes">, code: string) {
+  const budget = state.budget;
+  const evidence = budget?.theoryExpansion;
+  const basis = curatedTheoryBasis(snapshot, code);
+  if (!budget || !evidence || !basis || evidence.curatedBasisId !== basis.id || evidence.reviewProtocolRecovery
+    || evidence.sources.length || evidence.reviewAttempts !== 2 || evidence.reviewResponses.length !== 2
+    || !expansionReviewMalformed(evidence.reviewResponses[1]) || budget.calls >= budget.maxCalls
+    || state.failures.some((failure) => failure.code !== "insufficient_basis")
+    || evidence.documents.length !== 1 || evidence.documents[0].text !== basis.text || evidence.documents[0].url !== basis.url
+    || evidence.documents[0].hash !== createHash("sha256").update(basis.text).digest("hex")) return false;
+  const slots = Object.entries(budget.slots).filter(([, slot]) => !slot.done && slot.type === "single"
+    && slot.generations === 0 && slot.transportFailures < MAX_SLOT_TRANSPORT_FAILURES && slot.blocked?.code === "insufficient_basis");
+  if (!slots.length) return false;
+  evidence.reviewProtocolRecovery = { at: new Date().toISOString(), previousAttempts: evidence.reviewAttempts,
+    previousCalls: budget.calls, previousBlocks: Object.fromEntries(slots.map(([id, slot]) => [id, slot.blocked!])), extraReviews: 1 };
+  for (const [id, slot] of slots) {
+    slot.blocked = undefined;
+    budget.history = [...budget.history.slice(-59), { phase: "verification", slotId: id, at: new Date().toISOString(),
+      outcome: "定向资料核验协议一次恢复：原文及两次响应保留，追加最多1次完整独立核验，不翻转否定值、不清零计数、不增加调用预算。" }];
   }
   state.stopReason = undefined;
   return true;

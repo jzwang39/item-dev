@@ -22,7 +22,7 @@ import { completeRetry, failureOf, GenerationFailure, MAX_TOTAL_ATTEMPTS, MAX_TA
   prepareManualRetry, retryBlocked, retryState, validationFailure,
   type RequestOutput, type RetryFailure, type RetryState } from "./retry-policy";
 import { buildEvidenceCatalog, type EvidenceChapter } from "./evidence-catalog";
-import { ensureTargetedBudget, grantSkillRecovery, recoverCuratedTheoryBasis, recoverNoTextbookTheory, recoverTheoryDuplicate, theoryGenerationLimit, recoverSkillDesignProtocol, recoverPrematureBlocks, markTargetedSaved, MAX_SLOT_GENERATIONS, MAX_SLOT_REPAIRS, MAX_UNIT_MODEL_CALLS, type MissingSlot } from "./targeted-budget";
+import { ensureTargetedBudget, grantSkillRecovery, recoverExpansionReviewProtocol, recoverCuratedTheoryBasis, recoverNoTextbookTheory, recoverTheoryDuplicate, theoryGenerationLimit, recoverSkillDesignProtocol, recoverPrematureBlocks, markTargetedSaved, MAX_SLOT_GENERATIONS, MAX_SLOT_REPAIRS, MAX_UNIT_MODEL_CALLS, type MissingSlot } from "./targeted-budget";
 import { generateTargeted } from "./targeted-generation";
 
 function json<T>(value: T | string): T {
@@ -76,6 +76,7 @@ export async function startGeneration(planId: string, actorId: string, retryFail
             state.failures = [];
           }
           ensureTargetedBudget(state, missing, Number(unit.attempts), unit.error_message);
+          if (recoverExpansionReviewProtocol(state, json<Snapshot>(existing[0].snapshot_json), unit.point_code)) upgraded.push(unit.id);
           if (recoverCuratedTheoryBasis(state, json<Snapshot>(existing[0].snapshot_json), unit.point_code)) upgraded.push(unit.id);
           if (recoverNoTextbookTheory(state, json<Snapshot>(existing[0].snapshot_json), unit.point_code)) upgraded.push(unit.id);
           if (scope.assessmentMode === "操作技能" && recoverSkillDesignProtocol(state)) upgraded.push(unit.id);
@@ -206,7 +207,8 @@ export async function getGenerationState(planId: string) {
       failedUnits: failed.map((unit) => {
         const state = retryState(unit.retry_state_json);
         const recovery = retryState(JSON.stringify(state));
-        const expansionUpgrade = recoverCuratedTheoryBasis(recovery, snapshot, unit.point_code)
+        const expansionProtocolUpgrade = recoverExpansionReviewProtocol(recovery, snapshot, unit.point_code);
+        const expansionUpgrade = expansionProtocolUpgrade || recoverCuratedTheoryBasis(recovery, snapshot, unit.point_code)
           || recoverNoTextbookTheory(recovery, snapshot, unit.point_code);
         const protocolUpgrade = recoverSkillDesignProtocol(recovery);
         const theoryUpgrade = recoverTheoryDuplicate(recovery);
@@ -220,6 +222,12 @@ export async function getGenerationState(planId: string) {
             || ((protocolUpgrade || theoryUpgrade || expansionUpgrade) && !retryBlocked(recovery, Number(unit.attempts), true)) || !retryBlocked(state, Number(unit.attempts), true)),
           theoryRedesignAvailable: !["stopped", "cancelled"].includes(status) && theoryUpgrade && !retryBlocked(recovery, Number(unit.attempts), true),
           theoryExpansionAvailable: !["stopped", "cancelled"].includes(status) && expansionUpgrade && !retryBlocked(recovery, Number(unit.attempts), true),
+          expansionProtocolRecoveryAvailable: !["stopped", "cancelled"].includes(status) && expansionProtocolUpgrade && !retryBlocked(recovery, Number(unit.attempts), true),
+          expansionDocuments: state.budget?.theoryExpansion?.documents.map((document) => ({
+            id: document.id, title: document.suggestedTitle, url: document.url, text: document.text,
+            retrievedAt: document.retrievedAt, publication: document.retainedSource?.publication,
+            locator: document.retainedSource?.locator, acquisition: document.retainedSource?.acquisition,
+          })),
           designProtocolRecoveryAvailable: !["stopped", "cancelled"].includes(status) && protocolUpgrade && !retryBlocked(recovery, Number(unit.attempts), true),
           strategyUpgradeAvailable: !state.budget || flowUpgrade || expansionUpgrade,
           skillRecoveryAvailable: !["stopped", "cancelled"].includes(status) && skillRecoveryAvailable,
