@@ -1,5 +1,5 @@
 import type { GeneratedQuestion, QuestionType } from "./contracts";
-import type { KnowledgeAngle, RetryFailure, RetryState } from "./retry-policy";
+import type { AngleSource, KnowledgeAngle, RetryFailure, RetryState } from "./retry-policy";
 
 export const MAX_SLOT_GENERATIONS = 3;
 export const MAX_SLOT_REPAIRS = 2;
@@ -12,18 +12,31 @@ export type SlotBudget = {
   analysisFailures: number; reviewFailures: number; searchedSourceIds: string[]; searchReasons: string[];
   angle?: KnowledgeAngle; pendingResponse?: string; done?: boolean; blocked?: RetryFailure;
   evidenceSourceIds?: string[]; candidateRepairs?: GeneratedQuestion["candidateRepairs"];
-  rejectedCandidates?: Array<{ response: string; repairs?: GeneratedQuestion["candidateRepairs"]; angle?: KnowledgeAngle; failures: RetryFailure[]; at: string }>;
+  trialDesign?: boolean;
+  reviewMode?: "single";
+  singleReviews?: Array<{ index: number; response: string }>;
+  singleReviewFailures?: Record<number, number>;
+  recoveredBlock?: RetryFailure;
+  evidenceSources?: AngleSource[];
+  reviewResponses?: Array<{ mode: "batch" | "single"; index?: number; response: string }>;
+  rejectedCandidates?: Array<{ response: string; repairs?: GeneratedQuestion["candidateRepairs"]; angle?: KnowledgeAngle; failures: RetryFailure[]; at: string;
+    evidenceSources?: AngleSource[]; reviewResponses?: SlotBudget["reviewResponses"] }>;
 };
 export type TargetedBudget = {
   version: 2; calls: number; maxCalls: number; activeSlotId?: string; phase?: TargetedPhase;
+  workflowVersion?: 3;
   sourceCount?: number; slots: Record<string, SlotBudget>; completedAngles: KnowledgeAngle[];
+  reviewContext?: {
+    kind: "theory" | "skill"; qualityStandard: string; qualityRequirements: string[];
+    previous: Array<{ stem: string; content?: unknown; answer?: unknown; analysis?: string | null }>;
+  };
   origin: { attempts: number; targetedAttempts: number; failures: RetryFailure[]; legacyError?: string | null; stopReason?: string };
   history: Array<{ phase: TargetedPhase; slotId: string; outcome: string; at: string }>;
 };
 
 export function ensureTargetedBudget(state: RetryState, missing: MissingSlot[], attempts: number, legacyError?: string | null) {
   state.budget ??= {
-    version: 2, calls: 0, maxCalls: Math.min(MAX_UNIT_MODEL_CALLS, Math.max(24, missing.length * 16)),
+    version: 2, workflowVersion: 3, calls: 0, maxCalls: Math.min(MAX_UNIT_MODEL_CALLS, Math.max(24, missing.length * 16)),
     slots: {}, completedAngles: [],
     origin: { attempts, targetedAttempts: state.targetedAttempts, failures: state.failures.slice(), legacyError, stopReason: state.stopReason }, history: [],
   };
@@ -36,6 +49,33 @@ export function ensureTargetedBudget(state: RetryState, missing: MissingSlot[], 
     };
   }
   return state.budget;
+}
+
+export function recoverPrematureBlocks(state: RetryState) {
+  const budget = state.budget;
+  if (!budget || budget.workflowVersion === 3 || budget.calls >= budget.maxCalls) return false;
+  let recovered = false;
+  for (const [id, slot] of Object.entries(budget.slots)) {
+    if (slot.done || !slot.blocked || slot.transportFailures >= MAX_SLOT_TRANSPORT_FAILURES) continue;
+    const trial = slot.blocked.code === "insufficient_basis" && slot.generations < MAX_SLOT_GENERATIONS
+      && (budget.sourceCount ?? 0) > 0 && slot.searchedSourceIds.length === budget.sourceCount;
+    const review = slot.blocked.code === "review_invalid" && Boolean(slot.pendingResponse);
+    if (!trial && !review) continue;
+    slot.recoveredBlock = slot.blocked;
+    slot.blocked = undefined;
+    if (trial) slot.trialDesign = true;
+    if (review) slot.reviewMode = "single";
+    budget.history = [...budget.history.slice(-59), {
+      phase: trial ? "analysis" : "verification", slotId: id,
+      outcome: `一次性流程恢复，累计预算保留：${slot.recoveredBlock.message}`, at: new Date().toISOString(),
+    }];
+    recovered = true;
+  }
+  if (recovered) {
+    budget.workflowVersion = 3;
+    state.stopReason = undefined;
+  }
+  return recovered;
 }
 
 export function nextTargetedSlot(state: RetryState) {

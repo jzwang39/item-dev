@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ensureTargetedBudget, markTargetedSaved, nextTargetedSlot, targetedBudgetBlocked } from "./targeted-budget";
+import { ensureTargetedBudget, recoverPrematureBlocks, markTargetedSaved, nextTargetedSlot, targetedBudgetBlocked } from "./targeted-budget";
 import { completeRetry, prepareManualRetry, retryBlocked, retryState } from "./retry-policy";
 
 const missing = Array.from({ length: 5 }, (_, index) => ({ id: `slot-${index}`, ordinal: index + 1, question_type: "judgement" as const }));
@@ -72,4 +72,53 @@ test("模型调用前读取配置等失败也有独立上限，不会因调用�
   assert.equal(state.budget!.slots["slot-0"].generations, 0);
   assert.equal(state.budget!.slots["slot-0"].transportFailures, 3);
   assert.ok(retryBlocked(state, 1000, true));
+});
+
+test("旧分析早关和核验格式早关一次性恢复，所有计数和原候选保留", () => {
+  const state = retryState(null);
+  const budget = ensureTargetedBudget(state, missing.slice(0, 2), 12);
+  delete budget.workflowVersion;
+  budget.sourceCount = 2;
+  budget.calls = 5;
+  const trial = budget.slots["slot-0"];
+  trial.searchedSourceIds = ["a", "b"];
+  trial.blocked = { code: "insufficient_basis", message: "已查阅全部2段，未找到任务" };
+  const review = budget.slots["slot-1"];
+  review.generations = 1;
+  review.reviewFailures = 2;
+  review.repairs = 1;
+  review.pendingResponse = '{"questions":[]}';
+  review.blocked = { code: "review_invalid", message: "核验重复索引" };
+  assert.equal(recoverPrematureBlocks(state), true);
+  assert.equal(trial.trialDesign, true);
+  assert.equal(review.reviewMode, "single");
+  assert.equal(budget.calls, 5);
+  assert.equal(budget.origin.attempts, 12);
+  assert.equal(review.generations, 1);
+  assert.equal(review.repairs, 1);
+  assert.equal(review.reviewFailures, 2);
+  assert.equal(review.pendingResponse, '{"questions":[]}');
+  assert.equal(trial.recoveredBlock?.code, "insufficient_basis");
+  assert.equal(budget.history.length, 2);
+  assert.equal(retryBlocked(state, 14, true), undefined);
+  review.blocked = { code: "review_invalid", message: "新流程仍失败" };
+  assert.equal(recoverPrematureBlocks(state), false);
+  assert.ok(review.blocked);
+});
+
+test("无来源、内容轮次耗尽、总预算耗尽和其他硬失败不恢复", () => {
+  const state = retryState(null);
+  const budget = ensureTargetedBudget(state, missing, 0);
+  delete budget.workflowVersion;
+  budget.sourceCount = 0;
+  budget.slots["slot-0"].blocked = { code: "insufficient_basis", message: "无原文" };
+  budget.slots["slot-1"].blocked = { code: "quality_rejected", message: "未满足标准" };
+  assert.equal(recoverPrematureBlocks(state), false);
+  budget.sourceCount = 2;
+  budget.slots["slot-0"].searchedSourceIds = ["a", "b"];
+  budget.slots["slot-0"].generations = 3;
+  assert.equal(recoverPrematureBlocks(state), false);
+  budget.slots["slot-0"].generations = 0;
+  budget.calls = budget.maxCalls;
+  assert.equal(recoverPrematureBlocks(state), false);
 });

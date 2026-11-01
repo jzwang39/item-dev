@@ -246,3 +246,221 @@ test("核验引用编号错误重新核验同一候选，不浪费一轮内容�
   assert.equal(input.state.budget!.slots["slot-0"].generations, 1);
   assert.equal(input.state.budget!.calls, 4);
 });
+
+test("两段原文一次分析无任务仍试制候选，完整标准通过才能填槽", async () => {
+  const input = fixture();
+  input.sources = [source, { ...source, id: "second-reference" }];
+  const output = await generateTargeted(input, dependencies(async (prompt) => {
+    const data = JSON.parse(prompt.prompt);
+    assert.equal(data.试题质量标准, snapshot.qualityStandard);
+    if (prompt.instruction.includes("补题分析助手")) return '{"remaining":[],"reason":"未找到新知识"}';
+    if (prompt.instruction.includes("独立核验助手")) return review(prompt);
+    assert.equal(data.候选试制.原文支持和任务差异须另行核验, true);
+    assert.equal(data.原文依据.length, 2);
+    assert.match(prompt.instruction, /不得臆造条件/);
+    return JSON.stringify({ questions: [question] });
+  }));
+  assert.equal(output.questions.length, 1);
+  assert.equal(output.questions[0].targetSlotId, "slot-0");
+  const slot = input.state.budget!.slots["slot-0"];
+  assert.equal(slot.generations, 1);
+  assert.equal(slot.blocked, undefined);
+  assert.equal(slot.searchedSourceIds.length, 2);
+  assert.equal(slot.angle, undefined);
+  assert.equal(input.state.budget!.calls, 3);
+  assert.equal(input.state.qualityRelaxations, undefined);
+  assert.equal(slot.evidenceSources!.length, 2);
+});
+
+test("候选试制三轮使用不同路径，质量拒绝不保存也不无限尝试", async () => {
+  const input = fixture();
+  const paths: string[] = [];
+  let analyses = 0;
+  const deps = dependencies(async (prompt) => {
+    if (prompt.instruction.includes("补题分析助手")) {
+      analyses++;
+      return '{"remaining":[],"reason":"未找到新任务"}';
+    }
+    if (prompt.instruction.includes("独立核验助手")) return review(prompt, false);
+    paths.push(JSON.parse(prompt.prompt).候选试制.设计路径);
+    return JSON.stringify({ questions: [question] });
+  });
+  for (let index = 0; index < 3; index++) {
+    const output = await generateTargeted(input, deps);
+    assert.equal(output.questions.length, 0);
+    const result = completeRetry(input.state, 13 + index, 0, 1, output.failures);
+    assert.equal(result.status, index === 2 ? "failed" : "queued");
+  }
+  assert.equal(analyses, 1);
+  assert.equal(new Set(paths).size, 3);
+  const slot = input.state.budget!.slots["slot-0"];
+  assert.equal(slot.generations, 3);
+  assert.equal(slot.rejectedCandidates?.length, 3);
+  assert.equal(slot.rejectedCandidates![0].reviewResponses![0].mode, "batch");
+  assert.match(slot.rejectedCandidates![0].reviewResponses![0].response, /答案不能成立/);
+});
+
+test("确实无原文时不试制，保持人工处理边界", async () => {
+  const input = fixture();
+  input.sources = [];
+  const result = await generateTargeted(input, dependencies(async () => { throw new Error("不应调用模型"); }));
+  assert.equal(result.questions.length, 0);
+  assert.equal(result.failures[0].code, "insufficient_basis");
+  assert.equal(input.state.budget!.calls, 0);
+});
+
+test("批量索引错误改为逐候选核验，单题仍用索引0且不重新生成", async () => {
+  const input = fixture();
+  const candidates = [question, { ...question, stem: "归还资料需要核对完整性。" }, { ...question, stem: "借阅时必须登记资料信息。" }];
+  let generations = 0;
+  let singles = 0;
+  const deps = dependencies(async (prompt) => {
+    if (prompt.instruction.includes("补题分析助手")) return plan();
+    if (prompt.instruction.includes("独立核验助手")) {
+      const data = JSON.parse(prompt.prompt);
+      if (data.候选.length > 1) return review({ ...prompt, prompt: JSON.stringify({ ...data, 候选: data.候选.slice(0, 1) }) });
+      singles++;
+      assert.equal(data.候选[0].index, 0);
+      return review(prompt, singles === 2);
+    }
+    generations++;
+    return JSON.stringify({ questions: candidates });
+  });
+  const first = await generateTargeted(input, deps);
+  assert.equal(first.failures[0].code, "review_invalid");
+  const slot = input.state.budget!.slots["slot-0"];
+  assert.equal(slot.reviewMode, "single");
+  assert.ok(slot.pendingResponse);
+  const second = await generateTargeted(input, deps);
+  assert.equal(second.questions.length, 1);
+  assert.equal(second.questions[0].stem, candidates[1].stem);
+  assert.equal(generations, 1);
+  assert.equal(singles, 3);
+  assert.equal(slot.reviewResponses?.length, 4);
+});
+
+test("逐题核验仍格式异常时累计两次关闭并保留候选，绝不默认通过", async () => {
+  const input = fixture();
+  let generations = 0;
+  const deps = dependencies(async (prompt) => {
+    if (prompt.instruction.includes("补题分析助手")) return plan();
+    if (prompt.instruction.includes("独立核验助手")) return '{"checks":[]}';
+    generations++;
+    return JSON.stringify({ questions: [question] });
+  });
+  for (let index = 0; index < 3; index++) {
+    const output = await generateTargeted(input, deps);
+    assert.equal(output.questions.length, 0);
+  }
+  const slot = input.state.budget!.slots["slot-0"];
+  assert.equal(slot.reviewFailures, 1);
+  assert.equal(slot.singleReviewFailures![0], 2);
+  assert.equal(slot.blocked?.code, "review_invalid");
+  assert.ok(slot.pendingResponse);
+  assert.equal(generations, 1);
+  assert.equal(slot.reviewResponses?.length, 3);
+});
+
+test("逐题核验时停止，迟到响应不缓存、不继续核验或保存", async () => {
+  const input = fixture();
+  const controller = new AbortController();
+  let reviews = 0;
+  const deps = dependencies(async (prompt) => {
+    if (prompt.instruction.includes("补题分析助手")) return plan();
+    if (prompt.instruction.includes("独立核验助手")) {
+      if (++reviews === 1) return "broken";
+      controller.abort(new Error("停止生成"));
+      return review(prompt);
+    }
+    return JSON.stringify({ questions: [question] });
+  }, controller.signal);
+  await generateTargeted(input, deps);
+  const output = await generateTargeted(input, deps);
+  assert.equal(output.questions.length, 0);
+  assert.equal(input.state.budget!.slots["slot-0"].singleReviews, undefined);
+  assert.equal(input.state.budget!.slots["slot-0"].reviewResponses?.length, 1);
+});
+
+test("技能试制仍只使用专项标准和操作任务，不套用理论条件辨析", async () => {
+  const input = fixture();
+  input.state.budget!.slots["slot-0"].type = "practical";
+  input.snapshot = { ...snapshot, scope: { ...snapshot.scope, assessmentMode: "操作技能" },
+    qualityStandard: "理论污染不得传入", skillQualityStandard: "仅按原文操作要求设计完整任务。",
+    skillStructure: { totalScore: 100 },
+    nodes: [{ ...snapshot.nodes[0], skillContext: { source: { evidence: source.content } } }] };
+  const output = await generateTargeted(input, dependencies(async (prompt) => {
+    assert.doesNotMatch(prompt.prompt, /理论污染不得传入/);
+    const data = JSON.parse(prompt.prompt);
+    assert.equal(data.操作技能试题质量标准, input.snapshot.skillQualityStandard);
+    if (prompt.instruction.includes("补题分析助手")) return '{"remaining":[],"reason":"未找到完整任务"}';
+    assert.match(data.候选试制.设计路径, /操作任务/);
+    assert.doesNotMatch(data.候选试制.设计路径, /条件辨析/);
+    return '{"questions":[],"reason":"原文缺少完整操作成果要求"}';
+  }));
+  assert.equal(output.questions.length, 0);
+  assert.match(output.failures[0].message, /缺少完整操作成果要求/);
+  assert.equal(input.state.budget!.reviewContext?.kind, "skill");
+  assert.equal(input.state.qualityRelaxations, undefined);
+});
+
+test("逐题核验上下文改变后不复用旧标准下的结论", async () => {
+  const input = fixture();
+  const candidates = [question, { ...question, stem: "归还资料需要核对完整性。" }];
+  let calls = 0;
+  const deps = dependencies(async (prompt) => {
+    if (prompt.instruction.includes("补题分析助手")) return plan();
+    if (!prompt.instruction.includes("独立核验助手")) return JSON.stringify({ questions: candidates });
+    const data = JSON.parse(prompt.prompt);
+    if (data.候选.length > 1) return "broken";
+    calls++;
+    if (data.试题质量标准 === snapshot.qualityStandard) return calls === 1 ? review(prompt, false) : "broken";
+    return review(prompt, data.候选[0].stem === question.stem);
+  });
+  await generateTargeted(input, deps);
+  assert.equal((await generateTargeted(input, deps)).questions.length, 0);
+  assert.equal(input.state.budget!.slots["slot-0"].singleReviews?.length, 1);
+  input.snapshot = { ...snapshot, qualityStandard: `${snapshot.qualityStandard} 核对条件完整。` };
+  const result = await generateTargeted(input, deps);
+  assert.equal(result.questions.length, 1);
+  assert.equal(result.questions[0].stem, question.stem);
+  assert.equal(calls, 4);
+  assert.equal(input.state.budget!.slots["slot-0"].generations, 1);
+});
+
+test("后续候选网络失败不丢弃已经完整核验通过的候选", async () => {
+  const input = fixture();
+  const candidates = [question, { ...question, stem: "归还资料需要核对完整性。" }];
+  let singles = 0;
+  const deps = dependencies(async (prompt) => {
+    if (prompt.instruction.includes("补题分析助手")) return plan();
+    if (!prompt.instruction.includes("独立核验助手")) return JSON.stringify({ questions: candidates });
+    if (JSON.parse(prompt.prompt).候选.length > 1) return "broken";
+    if (++singles === 1) return review(prompt);
+    throw new GenerationFailure("network_error", "503");
+  });
+  await generateTargeted(input, deps);
+  const result = await generateTargeted(input, deps);
+  assert.equal(result.questions.length, 1);
+  assert.equal(result.questions[0].stem, question.stem);
+  assert.ok(result.questions[0].standardReview);
+  assert.equal(input.state.budget!.slots["slot-0"].generations, 1);
+});
+
+for (const reason of ["stop", "lease"] as const) {
+  test(`后续候选${reason === "stop" ? "停止" : "租约失效"}时此前通过的候选也不能继续保存`, async () => {
+    const input = fixture();
+    const controller = new AbortController();
+    let singles = 0;
+    const deps = dependencies(async (prompt) => {
+      if (prompt.instruction.includes("补题分析助手")) return plan();
+      if (!prompt.instruction.includes("独立核验助手")) return JSON.stringify({ questions: [question, { ...question, stem: "归还资料需要核对完整性。" }] });
+      if (JSON.parse(prompt.prompt).候选.length > 1) return "broken";
+      if (++singles === 1) return review(prompt);
+      if (reason === "stop") controller.abort(new Error("用户停止"));
+      else throw new GenerationFailure("lease_expired", "租约失效");
+      return review(prompt);
+    }, controller.signal);
+    await generateTargeted(input, deps);
+    assert.equal((await generateTargeted(input, deps)).questions.length, 0);
+  });
+}

@@ -4769,8 +4769,9 @@ type QuestionGenerationJob = {
     id: string; code: string; type: string; remaining: number; error: string;
     attempts?: number; failures?: Array<{ code: string; message: string }>; stopReason?: string; retryable?: boolean;
     strategyUpgradeAvailable?: boolean;
+    reviewContext?: { kind: "theory" | "skill"; qualityStandard: string; qualityRequirements: string[]; previous: unknown[] };
     modelCalls?: { used: number; limit: number };
-    missingSlots?: Array<{ id: string; ordinal: number; type: string; generations: number; repairs: number; searched: number; totalSources: number; reason?: string }>;
+    missingSlots?: Array<{ id: string; ordinal: number; type: string; generations: number; repairs: number; searched: number; totalSources: number; reason?: string; reviewRecord?: unknown }>;
   }>;
 };
 
@@ -5985,11 +5986,25 @@ function AuthoringTaskPanel() {
                     {generationJob.failedUnits.map((unit) => (
                       <div className="mt-2" key={unit.id}>
                         <p className="m-0">{unit.code} · {unit.type === "mixed" ? "混合题型" : unit.type === "single" ? "单选" : unit.type === "multiple" ? "多选" : unit.type === "practical" ? "实操" : "判断"} · 缺 {unit.remaining} 题{unit.attempts !== undefined ? ` · 累计${unit.attempts}次` : ""}：{unit.error}{generationJob.status !== "stopped" && unit.retryable === false ? " · 不可自动补题，需人工处理" : ""}</p>
-                        {unit.strategyUpgradeAvailable && generationJob.status !== "stopped" ? <p className="m-0 mt-1 text-[#6980a4]">可点击重试转入逐题补题策略，历史累计记录保留。</p> : null}
+                        {unit.strategyUpgradeAvailable && generationJob.status !== "stopped" ? <p className="m-0 mt-1 text-[#6980a4]">可点击重试进入候选试制或逐题核验流程；一次性恢复，历史累计次数和已用预算保留。</p> : null}
                         {unit.modelCalls ? <p className="m-0 mt-1 text-[#6980a4]">模型调用 {unit.modelCalls.used} / {unit.modelCalls.limit} 次（含检索、生成、修复及核验）</p> : null}
                         {unit.missingSlots?.map((slot) => (
                           <p key={slot.id} className="m-0 mt-1 text-[#6980a4]">第{slot.ordinal}题 · {slot.type === "single" ? "单选" : slot.type === "multiple" ? "多选" : slot.type === "practical" ? "实操" : "判断"} · 候选生成{slot.generations}/3轮 · 修复{slot.repairs}/2次 · 原文查阅{slot.searched}/{slot.totalSources}段{slot.reason ? `：${slot.reason}` : ""}</p>
                         ))}
+                        {unit.reviewContext || unit.missingSlots?.some((slot) => slot.reviewRecord) ? (
+                          <details className="mt-2 text-[#385578]">
+                            <summary className="cursor-pointer">查看原文、候选与核验记录</summary>
+                            <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-[#dbe4f3] bg-white p-3 text-xs">
+                              {JSON.stringify({
+                                对应质量标准: unit.reviewContext?.qualityStandard,
+                                标准类型: unit.reviewContext?.kind === "skill" ? "操作技能试题质量标准" : unit.reviewContext ? "试题质量标准" : undefined,
+                                计划质量要求: unit.reviewContext?.qualityRequirements,
+                                本考评点已有试题: unit.reviewContext?.previous,
+                                逐题记录: unit.missingSlots?.map((slot) => ({ 题号: slot.ordinal, 关闭原因: slot.reason, 记录: slot.reviewRecord })),
+                              }, null, 2)}
+                            </pre>
+                          </details>
+                        ) : null}
                       </div>
                     ))}
                   </details>
@@ -5999,7 +6014,7 @@ function AuthoringTaskPanel() {
                     disabled={isConfirmingPlan || Boolean(stoppingPlanId || terminatingPlanId || supplementingPlanId) || generationActive || generationJob.failedUnits.every((unit) => unit.retryable === false)}
                     onClick={() => void retryFailedGeneration()} type="button"
                   >{isConfirmingPlan ? "正在重试..." : "仅重试失败部分"}</button>
-                  <p className="mb-0 mt-2">每个缺题最多生成3轮候选、修复2次，按完整对应质量标准核验后择优填入1题；检索和网络失败不占候选生成额度，模型调用总量仍受限。原文未查阅完不直接判定依据不足；确实不足时转人工处理。</p>
+                  <p className="mb-0 mt-2">每个缺题最多生成3轮候选、修复2次，按完整对应质量标准核验后择优填入1题。分析未找到任务时允许有依据候选试制，批量核验格式异常时改为逐题核验；不降低标准，已用预算保留，仍不合格时查看记录并人工处理。</p>
                   </> : null}
                 </div>
               ) : null}
