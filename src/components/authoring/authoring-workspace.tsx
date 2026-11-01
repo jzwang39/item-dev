@@ -4774,13 +4774,14 @@ type QuestionGenerationJob = {
     designProtocolRecoveryAvailable?: boolean;
     theoryRedesignAvailable?: boolean;
     theoryEchoRecoveryAvailable?: boolean;
+    theoryBasisRecoveryAvailable?: boolean;
     theoryExpansionAvailable?: boolean;
     expansionProtocolRecoveryAvailable?: boolean;
     expansionDocuments?: ExpansionDocumentPreview[];
     skillRecovery?: { addedCalls: number; previousCalls: number; previousMaxCalls: number };
     reviewContext?: { kind: "theory" | "skill"; qualityStandard: string; qualityRequirements: string[]; previous: unknown[] };
     modelCalls?: { used: number; limit: number };
-    missingSlots?: Array<{ id: string; ordinal: number; type: string; generations: number; generationLimit?: number; expansionRecovered?: boolean; theoryEchoRecovered?: boolean; repairs: number; searched: number; totalSources: number; reason?: string; reviewRecord?: unknown;
+    missingSlots?: Array<{ id: string; ordinal: number; type: string; generations: number; generationLimit?: number; expansionRecovered?: boolean; theoryEchoRecovered?: boolean; theoryBasisRecovered?: boolean; repairs: number; searched: number; totalSources: number; reason?: string; reviewRecord?: unknown;
       skill?: { generations: number; repairs: number; designAttempts: number; designAttemptCredits?: number; designChecklistFailures?: number } }>;
   }>;
 };
@@ -6003,6 +6004,7 @@ function AuthoringTaskPanel() {
                         {unit.designProtocolRecoveryAvailable ? <p className="m-0 mt-1 text-[#6980a4]">可点击重试恢复被核验字段遗漏阻断的原设计，重新逐条核验；不增加调用预算、不清零历史次数。</p> : null}
                         {unit.theoryRedesignAvailable ? <p className="m-0 mt-1 text-[#6980a4]">可点击重试，一次追加1轮理论任务重设计；排除重复任务，历史3轮和调用预算保留，完整质量标准不降低。</p> : null}
                         {unit.theoryEchoRecoveryAvailable ? <p className="m-0 mt-1 text-[#6980a4]">检测到旧流程连续复述已有题。可点击重试，以隔离旧题答案的单候选流程恢复1轮；历史次数和调用上限保留，仍须查重与完整核验。</p> : null}
+                        {unit.theoryBasisRecoveryAvailable ? <p className="m-0 mt-1 text-[#6980a4]">旧资料未直接说明评估指标。可点击重试，改用已核对的指标定义表重新核验；通过后最多生成1轮新题，旧资料、成果及累计次数保留。</p> : null}
                         {unit.expansionProtocolRecoveryAvailable ? <p className="m-0 mt-1 text-[#6980a4]">参考原文已载入，上次核验返回格式无效；可重试一次完整依据核验，不自动翻转否定值，历史计数和调用预算保留。</p>
                           : unit.theoryExpansionAvailable ? <p className="m-0 mt-1 text-[#6980a4]">可点击重试，一次恢复扩展依据核验后再生成；来源须实际获取或有可追溯的留存原文并标注扩展，历史计数和调用预算保留。</p> : null}
                         {unit.skillRecovery ? <p className="m-0 mt-1 text-[#6980a4]">技能专项授权新增 {unit.skillRecovery.addedCalls} 次调用额度；授权前已用 {unit.skillRecovery.previousCalls} / {unit.skillRecovery.previousMaxCalls} 次。</p> : null}
@@ -6010,7 +6012,7 @@ function AuthoringTaskPanel() {
                         {unit.missingSlots?.map((slot) => (
                           <p key={slot.id} className="m-0 mt-1 text-[#6980a4]">第{slot.ordinal}题 · {slot.type === "single" ? "单选" : slot.type === "multiple" ? "多选" : slot.type === "practical" ? "实操" : "判断"} · {slot.skill
                             ? `累计专项任务设计${slot.skill.designAttempts}轮 · 有效设计额度${slot.skill.designAttempts - (slot.skill.designAttemptCredits ?? 0)}/3轮${slot.skill.designAttemptCredits ? `（纯格式误耗${slot.skill.designAttemptCredits}轮单独留痕）` : ""} · 标准核验格式失败${slot.skill.designChecklistFailures ?? 0}/2次 · 专项候选${slot.skill.generations}/3轮 · 专项字段修复${slot.skill.repairs}/6次 · 累计生成${slot.generations}轮、修复${slot.repairs}次`
-                            : `候选生成${slot.generations}/${slot.generationLimit ?? 3}轮${slot.theoryEchoRecovered ? "（含一次旧题复述恢复）" : slot.expansionRecovered ? "（含一次扩展依据恢复）" : (slot.generationLimit ?? 3) > 3 ? "（含一次重复任务重设计）" : ""} · 修复${slot.repairs}/2次`} · 原文查阅{slot.searched}/{slot.totalSources}段{slot.reason ? `：${slot.reason}` : ""}</p>
+                            : `候选生成${slot.generations}/${slot.generationLimit ?? 3}轮${slot.theoryBasisRecovered ? "（含一次指标资料修订）" : slot.theoryEchoRecovered ? "（含一次旧题复述恢复）" : slot.expansionRecovered ? "（含一次扩展依据恢复）" : (slot.generationLimit ?? 3) > 3 ? "（含一次重复任务重设计）" : ""} · 修复${slot.repairs}/2次`} · 原文查阅{slot.searched}/{slot.totalSources}段{slot.reason ? `：${slot.reason}` : ""}</p>
                         ))}
                         <ExpansionEvidence documents={unit.expansionDocuments} />
                         {unit.reviewContext || unit.missingSlots?.some((slot) => slot.reviewRecord) ? (

@@ -5,7 +5,7 @@ import { designCorePassed, parseDesignReviewCore } from "./skill-design-review";
 import type { Snapshot } from "./contracts";
 import type { TheoryExpansionState } from "./theory-expansion";
 import { factualTheorySources } from "./evidence-catalog";
-import { curatedTheoryBasis } from "./curated-theory-basis";
+import { curatedTheoryBasis, curatedTheoryBasisReplacement } from "./curated-theory-basis";
 import { expansionReviewMalformed } from "./expansion-review-schema";
 import { createHash } from "node:crypto";
 
@@ -34,6 +34,7 @@ export type SlotBudget = {
   theoryRedesignRecovery?: { at: string; previousBlock: RetryFailure; previousGenerations: number; extraGenerations: 1 };
   theoryPromptVersion?: 2;
   theoryEchoRecovery?: { at: string; previousBlock: RetryFailure; previousGenerations: number; previousCalls: number; extraGenerations: 1 };
+  theoryBasisRecovery?: { at: string; previousBlock: RetryFailure; previousGenerations: number; extraGenerations: 1 };
   expansionRecovery?: { at: string; previousBlock: RetryFailure; previousGenerations: number; extraGenerations: 1 };
   angle?: KnowledgeAngle; pendingResponse?: string; done?: boolean; blocked?: RetryFailure;
   evidenceSourceIds?: string[]; candidateRepairs?: GeneratedQuestion["candidateRepairs"];
@@ -89,6 +90,7 @@ export function skillSlotWorkflow(slot: SlotBudget): SkillSlotWorkflow {
 }
 
 export function theoryGenerationLimit(slot: SlotBudget) {
+  if (slot.theoryBasisRecovery) return slot.theoryBasisRecovery.previousGenerations + slot.theoryBasisRecovery.extraGenerations;
   if (slot.theoryEchoRecovery) return slot.theoryEchoRecovery.previousGenerations + slot.theoryEchoRecovery.extraGenerations;
   if (slot.expansionRecovery) return slot.expansionRecovery.previousGenerations + slot.expansionRecovery.extraGenerations;
   return slot.theoryRedesignRecovery
@@ -192,6 +194,40 @@ export function recoverTheoryDuplicate(state: RetryState) {
   }
   if (recovered) state.stopReason = undefined;
   return recovered;
+}
+
+export function recoverTheoryBasisRevision(state: RetryState, snapshot: Pick<Snapshot, "scope" | "nodes">, code: string) {
+  const budget = state.budget, evidence = budget?.theoryExpansion;
+  const replacement = curatedTheoryBasisReplacement(snapshot, code);
+  if (!budget || !evidence || !replacement || evidence.basisRevision || budget.maxCalls - budget.calls < 3
+    || evidence.curatedBasisId !== replacement.previous.id
+    || state.failures.some((failure) => !["duplicate", "evidence_invalid"].includes(failure.code))
+    || !evidence.documents.some((document) => document.text === replacement.previous.text && document.url === replacement.previous.url
+      && document.hash === createHash("sha256").update(replacement.previous.text).digest("hex"))) return false;
+  const slots = Object.entries(budget.slots).filter(([, slot]) => !slot.done && slot.type === "single"
+    && !slot.theoryBasisRecovery && !slot.pendingResponse && slot.transportFailures < MAX_SLOT_TRANSPORT_FAILURES
+    && slot.blocked && ["duplicate", "evidence_invalid"].includes(slot.blocked.code));
+  if (!slots.length) return false;
+  const at = new Date().toISOString();
+  evidence.basisRevision = { fromId: replacement.previous.id, toId: replacement.next.id, at,
+    previousSources: evidence.sources, previousReviewAttempts: evidence.reviewAttempts, previousCalls: budget.calls };
+  evidence.sources = [];
+  evidence.curatedBasisId = replacement.next.id;
+  for (const [id, slot] of slots) {
+    slot.theoryBasisRecovery = { at, previousBlock: slot.blocked!, previousGenerations: slot.generations, extraGenerations: 1 };
+    slot.blocked = undefined;
+    slot.angle = undefined;
+    slot.trialDesign = false;
+    slot.analysisSearchedSourceIds = [];
+    slot.evidenceSourceIds = [];
+    slot.singleReviews = undefined;
+    slot.reviewMode = undefined;
+    budget.history = [...budget.history.slice(-59), { phase: "verification", slotId: id, at,
+      outcome: "管理员重试触发评估指标资料修订：原传播主体资料及核验、候选、计数完整保留；新指标定义须重新核验，最多生成1轮新候选，不增加模型调用上限。" }];
+  }
+  state.selectedAngle = undefined;
+  state.stopReason = undefined;
+  return true;
 }
 
 export function recoverTheoryEcho(state: RetryState, snapshot: Pick<Snapshot, "scope" | "nodes">, code: string) {

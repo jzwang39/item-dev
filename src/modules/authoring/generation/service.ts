@@ -24,7 +24,7 @@ import { completeRetry, failureOf, GenerationFailure, MAX_TOTAL_ATTEMPTS, MAX_TA
 import { buildEvidenceCatalog, type EvidenceChapter } from "./evidence-catalog";
 import { ensureTargetedBudget, grantSkillRecovery, recoverExpansionReviewProtocol, recoverCuratedTheoryBasis, recoverNoTextbookTheory, recoverTheoryDuplicate, theoryGenerationLimit, recoverSkillDesignProtocol, recoverPrematureBlocks, markTargetedSaved, MAX_SLOT_GENERATIONS, MAX_SLOT_REPAIRS, MAX_UNIT_MODEL_CALLS, type MissingSlot } from "./targeted-budget";
 import { generateTargeted } from "./targeted-generation";
-import { recoverTheoryEcho } from "./targeted-budget";
+import { recoverTheoryBasisRevision, recoverTheoryEcho } from "./targeted-budget";
 
 function json<T>(value: T | string): T {
   return typeof value === "string" ? JSON.parse(value) as T : value;
@@ -77,6 +77,7 @@ export async function startGeneration(planId: string, actorId: string, retryFail
             state.failures = [];
           }
           ensureTargetedBudget(state, missing, Number(unit.attempts), unit.error_message);
+          if (recoverTheoryBasisRevision(state, json<Snapshot>(existing[0].snapshot_json), unit.point_code)) upgraded.push(unit.id);
           if (recoverExpansionReviewProtocol(state, json<Snapshot>(existing[0].snapshot_json), unit.point_code)) upgraded.push(unit.id);
           if (recoverCuratedTheoryBasis(state, json<Snapshot>(existing[0].snapshot_json), unit.point_code)) upgraded.push(unit.id);
           if (recoverNoTextbookTheory(state, json<Snapshot>(existing[0].snapshot_json), unit.point_code)) upgraded.push(unit.id);
@@ -209,6 +210,7 @@ export async function getGenerationState(planId: string) {
       failedUnits: failed.map((unit) => {
         const state = retryState(unit.retry_state_json);
         const recovery = retryState(JSON.stringify(state));
+        const theoryBasisUpgrade = recoverTheoryBasisRevision(recovery, snapshot, unit.point_code);
         const expansionProtocolUpgrade = recoverExpansionReviewProtocol(recovery, snapshot, unit.point_code);
         const expansionUpgrade = expansionProtocolUpgrade || recoverCuratedTheoryBasis(recovery, snapshot, unit.point_code)
           || recoverNoTextbookTheory(recovery, snapshot, unit.point_code);
@@ -222,12 +224,14 @@ export async function getGenerationState(planId: string) {
           error: unit.error_message ?? (status === "stopped" ? "任务已停止，此缺额不再处理。" : "请求失败。"), attempts: Number(unit.attempts), failures: state.failures,
           stopReason: status === "stopped" ? "已停止，不再处理此缺额。" : state.stopReason,
           retryable: !["stopped", "cancelled"].includes(status) && (!state.budget || skillRecoveryAvailable || flowUpgrade
-            || ((protocolUpgrade || theoryUpgrade || theoryEchoUpgrade || expansionUpgrade) && !retryBlocked(recovery, Number(unit.attempts), true)) || !retryBlocked(state, Number(unit.attempts), true)),
+            || ((protocolUpgrade || theoryUpgrade || theoryEchoUpgrade || theoryBasisUpgrade || expansionUpgrade) && !retryBlocked(recovery, Number(unit.attempts), true)) || !retryBlocked(state, Number(unit.attempts), true)),
+          theoryBasisRecoveryAvailable: !["stopped", "cancelled"].includes(status) && theoryBasisUpgrade && !retryBlocked(recovery, Number(unit.attempts), true),
           theoryEchoRecoveryAvailable: !["stopped", "cancelled"].includes(status) && theoryEchoUpgrade && !retryBlocked(recovery, Number(unit.attempts), true),
           theoryRedesignAvailable: !["stopped", "cancelled"].includes(status) && theoryUpgrade && !retryBlocked(recovery, Number(unit.attempts), true),
           theoryExpansionAvailable: !["stopped", "cancelled"].includes(status) && expansionUpgrade && !retryBlocked(recovery, Number(unit.attempts), true),
           expansionProtocolRecoveryAvailable: !["stopped", "cancelled"].includes(status) && expansionProtocolUpgrade && !retryBlocked(recovery, Number(unit.attempts), true),
-          expansionDocuments: state.budget?.theoryExpansion?.documents.map((document) => ({
+          expansionDocuments: state.budget?.theoryExpansion?.documents.filter((document) => !state.budget?.theoryExpansion?.basisRevision
+            || document.retainedSource?.id === state.budget.theoryExpansion.basisRevision.toId).map((document) => ({
             id: document.id, title: document.suggestedTitle, url: document.url, text: document.text,
             retrievedAt: document.retrievedAt, publication: document.retainedSource?.publication,
             locator: document.retainedSource?.locator, acquisition: document.retainedSource?.acquisition,
@@ -243,6 +247,7 @@ export async function getGenerationState(planId: string) {
             generationLimit: theoryGenerationLimit(slot),
             expansionRecovered: Boolean(slot.expansionRecovery),
             theoryEchoRecovered: Boolean(slot.theoryEchoRecovery),
+            theoryBasisRecovered: Boolean(slot.theoryBasisRecovery),
             searched: state.budget!.catalogIds ? slot.searchedSourceIds.filter((id) => state.budget!.catalogIds!.includes(id)).length : slot.searchedSourceIds.length,
             totalSources: state.budget!.sourceCount ?? 0, reason: slot.blocked?.message,
             skill: slot.skill ? { generations: slot.generations - slot.skill.generationBase, repairs: slot.repairs - slot.skill.repairBase,
@@ -251,7 +256,8 @@ export async function getGenerationState(planId: string) {
             reviewRecord: { 原文依据: slot.evidenceSources ?? (slot.angle ? [{ id: slot.angle.sourceId, content: slot.angle.quote }] : []),
               分析记录: slot.searchReasons, 待核验候选响应: slot.pendingResponse, 修订记录: slot.candidateRepairs,
               核验响应: slot.reviewResponses, 历史候选: slot.rejectedCandidates, 原关闭原因: slot.recoveredBlock, 技能专项记录: slot.skill,
-              无教材扩展依据: state.budget!.theoryExpansion, 扩展流程恢复: slot.expansionRecovery, 旧题复述恢复: slot.theoryEchoRecovery },
+              无教材扩展依据: state.budget!.theoryExpansion, 扩展流程恢复: slot.expansionRecovery, 旧题复述恢复: slot.theoryEchoRecovery,
+              指标资料修订恢复: slot.theoryBasisRecovery },
           })) : [] };
       }),
       batches: batches.map((batch) => ({
