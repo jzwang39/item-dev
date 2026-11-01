@@ -1,26 +1,20 @@
-import { z } from "zod";
 import { stemHash, type GeneratedQuestion, type Snapshot } from "./contracts";
 import { candidateReviewPrompt, parseCandidateReview } from "./candidate-review";
 import { GenerationFailure, type AngleSource, type RequestOutput, type RetryFailure, type RetryState } from "./retry-policy";
 import { MAX_SKILL_REPAIRS, recordTargetedPhase, skillSlotWorkflow, type SlotBudget, type TargetedPhase } from "./targeted-budget";
-import { aliasedSources, applySkillPatch, parseModelJson, parseSkillCandidate, parseSkillDesign, resolveSkillSources, skillCandidateIssues, skillRepairFields } from "./skill-candidate";
+import { aliasedSources, applySkillPatch, parseSkillCandidate, parseSkillDesign, resolveSkillSources, skillCandidateIssues, skillRepairFields } from "./skill-candidate";
 import { skillQuestionPrompt } from "./skill-prompt";
+import { designCorePassed, parseDesignRequirements, parseDesignReviewCore } from "./skill-design-review";
 
 type ModelInput = { instruction: string; prompt: string };
 type SkillInput = { snapshot: Snapshot; code: string; previous: Array<{ stem: string; content?: unknown; answer?: unknown; analysis?: string | null }>;
   sources: AngleSource[]; state: RetryState; slotId: string; slot: SlotBudget };
 type Dependencies = { call: (phase: TargetedPhase, input: ModelInput) => Promise<string>; persist: () => Promise<void>; signal: AbortSignal };
 
-const designReviewSchema = z.object({
-  evidenceSupported: z.boolean(), completeTask: z.boolean(), correctScope: z.boolean(), distinctTask: z.boolean(),
-  meetsQualityStandard: z.boolean(), explanation: z.string().trim().min(4).max(4000),
-  sourceIds: z.array(z.string()).min(1).max(12),
-  requirements: z.array(z.object({ requirement: z.string().trim().min(2), passed: z.boolean(), explanation: z.string().trim().min(2) })).min(1).max(100),
-});
-
 export async function generateSkillTargeted(input: SkillInput, dependencies: Dependencies): Promise<RequestOutput> {
   const { snapshot, code, previous, sources, state, slot, slotId } = input;
   const workflow = skillSlotWorkflow(slot);
+  workflow.designProtocolVersion = 2;
   const failures: RetryFailure[] = [];
   const output = () => ({ questions: [], failures, state });
   const fail = (code: RetryFailure["code"], message: string) => {
@@ -33,12 +27,21 @@ export async function generateSkillTargeted(input: SkillInput, dependencies: Dep
     操作技能试题质量标准: snapshot.skillQualityStandard ?? "", 质量要求: snapshot.qualityRequirements,
     已有试题: previous,
   };
+  const reviewContext = JSON.stringify(common);
+  if (workflow.designReviewContext !== reviewContext) {
+    workflow.designCoreResponse = undefined;
+    workflow.designChecklistResponses = undefined;
+    workflow.designReviewResponse = undefined;
+    workflow.designReviewContext = reviewContext;
+  }
+  const designLimit = 3 + (workflow.designProtocolRecovery?.designAttemptCredits ?? 0);
   const rejectCandidate = () => {
     slot.rejectedCandidates = [...(slot.rejectedCandidates ?? []), {
       response: slot.pendingResponse ?? "", repairs: slot.candidateRepairs, failures: failures.slice(),
       at: new Date().toISOString(), evidenceSources: slot.evidenceSources, reviewResponses: slot.reviewResponses,
       skillDesignResponse: workflow.designResponse, skillDesignReviewResponse: workflow.designReviewResponse,
       skillDesignReviewResponses: workflow.designReviewResponses,
+      skillDesignChecklistResponses: workflow.designChecklistResponses,
       scoringCalculation: workflow.candidateCalculation,
     }];
     slot.pendingResponse = undefined;
@@ -47,12 +50,16 @@ export async function generateSkillTargeted(input: SkillInput, dependencies: Dep
     workflow.design = undefined;
     workflow.designReviewResponse = undefined;
     workflow.designReviewResponses = undefined;
+    workflow.designCoreResponse = undefined;
+    workflow.designChecklistResponses = undefined;
+    workflow.designCoreFailures = 0;
+    workflow.designChecklistFailures = 0;
     workflow.designReviewFailures = 0;
     workflow.candidateRepairs = 0;
     workflow.verificationFailures = 0;
     workflow.reviewRepairResponse = undefined;
     workflow.candidateCalculation = undefined;
-    if (slot.generations - workflow.generationBase >= 3 || workflow.designAttempts >= 3) {
+    if (slot.generations - workflow.generationBase >= 3 || workflow.designAttempts >= designLimit) {
       slot.blocked = failures[0] ?? { code: "invalid_content", message: "技能专项候选预算已耗尽，请人工核查。" };
     }
   };
@@ -69,7 +76,7 @@ export async function generateSkillTargeted(input: SkillInput, dependencies: Dep
   if (!workflow.design && !slot.pendingResponse) {
     slot.angle = undefined;
     state.selectedAngle = undefined;
-    if (workflow.designAttempts >= 3 || slot.generations - workflow.generationBase >= 3) {
+    if (workflow.designAttempts >= designLimit || slot.generations - workflow.generationBase >= 3) {
       slot.blocked = { code: "invalid_content", message: "技能专项3轮任务设计或候选生成已耗尽，请人工核查具体缺口。" };
       failures.push(slot.blocked);
       return output();
@@ -98,7 +105,7 @@ sourceIds只能选输入中的短编号S1等，由系统确定性映射到冻结
       slot.searchReasons.push(failures[0].message);
       slot.rejectedCandidates = [...(slot.rejectedCandidates ?? []), { response: "", failures: failures.slice(),
         at: new Date().toISOString(), evidenceSources: page, skillDesignResponse: response }];
-      if (workflow.designAttempts >= 3) slot.blocked = failures[0];
+      if (workflow.designAttempts >= designLimit) slot.blocked = failures[0];
       await dependencies.persist();
       return output();
     }
@@ -111,7 +118,7 @@ sourceIds只能选输入中的短编号S1等，由系统确定性映射到冻结
     return output();
   }
   if (workflow.design && !workflow.designReviewResponse && !slot.pendingResponse) {
-    const response = await dependencies.call("verification", {
+    const response = workflow.designCoreResponse ?? await dependencies.call("verification", {
       instruction: `你是技能任务设计核验助手。只核验设计，不生成试题。逐条对照完整操作技能质量标准、冻结范围和原文。
 核对情境、材料、工作要求、操作步骤、提交成果、评分观察点及任务差异。原文存在不等于支持任务；综合点必须覆盖完整归属。
 任何不确定、依据不足、仅换措辞或遗漏适用标准要求必须判不通过；不得因缺题降低标准。sourceIds只用输入提供的S编号。
@@ -119,29 +126,68 @@ sourceIds只能选输入中的短编号S1等，由系统确定性映射到冻结
       prompt: JSON.stringify({ ...common, 任务设计: workflow.design, 原文依据: aliasedSources(evidence),
         上次核验格式错误: slot.searchReasons.at(-1), 上次核验响应: workflow.designReviewResponses?.at(-1) }),
     });
-    workflow.designReviewResponse = response;
-    workflow.designReviewResponses = [...(workflow.designReviewResponses ?? []), response];
+    if (!workflow.designCoreResponse) {
+      workflow.designReviewResponses = [...(workflow.designReviewResponses ?? []), response];
+      await dependencies.persist();
+    }
+    let core: ReturnType<typeof parseDesignReviewCore>;
     try {
-      const review = designReviewSchema.parse(parseModelJson(response));
-      resolveSkillSources(review.sourceIds, evidence);
-      if (!(review.evidenceSupported && review.completeTask && review.correctScope && review.distinctTask && review.meetsQualityStandard
-        && review.requirements.every((item) => item.passed))) {
-        fail("quality_rejected", `任务设计未通过专项标准：${review.explanation}`);
+      core = parseDesignReviewCore(response);
+      resolveSkillSources(core.sourceIds, evidence);
+      if (!designCorePassed(core)) {
+        workflow.designReviewResponse = response;
+        fail("quality_rejected", `任务设计未通过专项标准：${core.explanation}`);
         rejectCandidate();
         await dependencies.persist();
         return output();
       }
     } catch (error) {
       workflow.designReviewFailures++;
+      workflow.designCoreFailures = (workflow.designCoreFailures ?? 0) + 1;
       fail("review_invalid", `任务设计核验格式：${skillCandidateIssues(error).join("；")}`);
       slot.searchReasons.push(failures[0].message);
-      workflow.designReviewResponse = undefined;
-      if (workflow.designReviewFailures >= 2) {
-        rejectCandidate();
-      }
+      if (workflow.designCoreFailures >= 2) slot.blocked = failures[0];
       await dependencies.persist();
       return output();
     }
+    workflow.designCoreResponse = response;
+    await dependencies.persist();
+    let requirements: ReturnType<typeof parseDesignRequirements> | undefined;
+    // Missing per-standard judgments are never filled with default passes.
+    // Ask a separate, smaller protocol to audit the unchanged design instead.
+    try { requirements = parseDesignRequirements(response); }
+    catch { /* Continue with an independent per-standard audit below. */ }
+    if (!requirements) {
+      const checklist = await dependencies.call("verification", {
+        instruction: `你是技能标准逐条核验助手。只返回requirements字段，不输出任务设计、不生成试题。
+必须逐条对照完整操作技能试题质量标准及质量要求，列出所有适用条款原文、是否通过及具体核验理由。
+核对给定任务设计的情境、材料、工作要求、步骤、成果、评分观察点、归属和与已有任务的实质差异。不能确认时passed=false。
+禁止因基础结论通过、题数不足或前一响应漏字段而默认通过；不得把设计的工作要求字符串数组当成核验结果。
+只返回JSON：{"requirements":[{"requirement":"适用标准原文条款","passed":false,"explanation":"对应设计内容及核验依据或失败原因"}]}。`,
+        prompt: JSON.stringify({ ...common, 任务设计: workflow.design, 原文依据: aliasedSources(evidence),
+          基础核验响应: response, 上次逐条核验响应: workflow.designChecklistResponses?.at(-1),
+          上次格式错误: slot.searchReasons.at(-1), 必须返回字段: "requirements：非空对象数组，每项包含requirement、passed布尔值、explanation" }),
+      });
+      workflow.designChecklistResponses = [...(workflow.designChecklistResponses ?? []), checklist];
+      await dependencies.persist();
+      try { requirements = parseDesignRequirements(checklist); }
+      catch (error) {
+        workflow.designReviewFailures++;
+        workflow.designChecklistFailures = (workflow.designChecklistFailures ?? 0) + 1;
+        fail("review_invalid", `任务设计逐条标准核验格式：${skillCandidateIssues(error).join("；")}`);
+        slot.searchReasons.push(failures[0].message);
+        if (workflow.designChecklistFailures >= 2) slot.blocked = failures[0];
+        await dependencies.persist();
+        return output();
+      }
+    }
+    if (requirements.some((item) => !item.passed)) {
+      fail("quality_rejected", `任务设计标准条款未通过：${requirements.filter((item) => !item.passed).map((item) => `${item.requirement}：${item.explanation}`).join("；")}`);
+      rejectCandidate();
+      await dependencies.persist();
+      return output();
+    }
+    workflow.designReviewResponse = JSON.stringify({ ...core, requirements });
     recordTargetedPhase(state, "技能任务设计通过独立核验，进入单候选生成");
     await dependencies.persist();
   }

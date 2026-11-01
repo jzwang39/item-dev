@@ -1,6 +1,7 @@
 import type { GeneratedQuestion, QuestionType } from "./contracts";
 import type { AngleSource, KnowledgeAngle, RetryFailure, RetryState } from "./retry-policy";
-import type { SkillTaskDesign } from "./skill-candidate";
+import { parseSkillDesign, resolveSkillSources, type SkillTaskDesign } from "./skill-candidate";
+import { designCorePassed, parseDesignReviewCore } from "./skill-design-review";
 
 export const MAX_SLOT_GENERATIONS = 3;
 export const MAX_SLOT_REPAIRS = 2;
@@ -11,6 +12,10 @@ export type SkillSlotWorkflow = {
   version: 1; generationBase: number; repairBase: number; designAttempts: number;
   design?: SkillTaskDesign; designResponse?: string; designReviewResponse?: string;
   designReviewResponses?: string[];
+  designProtocolVersion?: 2; designCoreResponse?: string; designChecklistResponses?: string[];
+  designReviewContext?: string;
+  designCoreFailures?: number; designChecklistFailures?: number;
+  designProtocolRecovery?: { at: string; previousBlock: RetryFailure; designAttemptCredits: number };
   designReviewFailures: number; candidateRepairs: number; verificationFailures: number;
   reviewRepairResponse?: string; candidateCalculation?: GeneratedQuestion["scoringCalculation"];
 };
@@ -32,6 +37,7 @@ export type SlotBudget = {
   rejectedCandidates?: Array<{ response: string; repairs?: GeneratedQuestion["candidateRepairs"]; angle?: KnowledgeAngle; failures: RetryFailure[]; at: string;
     evidenceSources?: AngleSource[]; reviewResponses?: SlotBudget["reviewResponses"];
     skillDesignResponse?: string; skillDesignReviewResponse?: string; skillDesignReviewResponses?: string[];
+    skillDesignChecklistResponses?: string[];
     scoringCalculation?: GeneratedQuestion["scoringCalculation"] }>;
 };
 export type TargetedBudget = {
@@ -66,8 +72,57 @@ export function ensureTargetedBudget(state: RetryState, missing: MissingSlot[], 
 }
 
 export function skillSlotWorkflow(slot: SlotBudget): SkillSlotWorkflow {
-  return slot.skill ??= { version: 1, generationBase: 0, repairBase: 0, designAttempts: 0,
+  return slot.skill ??= { version: 1, designProtocolVersion: 2, generationBase: 0, repairBase: 0, designAttempts: 0,
     designReviewFailures: 0, candidateRepairs: 0, verificationFailures: 0 };
+}
+
+export function recoverSkillDesignProtocol(state: RetryState) {
+  const budget = state.budget;
+  if (!budget || budget.calls >= budget.maxCalls || state.failures.some((failure) =>
+    ["restricted_scope", "connection_changed", "save_error", "network_error", "network_timeout", "rate_limited", "lease_expired"].includes(failure.code))) return false;
+  let recovered = false;
+  for (const [id, slot] of Object.entries(budget.slots)) {
+    const skill = slot.skill;
+    if (!skill || skill.designProtocolVersion === 2 || skill.designProtocolRecovery || slot.done || slot.type !== "practical"
+      || slot.transportFailures >= MAX_SLOT_TRANSPORT_FAILURES || slot.blocked?.code !== "review_invalid"
+      || !/任务设计核验格式.*requirements/s.test(slot.blocked.message) || slot.generations !== skill.generationBase) continue;
+    const records = (slot.rejectedCandidates ?? []).filter((record) => {
+      if (!record.skillDesignResponse || !record.evidenceSources?.length || !record.failures.length
+        || !record.failures.every((failure) => failure.code === "review_invalid" && /任务设计核验格式.*requirements/s.test(failure.message))) return false;
+      try {
+        const core = parseDesignReviewCore(record.skillDesignReviewResponses?.at(-1) ?? record.skillDesignReviewResponse ?? "");
+        parseSkillDesign(record.skillDesignResponse, record.evidenceSources);
+        resolveSkillSources(core.sourceIds, record.evidenceSources);
+        return designCorePassed(core);
+      } catch { return false; }
+    });
+    const record = records.at(-1);
+    const raw = record?.skillDesignReviewResponses?.at(-1) ?? record?.skillDesignReviewResponse;
+    if (!record || !raw) continue;
+    try {
+      const evidence = record.evidenceSources!;
+      const core = parseDesignReviewCore(raw);
+      if (!designCorePassed(core)) continue;
+      resolveSkillSources(core.sourceIds, evidence);
+      const design = parseSkillDesign(record.skillDesignResponse!, evidence);
+      skill.designProtocolRecovery = { at: new Date().toISOString(), previousBlock: slot.blocked,
+        designAttemptCredits: Math.min(2, records.length - 1) };
+      skill.designProtocolVersion = 2;
+      skill.design = design;
+      skill.designResponse = record.skillDesignResponse;
+      skill.designCoreResponse = undefined;
+      skill.designReviewResponse = undefined;
+      skill.designReviewResponses = record.skillDesignReviewResponses?.slice() ?? [raw];
+      slot.evidenceSources = evidence;
+      slot.evidenceSourceIds = evidence.map((source) => source.id);
+      slot.blocked = undefined;
+      budget.history = [...budget.history.slice(-59), { phase: "verification", slotId: id, at: new Date().toISOString(),
+        outcome: `设计核验协议一次性恢复：保留累计${skill.designAttempts}轮设计，${skill.designProtocolRecovery.designAttemptCredits}轮纯格式误耗单独留痕；续核验原设计，不新增调用额度。` }];
+      recovered = true;
+    } catch { /* Invalid or unsupported historical records cannot be recovered. */ }
+  }
+  if (recovered) state.stopReason = undefined;
+  return recovered;
 }
 
 export function grantSkillRecovery(state: RetryState, attempts: number) {

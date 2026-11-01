@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { generateTargeted, type TargetedDependencies } from "./targeted-generation";
 import { completeRetry, retryState } from "./retry-policy";
-import { ensureTargetedBudget, grantSkillRecovery, markTargetedSaved } from "./targeted-budget";
+import { ensureTargetedBudget, grantSkillRecovery, recoverSkillDesignProtocol, markTargetedSaved } from "./targeted-budget";
 import type { Snapshot } from "./contracts";
 
 const sources = [{ id: "frozen-skill-a", content: "借阅资料必须登记，归还必须核对完整性。", systemQuote: true }];
@@ -267,4 +267,139 @@ test("技能缺少专项标准或原文时不调用模型，不借用理论标�
   assert.equal(result.questions.length, 0);
   assert.match(result.failures[0].message, /缺少完整操作技能/);
   assert.equal(input.state.budget!.calls, 0);
+});
+
+const missingRequirements = { ...designReview, requirements: undefined };
+
+test("复现requirements缺失：单独逐条核验完成后才生成，设计次数不增加", async () => {
+  const input = fixture();
+  let designs = 0, checklists = 0;
+  const result = await generateTargeted(input, deps(async (prompt) => {
+    if (prompt.instruction.includes("技能任务设计助手")) designs++;
+    if (prompt.instruction.includes("技能任务设计核验助手")) return JSON.stringify(missingRequirements);
+    if (prompt.instruction.includes("技能标准逐条核验助手")) {
+      checklists++;
+      assert.equal(JSON.parse(prompt.prompt).操作技能试题质量标准, snapshot.skillQualityStandard);
+      assert.match(prompt.instruction, /不能确认时passed=false/);
+      return JSON.stringify({ requirements: designReview.requirements });
+    }
+    return defaults(prompt);
+  }));
+  assert.equal(result.questions.length, 1);
+  assert.equal(designs, 1);
+  assert.equal(checklists, 1);
+  assert.equal(input.state.budget!.calls, 5);
+  assert.equal(input.state.budget!.slots.slot.skill?.designAttempts, 1);
+  assert.ok(input.state.budget!.slots.slot.skill?.designChecklistResponses);
+});
+
+test("逐条核验持续漏字段不默认通过，不丢设计、不消耗3轮设计额度", async () => {
+  const input = fixture();
+  let designs = 0;
+  const dependencies = deps(async (prompt) => {
+    if (prompt.instruction.includes("技能任务设计助手")) designs++;
+    if (prompt.instruction.includes("技能任务设计核验助手")) return JSON.stringify(missingRequirements);
+    if (prompt.instruction.includes("技能标准逐条核验助手")) return "{}";
+    return defaults(prompt);
+  });
+  const first = await generateTargeted(input, dependencies);
+  assert.equal(first.questions.length, 0);
+  assert.equal(completeRetry(input.state, 1, 0, 1, first.failures).status, "queued");
+  const second = await generateTargeted(input, dependencies);
+  assert.equal(second.questions.length, 0);
+  assert.equal(completeRetry(input.state, 2, 0, 1, second.failures).status, "failed");
+  const slot = input.state.budget!.slots.slot;
+  assert.equal(designs, 1);
+  assert.equal(slot.generations, 0);
+  assert.equal(slot.skill?.designAttempts, 1);
+  assert.equal(slot.skill?.designChecklistFailures, 2);
+  assert.ok(slot.skill?.design);
+  assert.equal(slot.skill?.designChecklistResponses?.length, 2);
+  assert.equal(recoverSkillDesignProtocol(input.state), false);
+});
+
+test("基础结论通过但逐条标准不通过仍拒绝，不生成候选", async () => {
+  const input = fixture();
+  const result = await generateTargeted(input, deps(async (prompt) => {
+    if (prompt.instruction.includes("技能任务设计核验助手")) return JSON.stringify(missingRequirements);
+    if (prompt.instruction.includes("技能标准逐条核验助手")) return JSON.stringify({ requirements: [
+      { requirement: "任务完整", passed: false, explanation: "未覆盖必要操作步骤" },
+    ] });
+    return defaults(prompt);
+  }));
+  assert.equal(result.questions.length, 0);
+  assert.equal(result.failures[0].code, "quality_rejected");
+  assert.match(result.failures[0].message, /未覆盖必要操作/);
+  assert.equal(input.state.budget!.slots.slot.generations, 0);
+});
+
+function legacyMissingSlot() {
+  const input = fixture();
+  const budget = input.state.budget!, slot = budget.slots.slot;
+  budget.calls = 9; budget.sourceCount = 1;
+  const failure = { code: "review_invalid" as const, message: "任务设计核验格式：requirements: Required" };
+  slot.skill = { version: 1, generationBase: 0, repairBase: 0, designAttempts: 3,
+    designReviewFailures: 0, candidateRepairs: 0, verificationFailures: 0 };
+  slot.blocked = failure;
+  slot.rejectedCandidates = Array.from({ length: 3 }, () => ({
+    response: "", failures: [failure], at: "old", evidenceSources: sources,
+    skillDesignResponse: JSON.stringify(design), skillDesignReviewResponses: [JSON.stringify(missingRequirements), JSON.stringify(missingRequirements)],
+  }));
+  input.state.failures = [failure];
+  return input;
+}
+
+test("旧协议误耗3轮后一次恢复原设计，保留9次调用和设计计数且不增预算", async () => {
+  const input = legacyMissingSlot();
+  const budget = input.state.budget!, slot = budget.slots.slot;
+  assert.equal(recoverSkillDesignProtocol(input.state), true);
+  assert.equal(budget.calls, 9);
+  assert.equal(budget.maxCalls, 24);
+  assert.equal(slot.skill?.designAttempts, 3);
+  assert.equal(slot.skill?.designProtocolRecovery?.designAttemptCredits, 2);
+  const result = await generateTargeted(input, deps(async (prompt) => {
+    assert.doesNotMatch(prompt.instruction, /你是技能任务设计助手/);
+    if (prompt.instruction.includes("技能任务设计核验助手")) return JSON.stringify(missingRequirements);
+    if (prompt.instruction.includes("技能标准逐条核验助手")) return JSON.stringify({ requirements: designReview.requirements });
+    return defaults(prompt);
+  }));
+  assert.equal(result.questions.length, 1);
+  assert.equal(budget.calls, 13);
+  assert.equal(slot.skill?.designAttempts, 3);
+  assert.equal(recoverSkillDesignProtocol(input.state), false);
+});
+
+test("调用耗尽、已成功、真正质量失败或无可定位记录不恢复协议", () => {
+  const exhausted = legacyMissingSlot();
+  exhausted.state.budget!.calls = 24;
+  assert.equal(recoverSkillDesignProtocol(exhausted.state), false);
+  const done = legacyMissingSlot();
+  done.state.budget!.slots.slot.done = true;
+  assert.equal(recoverSkillDesignProtocol(done.state), false);
+  const failed = legacyMissingSlot();
+  failed.state.budget!.slots.slot.rejectedCandidates!.forEach((record) => {
+    record.skillDesignReviewResponses = [JSON.stringify({ ...missingRequirements, evidenceSupported: false })];
+  });
+  assert.equal(recoverSkillDesignProtocol(failed.state), false);
+  const missing = legacyMissingSlot();
+  missing.state.budget!.slots.slot.rejectedCandidates = [];
+  assert.equal(recoverSkillDesignProtocol(missing.state), false);
+});
+
+test("逐条标准核验期间停止拦截迟到响应，不生成也不保存", async () => {
+  const input = fixture(), controller = new AbortController();
+  let calls = 0;
+  const result = await generateTargeted(input, deps(async (prompt) => {
+    calls++;
+    if (prompt.instruction.includes("技能任务设计核验助手")) return JSON.stringify(missingRequirements);
+    if (prompt.instruction.includes("技能标准逐条核验助手")) {
+      controller.abort(new Error("用户停止"));
+      return JSON.stringify({ requirements: designReview.requirements });
+    }
+    return defaults(prompt);
+  }, controller.signal));
+  assert.equal(result.questions.length, 0);
+  assert.equal(calls, 3);
+  assert.equal(input.state.budget!.slots.slot.skill?.designChecklistResponses, undefined);
+  assert.equal(input.state.budget!.slots.slot.generations, 0);
 });

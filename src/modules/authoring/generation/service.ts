@@ -22,7 +22,7 @@ import { completeRetry, failureOf, GenerationFailure, MAX_TOTAL_ATTEMPTS, MAX_TA
   prepareManualRetry, retryBlocked, retryState, validationFailure,
   type RequestOutput, type RetryFailure, type RetryState } from "./retry-policy";
 import { buildEvidenceCatalog, type EvidenceChapter } from "./evidence-catalog";
-import { ensureTargetedBudget, grantSkillRecovery, recoverPrematureBlocks, markTargetedSaved, MAX_SLOT_GENERATIONS, MAX_SLOT_REPAIRS, MAX_UNIT_MODEL_CALLS, type MissingSlot } from "./targeted-budget";
+import { ensureTargetedBudget, grantSkillRecovery, recoverSkillDesignProtocol, recoverPrematureBlocks, markTargetedSaved, MAX_SLOT_GENERATIONS, MAX_SLOT_REPAIRS, MAX_UNIT_MODEL_CALLS, type MissingSlot } from "./targeted-budget";
 import { generateTargeted } from "./targeted-generation";
 
 function json<T>(value: T | string): T {
@@ -76,6 +76,7 @@ export async function startGeneration(planId: string, actorId: string, retryFail
             state.failures = [];
           }
           ensureTargetedBudget(state, missing, Number(unit.attempts), unit.error_message);
+          if (scope.assessmentMode === "操作技能" && recoverSkillDesignProtocol(state)) upgraded.push(unit.id);
           if (scope.assessmentMode === "操作技能" && skillRecoveryAuthorized && grantSkillRecovery(state, Number(unit.attempts))) upgraded.push(unit.id);
           if (recoverPrematureBlocks(state)) upgraded.push(unit.id);
           if (retryBlocked(state, Number(unit.attempts), true)) continue;
@@ -201,13 +202,16 @@ export async function getGenerationState(planId: string) {
       failedUnits: failed.map((unit) => {
         const state = retryState(unit.retry_state_json);
         const recovery = retryState(JSON.stringify(state));
+        const protocolUpgrade = recoverSkillDesignProtocol(recovery);
         const skillUpgrade = grantSkillRecovery(recovery, Number(unit.attempts));
         const flowUpgrade = recoverPrematureBlocks(recovery) && !retryBlocked(recovery, Number(unit.attempts), true);
         const skillRecoveryAvailable = skillUpgrade && !retryBlocked(recovery, Number(unit.attempts), true);
         return { id: unit.id, code: unit.point_code, type: unit.question_type, remaining: Number(unit.remaining),
           error: unit.error_message ?? (status === "stopped" ? "任务已停止，此缺额不再处理。" : "请求失败。"), attempts: Number(unit.attempts), failures: state.failures,
           stopReason: status === "stopped" ? "已停止，不再处理此缺额。" : state.stopReason,
-          retryable: !["stopped", "cancelled"].includes(status) && (!state.budget || skillRecoveryAvailable || flowUpgrade || !retryBlocked(state, Number(unit.attempts), true)),
+          retryable: !["stopped", "cancelled"].includes(status) && (!state.budget || skillRecoveryAvailable || flowUpgrade
+            || (protocolUpgrade && !retryBlocked(recovery, Number(unit.attempts), true)) || !retryBlocked(state, Number(unit.attempts), true)),
+          designProtocolRecoveryAvailable: !["stopped", "cancelled"].includes(status) && protocolUpgrade && !retryBlocked(recovery, Number(unit.attempts), true),
           strategyUpgradeAvailable: !state.budget || flowUpgrade,
           skillRecoveryAvailable: !["stopped", "cancelled"].includes(status) && skillRecoveryAvailable,
           skillRecovery: state.budget?.skillRecovery,
@@ -217,7 +221,8 @@ export async function getGenerationState(planId: string) {
             id, ordinal: slot.ordinal, type: slot.type, generations: slot.generations, repairs: slot.repairs,
             searched: slot.searchedSourceIds.length, totalSources: state.budget!.sourceCount ?? 0, reason: slot.blocked?.message,
             skill: slot.skill ? { generations: slot.generations - slot.skill.generationBase, repairs: slot.repairs - slot.skill.repairBase,
-              designAttempts: slot.skill.designAttempts } : undefined,
+              designAttempts: slot.skill.designAttempts, designAttemptCredits: slot.skill.designProtocolRecovery?.designAttemptCredits ?? 0,
+              designChecklistFailures: slot.skill.designChecklistFailures ?? 0 } : undefined,
             reviewRecord: { 原文依据: slot.evidenceSources ?? (slot.angle ? [{ id: slot.angle.sourceId, content: slot.angle.quote }] : []),
               分析记录: slot.searchReasons, 待核验候选响应: slot.pendingResponse, 修订记录: slot.candidateRepairs,
               核验响应: slot.reviewResponses, 历史候选: slot.rejectedCandidates, 原关闭原因: slot.recoveredBlock, 技能专项记录: slot.skill },

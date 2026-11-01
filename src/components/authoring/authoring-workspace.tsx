@@ -4770,11 +4770,12 @@ type QuestionGenerationJob = {
     attempts?: number; failures?: Array<{ code: string; message: string }>; stopReason?: string; retryable?: boolean;
     strategyUpgradeAvailable?: boolean;
     skillRecoveryAvailable?: boolean;
+    designProtocolRecoveryAvailable?: boolean;
     skillRecovery?: { addedCalls: number; previousCalls: number; previousMaxCalls: number };
     reviewContext?: { kind: "theory" | "skill"; qualityStandard: string; qualityRequirements: string[]; previous: unknown[] };
     modelCalls?: { used: number; limit: number };
     missingSlots?: Array<{ id: string; ordinal: number; type: string; generations: number; repairs: number; searched: number; totalSources: number; reason?: string; reviewRecord?: unknown;
-      skill?: { generations: number; repairs: number; designAttempts: number } }>;
+      skill?: { generations: number; repairs: number; designAttempts: number; designAttemptCredits?: number; designChecklistFailures?: number } }>;
   }>;
 };
 
@@ -5993,11 +5994,12 @@ function AuthoringTaskPanel() {
                         <p className="m-0">{unit.code} · {unit.type === "mixed" ? "混合题型" : unit.type === "single" ? "单选" : unit.type === "multiple" ? "多选" : unit.type === "practical" ? "实操" : "判断"} · 缺 {unit.remaining} 题{unit.attempts !== undefined ? ` · 累计${unit.attempts}次` : ""}：{unit.error}{generationJob.status !== "stopped" && unit.retryable === false ? " · 不可自动补题，需人工处理" : ""}</p>
                         {unit.strategyUpgradeAvailable && generationJob.status !== "stopped" ? <p className="m-0 mt-1 text-[#6980a4]">可点击重试进入候选试制或逐题核验流程；一次性恢复，历史累计次数和已用预算保留。</p> : null}
                         {unit.skillRecoveryAvailable ? <p className="m-0 mt-1 text-[#6980a4]">可点击重试，确认后一次性授予技能专项修复额度；旧计数不清零，质量标准不降低。</p> : null}
+                        {unit.designProtocolRecoveryAvailable ? <p className="m-0 mt-1 text-[#6980a4]">可点击重试恢复被核验字段遗漏阻断的原设计，重新逐条核验；不增加调用预算、不清零历史次数。</p> : null}
                         {unit.skillRecovery ? <p className="m-0 mt-1 text-[#6980a4]">技能专项授权新增 {unit.skillRecovery.addedCalls} 次调用额度；授权前已用 {unit.skillRecovery.previousCalls} / {unit.skillRecovery.previousMaxCalls} 次。</p> : null}
                         {unit.modelCalls ? <p className="m-0 mt-1 text-[#6980a4]">模型调用 {unit.modelCalls.used} / {unit.modelCalls.limit} 次（含检索、生成、修复及核验）</p> : null}
                         {unit.missingSlots?.map((slot) => (
                           <p key={slot.id} className="m-0 mt-1 text-[#6980a4]">第{slot.ordinal}题 · {slot.type === "single" ? "单选" : slot.type === "multiple" ? "多选" : slot.type === "practical" ? "实操" : "判断"} · {slot.skill
-                            ? `专项任务设计${slot.skill.designAttempts}/3轮 · 专项候选${slot.skill.generations}/3轮 · 专项字段修复${slot.skill.repairs}/6次 · 累计生成${slot.generations}轮、修复${slot.repairs}次`
+                            ? `累计专项任务设计${slot.skill.designAttempts}轮 · 有效设计额度${slot.skill.designAttempts - (slot.skill.designAttemptCredits ?? 0)}/3轮${slot.skill.designAttemptCredits ? `（纯格式误耗${slot.skill.designAttemptCredits}轮单独留痕）` : ""} · 标准核验格式失败${slot.skill.designChecklistFailures ?? 0}/2次 · 专项候选${slot.skill.generations}/3轮 · 专项字段修复${slot.skill.repairs}/6次 · 累计生成${slot.generations}轮、修复${slot.repairs}次`
                             : `候选生成${slot.generations}/3轮 · 修复${slot.repairs}/2次`} · 原文查阅{slot.searched}/{slot.totalSources}段{slot.reason ? `：${slot.reason}` : ""}</p>
                         ))}
                         {unit.reviewContext || unit.missingSlots?.some((slot) => slot.reviewRecord) ? (

@@ -91,6 +91,7 @@ export function completeRetry(state: RetryState, attempts: number, saved: number
         evidenceSources: slot.evidenceSources, reviewResponses: slot.reviewResponses,
         skillDesignResponse: slot.skill.designResponse, skillDesignReviewResponse: slot.skill.designReviewResponse,
         skillDesignReviewResponses: slot.skill.designReviewResponses,
+        skillDesignChecklistResponses: slot.skill.designChecklistResponses,
         scoringCalculation: slot.skill.candidateCalculation,
       }];
       slot.pendingResponse = undefined;
@@ -99,6 +100,10 @@ export function completeRetry(state: RetryState, attempts: number, saved: number
       slot.skill.design = undefined;
       slot.skill.designReviewResponse = undefined;
       slot.skill.designReviewResponses = undefined;
+      slot.skill.designCoreResponse = undefined;
+      slot.skill.designChecklistResponses = undefined;
+      slot.skill.designCoreFailures = 0;
+      slot.skill.designChecklistFailures = 0;
       slot.skill.candidateRepairs = 0;
       slot.skill.verificationFailures = 0;
     }
