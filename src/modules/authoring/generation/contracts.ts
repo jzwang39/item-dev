@@ -107,6 +107,9 @@ const questionSchema = z.object({
 export type GeneratedQuestion = z.infer<typeof questionSchema> & {
   originalStem?: string;
   formatRepairs?: { originalAnswers: unknown; originalOptions: unknown; rule: "normalize_judgement" };
+  targetSlotId?: string;
+  standardReview?: { score: number; requirements: Array<{ requirement: string; passed: boolean; explanation: string }>; evidenceSourceIds: string[] };
+  candidateRepairs?: Array<{ originalResponse: string; correctedResponse: string; errors: string[] }>;
 };
 
 function judgementAnswer(value: unknown): string | undefined {
@@ -139,8 +142,13 @@ export function parseQuestions(content: string, code: string, requestedType: Que
   if (!Array.isArray(raw)) throw new Error("模型响应没有 questions 试题数组。");
   const valid: GeneratedQuestion[] = [];
   const invalidReasons: string[] = [];
+  const invalidCandidates: Array<{ candidate: unknown; reasons: string[] }> = [];
   const seen = new Set<string>();
   for (const value of raw) {
+    const reject = (reason: string) => {
+      invalidReasons.push(reason);
+      invalidCandidates.push({ candidate: value, reasons: [reason] });
+    };
     const item = value && typeof value === "object" ? value as Record<string, unknown> : {};
     const answer = item.answers ?? item.answer ?? item["答案"];
     const answerList = Array.isArray(answer) ? answer : [answer];
@@ -162,14 +170,14 @@ export function parseQuestions(content: string, code: string, requestedType: Que
       analysis: item.analysis ?? item.explanation ?? item["解析"],
     });
     if (!parsed.success) {
-      invalidReasons.push(parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; "));
+      reject(parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; "));
       continue;
     }
     const question: GeneratedQuestion = parsed.data;
     if (formatRepairs) question.formatRepairs = formatRepairs;
     if (originalStem !== undefined && question.questionType === "practical" && question.stem !== originalStem.trim()) question.originalStem = originalStem;
     if (question.assessmentPointCode !== code || (requestedType !== "mixed" && question.questionType !== requestedType)) {
-      invalidReasons.push("考评点代码或题型与请求不符");
+      reject("考评点代码或题型与请求不符");
       continue;
     }
     const type = question.questionType;
@@ -192,11 +200,11 @@ export function parseQuestions(content: string, code: string, requestedType: Que
         : optionKeys.size !== question.options.length || options.size !== question.options.length
           || (type === "single" ? question.options.length !== 4 : question.options.length < 4) ? "选项数量或选项唯一性不符"
         : "答案数量、唯一性或答案键与选项不符";
-      invalidReasons.push(!legal ? reason : seen.has(hash) ? "题干重复" : "题干为占位内容");
+      reject(!legal ? reason : seen.has(hash) ? "题干重复" : "题干为占位内容");
       continue;
     }
     seen.add(hash);
     valid.push(question);
   }
-  return { valid, received: raw.length, invalid: raw.length - valid.length, invalidReasons };
+  return { valid, received: raw.length, invalid: raw.length - valid.length, invalidReasons, invalidCandidates };
 }

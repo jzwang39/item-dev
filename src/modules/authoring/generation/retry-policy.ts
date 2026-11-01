@@ -2,12 +2,14 @@ import { z } from "zod";
 import type { GeneratedQuestion, QuestionType } from "./contracts";
 import { generationQualityPolicy, type QualityRelaxation } from "./quality-policy";
 import type { QualityStandardKind } from "../quality-standard";
+import { MAX_SLOT_TRANSPORT_FAILURES, nextTargetedSlot, targetedBudgetBlocked, type TargetedBudget } from "./targeted-budget";
 
 export const MAX_TOTAL_ATTEMPTS = 12;
 export const MAX_TARGETED_ATTEMPTS = 6;
 export const MAX_ZERO_OUTPUTS = 2;
 export type FailureCode = "duplicate" | "invalid_json" | "invalid_type" | "invalid_options" | "invalid_answer" | "invalid_identity"
   | "invalid_rubric" | "invalid_content" | "insufficient_basis" | "angle_plan_invalid"
+  | "no_task_in_excerpt" | "evidence_invalid" | "angle_duplicate" | "search_pending" | "quality_rejected" | "review_invalid" | "restricted_scope"
   | "network_timeout" | "network_error" | "rate_limited" | "model_error"
   | "connection_changed" | "save_error" | "lease_expired";
 export type RetryFailure = { code: FailureCode; message: string };
@@ -23,6 +25,7 @@ export type RetryState = {
   manualRecovery?: boolean;
   qualityRelaxations?: QualityRelaxation[];
   supplement?: { roundId: string; previousUnitId: string; previousAttempts: number; actorId: string };
+  budget?: TargetedBudget;
 };
 export class GenerationFailure extends Error {
   constructor(public code: FailureCode, message: string) { super(message); }
@@ -53,6 +56,13 @@ export function retryDelay(attempts: number, failures: RetryFailure[]) {
     ? Math.min(300, 15 * 2 ** Math.min(5, Math.max(0, attempts - 1))) : 5;
 }
 export function retryBlocked(state: RetryState, attempts: number, manual = false): string | undefined {
+  if (state.budget) {
+    if (attempts - state.budget.origin.attempts >= state.budget.maxCalls + Object.keys(state.budget.slots).length * 4) {
+      return "本请求执行预算已耗尽，请人工处理；历史累计次数和逐题预算均保留。";
+    }
+    const hard = manual || state.manualRecovery ? ["restricted_scope"] : ["restricted_scope", "connection_changed", "save_error", "model_error"];
+    return state.failures.find((failure) => hard.includes(failure.code))?.message ?? targetedBudgetBlocked(state);
+  }
   if (attempts >= MAX_TOTAL_ATTEMPTS) return "已达到累计12次执行上限，需人工处理。";
   if (state.targetedAttempts >= MAX_TARGETED_ATTEMPTS) return "已达到累计6次精准补题上限，需人工处理。";
   const intervention = manual || state.manualRecovery ? ["insufficient_basis"] : ["insufficient_basis", "connection_changed", "save_error", "model_error"];
@@ -60,7 +70,7 @@ export function retryBlocked(state: RetryState, attempts: number, manual = false
     return state.failures.find((failure) => intervention.includes(failure.code))?.message ?? "需人工处理。";
   }
 }
-export function completeRetry(state: RetryState, attempts: number, saved: number, remaining: number, failures: RetryFailure[]) {
+export function completeRetry(state: RetryState, attempts: number, saved: number, remaining: number, failures: RetryFailure[], preparationFailure = false) {
   const next: RetryState = {
     ...state, failures,
     zeroOutputs: saved > 0 ? 0 : state.zeroOutputs + 1,
@@ -69,6 +79,27 @@ export function completeRetry(state: RetryState, attempts: number, saved: number
     stopReason: undefined, manualRecovery: false,
   };
   if (!remaining) return { status: "succeeded" as const, state: next, delay: 0 };
+  if (next.budget) {
+    const activeId = next.budget.activeSlotId ?? nextTargetedSlot(next)?.[0];
+    const slot = activeId ? next.budget.slots[activeId] : undefined;
+    if (preparationFailure && activeId) next.budget.activeSlotId = activeId;
+    if (slot && preparationFailure && failures.some((failure) => ["network_timeout", "network_error", "rate_limited", "invalid_json"].includes(failure.code))) {
+      slot.transportFailures++;
+    }
+    if (slot && !slot.done && failures.some((failure) => failure.code === "lease_expired")) slot.transportFailures++;
+    if (slot && !slot.done && slot.transportFailures >= MAX_SLOT_TRANSPORT_FAILURES) {
+      slot.blocked ??= { code: "network_error", message: "该缺题累计网络或租约失败达到上限，请修复连接后人工处理。" };
+    }
+    if (slot && !slot.done && !slot.blocked && slot.generations >= 3 && !slot.pendingResponse) {
+      slot.blocked = failures[0] ?? { code: "invalid_content", message: "该缺题已完成3次候选生成仍无合格题，请人工命题。" };
+    }
+    if (slot?.done || slot?.blocked) {
+      next.selectedAngle = undefined;
+      next.budget.activeSlotId = undefined;
+    }
+    next.stopReason = retryBlocked(next, attempts);
+    return { status: next.stopReason ? "failed" as const : "queued" as const, state: next, delay: retryDelay(attempts, failures) };
+  }
   next.stopReason = retryBlocked(next, attempts)
     ?? (next.zeroOutputs >= MAX_ZERO_OUTPUTS ? "连续两次新增0题，已停止自动重试，需处理后手动重试。" : undefined);
   return { status: next.stopReason ? "failed" as const : "queued" as const, state: next, delay: retryDelay(attempts, failures) };
@@ -82,7 +113,7 @@ export function prepareManualRetry(state: RetryState, attempts: number, legacyEr
   };
 }
 
-export type AngleSource = { id: string; content: string };
+export type AngleSource = { id: string; content: string; title?: string; start?: number; systemQuote?: boolean };
 function normalized(value: string) { return value.normalize("NFKC").replace(/\s+/g, "").toLowerCase(); }
 export function angleSources(context: unknown, excerpts: Array<{ content: string }>): AngleSource[] {
   const sources: AngleSource[] = excerpts.map((excerpt, index) => ({ id: `textbook-${index + 1}`, content: excerpt.content }));
@@ -101,7 +132,7 @@ export function angleSources(context: unknown, excerpts: Array<{ content: string
 const angleSchema = z.object({
   angle: z.string().trim().min(2).max(300),
   sourceId: z.string().trim().min(1).max(500),
-  quote: z.string().trim().min(4).max(2000),
+  quote: z.string().trim().min(4).max(2000).optional(),
   task: z.string().trim().min(4).max(500).optional(),
   reusesKnowledge: z.boolean().optional(),
   reason: z.string().trim().min(4).max(1000).optional(),
@@ -116,11 +147,13 @@ export function parseAnglePlan(content: string, previousCount: number, sources: 
   let parsed: z.infer<typeof planSchema>;
   try { parsed = planSchema.parse(JSON.parse(content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""))); }
   catch { throw new GenerationFailure("angle_plan_invalid", "知识角度分析返回格式无效，需重新分析。"); }
+  const stable = sources.some((source) => source.systemQuote);
   const indexes = new Set(parsed.covered.map((entry) => entry.index));
-  if (!variantType && (parsed.covered.length !== previousCount || indexes.size !== previousCount || parsed.covered.some((entry) => entry.index >= previousCount))) {
+  if (!stable && !variantType && (parsed.covered.length !== previousCount || indexes.size !== previousCount || parsed.covered.some((entry) => entry.index >= previousCount))) {
     throw new GenerationFailure("angle_plan_invalid", "知识角度分析未完整覆盖已有试题，不能补题。");
   }
-  if (!parsed.remaining.length) throw new GenerationFailure("insufficient_basis", parsed.reason || "未找到有依据的可用考查任务，需人工处理。");
+  if (!parsed.remaining.length) throw new GenerationFailure(stable ? "no_task_in_excerpt" : "insufficient_basis",
+    parsed.reason || (stable ? "本轮片段未找到可用考查任务，需继续检索其他关联原文。" : "未找到有依据的可用考查任务，需人工处理。"));
   const excluded = new Set([...parsed.covered.map((entry) => entry.angle), ...attempted.map((entry) => entry.angle)].map(normalized));
   const candidates = parsed.remaining.filter((candidate) => {
     if (!variantType) return !candidate.reusesKnowledge && !excluded.has(normalized(candidate.angle));
@@ -131,12 +164,15 @@ export function parseAnglePlan(content: string, previousCount: number, sources: 
   }).sort((a, b) => Number(!!a.reusesKnowledge || excluded.has(normalized(a.angle)))
     - Number(!!b.reusesKnowledge || excluded.has(normalized(b.angle))));
   const candidate = candidates.find((entry) => sources.some((source) => source.id === entry.sourceId
-    && normalized(source.content).includes(normalized(entry.quote))));
+    && (source.systemQuote || (entry.quote && normalized(source.content).includes(normalized(entry.quote))))));
   const selected = candidate ? {
-    ...candidate, questionType: variantType,
+    ...candidate, quote: sources.find((source) => source.id === candidate.sourceId)?.systemQuote
+      ? sources.find((source) => source.id === candidate.sourceId)!.content : candidate.quote!, questionType: variantType,
     reusesKnowledge: !!candidate.reusesKnowledge || excluded.has(normalized(candidate.angle)),
   } : undefined;
-  if (!selected) throw new GenerationFailure("angle_plan_invalid", "候选角度重复或引用无法在冻结依据中核对，不能据此补题。");
+  if (!selected) throw new GenerationFailure(stable ? candidates.length ? "evidence_invalid" : "angle_duplicate" : "angle_plan_invalid",
+    !stable ? "候选角度重复或引用无法在冻结依据中核对，不能据此补题。" : candidates.length
+      ? "候选引用的来源编号不存在或引用与冻结原文不符，请修复引用，不降低核验要求。" : "候选考查任务与已覆盖任务重复，请选择不同任务。");
   return { covered: parsed.covered.filter((entry) => entry.index < previousCount), selected };
 }
 export function anglePlanningPrompt(code: string, name: string, type: QuestionType, previous: Array<{
@@ -144,21 +180,23 @@ export function anglePlanningPrompt(code: string, name: string, type: QuestionTy
 }>, sources: AngleSource[], state: RetryState, context: unknown,
   quality?: { kind: QualityStandardKind; content: string; requirements: string[] }) {
   const variants = quality?.kind === "theory" && type !== "practical";
+  const stable = sources.some((source) => source.systemQuote);
   return {
     instruction: `你是职业技能命题补题分析助手。本次只分析知识角度，不生成试题。严格限制在指定考评点、等级和冻结依据范围内。
 逐题结合题干、选项、答案和解析提炼已经覆盖的实质知识内容。不要把换词、换句式、正反问法视为新角度。
-不得跨考评点、编造依据或放宽答案正确、依据真实、内容可答等底线。每个候选给出sourceId和来源中逐字可核验的quote。
+不得跨考评点、编造依据或放宽答案正确、依据真实、内容可答等底线。${stable ? "每个候选仅选择输入中存在的sourceId，原文由系统取回，不要自行改写或编造quote。" : "每个候选给出sourceId和来源中逐字可核验的quote。"}
 只返回JSON：{"covered":[{"index":0,"angle":"已覆盖知识内容"}],"remaining":[{"angle":"考查知识内容","sourceId":"提供的来源ID","quote":"该来源原文"${variants ? ',"task":"具体考查任务及与已有题的差异","reusesKnowledge":false,"reason":"选择该任务或复用知识的原因"' : ""}}],"reason":""}。
-${variants ? `本次理论补题优先新知识，知识已覆盖时允许同一知识、不同考查任务。
+${variants ? `本次理论补题优先新知识；仅当完整试题质量标准允许时，才可采用同一知识、不同考查任务，不得覆盖标准的独立性或多样性要求。
 例如概念识别、条件辨析、流程关系、错误诊断；实际任务必须不同，不能只换词、答案位置或简单正反改写。跨题型允许围绕同一规则出题，但不复制已有陈述。
 remaining可以包含同知识变式，必须额外返回task（具体不同的考查任务）、reusesKnowledge（是否复用知识）及reason（放宽原因）。复用知识不能伪称新知识。
 covered仅为辅助分析，不替代输入中的完整已有试题；不因无法完整列出covered而拒绝有原文依据的补题。仅当原文确实无法支持准确的新题或不同考查任务时返回remaining=[]。`
-    : `找出适合指定缺额题型、有明确依据、尚未被已有题覆盖且未被之前补题尝试使用的新角度，按对应专项质量标准执行，不得套用理论同知识变式放宽。
+    : `找出适合指定缺额题型、有明确依据、尚未被已有题覆盖的新角度，按对应专项质量标准执行，不得套用理论同知识变式放宽。
 资料不足或无新角度时remaining返回[]并说明reason，禁止凑数。covered必须包含所有已有试题的索引且不重复；无已有题时返回[]。`}`,
     prompt: JSON.stringify({
       考评点: { code, name }, 指定缺额题型: type, 冻结范围: context,
       已有试题: previous.map((entry, index) => ({ index, ...entry })),
       可用依据: sources, 已尝试角度: state.attemptedAngles, 上次失败: state.failures,
+      尝试与覆盖区别: "失败尝试不等于成功覆盖，不能因一次格式或答案错误就排除该任务；只排除真实已成功覆盖的内容。",
       ...(quality ? {
         [quality.kind === "skill" ? "操作技能试题质量标准" : "试题质量标准"]: quality.content,
         质量要求: quality.requirements, 质量执行策略: generationQualityPolicy(quality.kind, true),
@@ -189,4 +227,4 @@ export function keepSelectedAngle(state: RetryState) {
     "network_timeout", "network_error", "rate_limited", "lease_expired",
   ].includes(failure.code));
 }
-export type RequestOutput = { questions: GeneratedQuestion[]; failures: RetryFailure[]; state: RetryState };
+export type RequestOutput = { questions: GeneratedQuestion[]; failures: RetryFailure[]; state: RetryState; preparationFailure?: boolean };

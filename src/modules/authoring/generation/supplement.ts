@@ -3,7 +3,9 @@ import { createUlid } from "@/shared/database/ulid";
 import { assertOutlineConfirmed } from "@/modules/blueprints/point-review";
 import { assertFrozenPlanBasis } from "./plan-basis";
 import { questionTypes, quotaTotal, type QuestionType, type Snapshot } from "./contracts";
-import { MAX_TARGETED_ATTEMPTS, retryState, type RetryState } from "./retry-policy";
+import { retryState, type RetryState } from "./retry-policy";
+
+const MAX_GAPS_PER_REQUEST = 6;
 
 export type SupplementSlot = { id: string; unit_id: string; ordinal: number; question_type: QuestionType; question_id: string | null };
 export type SupplementUnit = { id: string; batch_id: string; ordinal: number; point_code: string; status: string; attempts: number; retry_state_json: unknown };
@@ -36,10 +38,10 @@ export function supplementManifest(snapshot: Snapshot, units: SupplementUnit[], 
   }
   const groups = [...missing.values()].flatMap((group) => {
     const sorted = group.slots.sort((a, b) => a.ordinal - b.ordinal);
-    // A targeted request produces one question per attempt. Split large gaps
-    // so its six-attempt limit cannot itself make the requested quota impossible.
-    return Array.from({ length: Math.ceil(sorted.length / MAX_TARGETED_ATTEMPTS) }, (_, index) => ({
-      unit: group.unit, slots: sorted.slice(index * MAX_TARGETED_ATTEMPTS, (index + 1) * MAX_TARGETED_ATTEMPTS),
+    // Bound each request's gap size; generation/repair budgets are per slot,
+    // not a shared six-attempt allowance for the entire group.
+    return Array.from({ length: Math.ceil(sorted.length / MAX_GAPS_PER_REQUEST) }, (_, index) => ({
+      unit: group.unit, slots: sorted.slice(index * MAX_GAPS_PER_REQUEST, (index + 1) * MAX_GAPS_PER_REQUEST),
     }));
   });
   const missingQuestions = groups.reduce((sum, group) => sum + group.slots.length, 0);

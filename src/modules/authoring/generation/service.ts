@@ -18,9 +18,12 @@ import { assertFrozenPlanBasis, theoryPointContext } from "./plan-basis";
 import { readGenerationActivity } from "./activity";
 import { registerGenerationRequest } from "./cancellation";
 import { queueSupplementRound } from "./supplement";
-import { anglePlanningPrompt, angleSources, completeRetry, failureOf, GenerationFailure, keepSelectedAngle, MAX_TOTAL_ATTEMPTS, MAX_TARGETED_ATTEMPTS,
-  parseAnglePlan, prepareManualRetry, recordQualityRelaxation, retryBlocked, retryQuestionFeedback, retryState, validationFailure,
+import { completeRetry, failureOf, GenerationFailure, MAX_TOTAL_ATTEMPTS, MAX_TARGETED_ATTEMPTS,
+  prepareManualRetry, retryBlocked, retryState, validationFailure,
   type RequestOutput, type RetryFailure, type RetryState } from "./retry-policy";
+import { buildEvidenceCatalog, type EvidenceChapter } from "./evidence-catalog";
+import { ensureTargetedBudget, markTargetedSaved, MAX_SLOT_GENERATIONS, MAX_SLOT_REPAIRS, MAX_UNIT_MODEL_CALLS, type MissingSlot } from "./targeted-budget";
+import { generateTargeted } from "./targeted-generation";
 
 function json<T>(value: T | string): T {
   return typeof value === "string" ? JSON.parse(value) as T : value;
@@ -36,6 +39,7 @@ type Unit = RowDataPacket & {
 export async function startGeneration(planId: string, actorId: string, retryFailed = false) {
   const connection = await getSavedModelConnection();
   const id = await withTransaction(async (db) => {
+    await db.execute("SELECT id FROM authoring_generation_capacity WHERE id=1 FOR UPDATE");
     const [plans] = await db.execute<(RowDataPacket & { project_id: string; raw_requirement: string; scope_json: Scope | string; quota_json: string; status: string })[]>(
       "SELECT project_id, raw_requirement, scope_json, quota_json, status FROM authoring_plans WHERE id=? FOR UPDATE", [planId],
     );
@@ -55,18 +59,31 @@ export async function startGeneration(planId: string, actorId: string, retryFail
         const [failed] = await db.execute<(RowDataPacket & { id: string; attempts: number; retry_state_json: unknown; error_message: string | null })[]>(
           "SELECT id,attempts,retry_state_json,error_message FROM authoring_generation_units WHERE job_id=? AND status='failed' FOR UPDATE", [existing[0].id],
         );
+        const [missingSlots] = await db.execute<(RowDataPacket & MissingSlot & { unit_id: string })[]>(
+          "SELECT id,unit_id,ordinal,question_type FROM authoring_generation_slots WHERE job_id=? AND question_id IS NULL FOR UPDATE", [existing[0].id],
+        );
         let retried = 0;
+        const upgraded: string[] = [];
         for (const unit of failed) {
           const state = retryState(unit.retry_state_json);
+          const missing = missingSlots.filter((slot) => slot.unit_id === unit.id);
+          if (!missing.length) continue;
+          if (!state.budget) {
+            ensureTargetedBudget(state, missing, Number(unit.attempts), unit.error_message);
+            upgraded.push(unit.id);
+            // A one-time strategy upgrade keeps all legacy cumulative counters
+            // and failures in origin; it is not an unlimited counter reset.
+            state.failures = [];
+          }
           if (retryBlocked(state, Number(unit.attempts), true)) continue;
           const next = prepareManualRetry(state, Number(unit.attempts), unit.error_message);
           await db.execute("UPDATE authoring_generation_units SET status='queued',retry_state_json=?,next_attempt_at=UTC_TIMESTAMP(3) WHERE id=?",
             [JSON.stringify(next), unit.id]);
           retried++;
         }
-        if (!retried) throw new Error("失败请求已达到累计上限或需补充依据、修复配置，不能继续原样重试。");
+        if (!retried) throw new Error("逐题补题预算已耗尽或需补充依据、人工命题，请查看缺口和查阅记录；不会原样无限重试。");
         await refreshJob(db, existing[0].id);
-        await audit(db, plan.project_id, actorId, planId, "authoring.plan.retry_failed", { jobId: existing[0].id, retried, skipped: failed.length - retried });
+        await audit(db, plan.project_id, actorId, planId, "authoring.plan.retry_failed", { jobId: existing[0].id, retried, skipped: failed.length - retried, upgraded, strategy: "per_slot_v2" });
       }
       return existing[0].id;
     }
@@ -168,7 +185,9 @@ export async function getGenerationState(planId: string) {
   return {
     job: {
       id: job.id, status, target: Number(job.target_count), generated,
-      retryLimits: { totalAttempts: MAX_TOTAL_ATTEMPTS, targetedAttempts: MAX_TARGETED_ATTEMPTS, consecutiveZeroOutputs: 2 },
+      retryLimits: { strategy: "per_slot_v2", perSlotGenerations: MAX_SLOT_GENERATIONS, perSlotRepairs: MAX_SLOT_REPAIRS,
+        modelCallsPerUnit: MAX_UNIT_MODEL_CALLS,
+        legacy: { totalAttempts: MAX_TOTAL_ATTEMPTS, targetedAttempts: MAX_TARGETED_ATTEMPTS, consecutiveZeroOutputs: 2 } },
       activity: await readGenerationActivity(job.id),
       terminationSummary: job.termination_summary_json ? json(job.termination_summary_json) : null,
       stopSummary: job.stop_summary_json ? json(job.stop_summary_json) : null,
@@ -179,7 +198,14 @@ export async function getGenerationState(planId: string) {
         const state = retryState(unit.retry_state_json);
         return { id: unit.id, code: unit.point_code, type: unit.question_type, remaining: Number(unit.remaining),
           error: unit.error_message ?? (status === "stopped" ? "任务已停止，此缺额不再处理。" : "请求失败。"), attempts: Number(unit.attempts), failures: state.failures,
-          stopReason: status === "stopped" ? "已停止，不再处理此缺额。" : state.stopReason, retryable: status !== "stopped" && !retryBlocked(state, Number(unit.attempts), true) };
+          stopReason: status === "stopped" ? "已停止，不再处理此缺额。" : state.stopReason,
+          retryable: status !== "stopped" && (!state.budget || !retryBlocked(state, Number(unit.attempts), true)),
+          strategyUpgradeAvailable: !state.budget,
+          modelCalls: state.budget ? { used: state.budget.calls, limit: state.budget.maxCalls } : undefined,
+          missingSlots: state.budget ? Object.entries(state.budget.slots).filter(([, slot]) => !slot.done).map(([id, slot]) => ({
+            id, ordinal: slot.ordinal, type: slot.type, generations: slot.generations, repairs: slot.repairs,
+            searched: slot.searchedSourceIds.length, totalSources: state.budget!.sourceCount ?? 0, reason: slot.blocked?.message,
+          })) : [] };
       }),
       batches: batches.map((batch) => ({
         ordinal: batch.ordinal, target: Number(batch.target), generated: Number(batch.generated_count),
@@ -242,6 +268,12 @@ async function claimUnit(): Promise<Unit | null> {
       state.targeted = true;
       state.failures = [validationFailure(unit.error_message)];
     }
+    if (state.targeted) {
+      const [missing] = await db.execute<(RowDataPacket & MissingSlot)[]>(
+        "SELECT id,ordinal,question_type FROM authoring_generation_slots WHERE unit_id=? AND question_id IS NULL ORDER BY ordinal FOR UPDATE", [unit.id],
+      );
+      ensureTargetedBudget(state, missing, Number(unit.attempts));
+    }
     const blocked = retryBlocked(state, Number(unit.attempts));
     if (blocked) {
       state.stopReason = blocked;
@@ -289,6 +321,11 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
     let saved = 0;
     for (const question of questions) {
       if (!slots.length) break;
+      if (output.state.budget && !question.standardReview) {
+        failures.push({ code: "quality_rejected", message: "补题候选未经完整质量标准核验，不计入成果。" });
+        continue;
+      }
+      if (question.targetSlotId && !slots.some((slot) => slot.id === question.targetSlotId)) continue;
       if (question.questionType === "practical") {
         const cleaned = cleanSkillStem(question.stem, snapshot.scope.occupation);
         if (cleaned !== question.stem) {
@@ -299,7 +336,7 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
       const hash = stemHash(question.stem);
       const [duplicates] = await db.execute<RowDataPacket[]>("SELECT id FROM authoring_generation_slots WHERE job_id=? AND stem_hash=? LIMIT 1", [unit.job_id, hash]);
       if (duplicates.length) { failures.push({ code: "duplicate", message: "题干与本任务已有题重复。" }); continue; }
-      const slot = slots.find((item) => item.question_type === question.questionType);
+      const slot = slots.find((item) => item.question_type === question.questionType && (!question.targetSlotId || item.id === question.targetSlotId));
       if (!slot) { failures.push({ code: "invalid_type", message: "返回题型没有对应缺额槽位。" }); continue; }
       const questionId = createUlid();
       const versionId = createUlid();
@@ -318,9 +355,11 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
         supplement: output.state.supplement,
         stemCleanup: question.originalStem ? { originalStem: question.originalStem, cleanedStem: question.stem, rule: "remove_identity_intro" } : undefined,
         formatRepairs: question.formatRepairs,
+        candidateRepairs: question.candidateRepairs, standardReview: question.standardReview,
+        targetedSlotId: question.targetSlotId, targetedHistory: output.state.budget?.history,
         appliedQualityStandard: unit.appliedQualityStandard,
         appliedSkillQualityStandard: skill ? unit.appliedQualityStandard : undefined,
-        qualityRelaxations: output.state.selectedAngle?.reusesKnowledge
+        qualityRelaxations: !output.state.budget && output.state.selectedAngle?.reusesKnowledge
           ? output.state.qualityRelaxations?.filter((entry) => entry.knowledge === output.state.selectedAngle?.angle
             && entry.task === output.state.selectedAngle?.task && entry.questionType === question.questionType) : [],
       };
@@ -338,6 +377,11 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
       await db.execute("INSERT INTO question_assessment_points(question_version_id,blueprint_node_id) VALUES(?,?)", [versionId, node.id]);
       await db.execute(`INSERT INTO question_quality_checks(id,question_version_id,check_round,check_code,severity,result,detail_json)
         VALUES(?,?,'rule','authoring.basic_structure','info','pass',?)`, [createUlid(), versionId, JSON.stringify({ planId: unit.plan_id, unitId: unit.id, optionsValid: true })]);
+      if (question.standardReview) {
+        await db.execute(`INSERT INTO question_quality_checks(id,question_version_id,check_round,check_code,severity,result,detail_json)
+          VALUES(?,?,'independent_review','authoring.full_standard','info','pass',?)`,
+        [createUlid(), versionId, JSON.stringify({ review: question.standardReview, standard: unit.appliedQualityStandard, angle: output.state.selectedAngle })]);
+      }
       if (source.qualityRelaxations?.length) {
         await db.execute(`INSERT INTO question_quality_checks(id,question_version_id,check_round,check_code,severity,result,detail_json)
           VALUES(?,?,'rule','authoring.knowledge_variant','warning','manual_required',?)`,
@@ -350,10 +394,11 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
         VALUES(?,?,?,NULL,?,'分批AI生成，等待人工核查',?)`, [createUlid(), questionId, versionId, status, unit.created_by]);
       await db.execute("UPDATE authoring_generation_slots SET question_id=?,stem_hash=? WHERE id=?", [questionId, hash, slot.id]);
       slots.splice(slots.indexOf(slot), 1);
+      markTargetedSaved(output.state, slot.id);
       saved += 1;
     }
     if (slots.length && !failures.length && !saved) failures.push({ code: "invalid_content", message: "模型未返回可保存的试题。" });
-    const result = completeRetry(output.state, unit.attempts, saved, slots.length, failures);
+    const result = completeRetry(output.state, unit.attempts, saved, slots.length, failures, output.preparationFailure);
     const details = [...new Set(failures.map((failure) => failure.message))].join("；") || "仅补缺额，下一次按对应质量标准和不同考查任务补一道";
     await db.execute(`UPDATE authoring_generation_units SET status=?,error_message=?,retry_state_json=?,lease_token=NULL,lease_until=NULL,
       next_attempt_at=DATE_ADD(UTC_TIMESTAMP(3),INTERVAL ? SECOND) WHERE id=?`,
@@ -392,8 +437,8 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
   if (!connection || connection.provider !== snapshot.model.provider || connection.baseUrl !== snapshot.model.baseUrl) {
     throw new GenerationFailure("connection_changed", "模型连接已变更，请恢复原连接后处理，或新建计划。");
   }
-  const missing = await query<(RowDataPacket & { question_type: QuestionType })[]>(
-    "SELECT question_type FROM authoring_generation_slots WHERE unit_id=? AND question_id IS NULL ORDER BY ordinal", [unit.id],
+  const missing = await query<(RowDataPacket & MissingSlot)[]>(
+    "SELECT id,ordinal,question_type FROM authoring_generation_slots WHERE unit_id=? AND question_id IS NULL ORDER BY ordinal", [unit.id],
   );
   if (!missing.length) return { questions: [], failures: [], state };
   const requested = state.targeted ? missing.slice(0, 1) : missing;
@@ -401,7 +446,7 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
   const [metadata] = await query<(RowDataPacket & { name: string; requirement_json: unknown; source_ref_json: unknown })[]>(
     "SELECT name,requirement_json,source_ref_json FROM blueprint_nodes WHERE id=?", [node.id],
   );
-  if (metadata && isLegalPoint(metadata)) throw new GenerationFailure("insufficient_basis", "法律法规考评点必须通过法规智能体及已核验原文命题，已阻止普通生成。");
+  if (metadata && isLegalPoint(metadata)) throw new GenerationFailure("restricted_scope", "法律法规考评点必须通过法规智能体及已核验原文命题，已阻止普通生成。");
   const previous = await query<(RowDataPacket & { stem: string; content: unknown; answer: unknown; analysis: string | null })[]>(
     `SELECT qv.stem,qv.content_json AS content,qv.answer_json AS answer,qv.analysis_text AS analysis
       FROM authoring_generation_slots s JOIN authoring_generation_units u ON u.id=s.unit_id
@@ -409,12 +454,14 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
      WHERE s.job_id=? AND u.point_code=? ORDER BY s.ordinal`, [unit.job_id, unit.point_code],
   );
   let excerpts: Array<{ title: string; content: string; start: number }> = [];
+  let evidenceChapters: EvidenceChapter[] = [];
   if (node.chapterIds.length && snapshot.sourceVersionIds.length) {
     const chapters = await query<(RowDataPacket & { id: string; ordinal: number; chapter_title: string; section_title: string | null; content_text: string })[]>(
       `SELECT id,ordinal,chapter_title,section_title,content_text FROM textbook_chapters
        WHERE id IN (${node.chapterIds.map(() => "?").join(",")}) AND source_version_id IN (${snapshot.sourceVersionIds.map(() => "?").join(",")}) ORDER BY ordinal`,
       [...node.chapterIds, ...snapshot.sourceVersionIds],
     );
+    evidenceChapters = chapters;
     const pool = buildChapterExcerptPool(chapters.map((chapter) => ({
       id: chapter.id, ordinal: chapter.ordinal, chapterTitle: chapter.chapter_title, sectionTitle: chapter.section_title, content: chapter.content_text,
     })), node.name);
@@ -444,43 +491,30 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
         jobId: unit.job_id, unitId: unit.id, attempts: unit.attempts, standard,
       });
   });
-  const reuseAngle = keepSelectedAngle(state);
-  if (!reuseAngle) state.selectedAngle = undefined;
   unit.retry_state_json = state;
   if (state.targeted) {
     const context = snapshot.scope.assessmentMode === "操作技能" ? node.skillContext : node.theoryContext;
-    const sources = angleSources(context, excerpts);
-    if (!sources.length) throw new GenerationFailure("insufficient_basis", "冻结教材和标准未提供可核验原文，不能为补题编造新角度。");
-    const analysisPrompt = anglePlanningPrompt(node.code, node.name, requested[0].question_type, previous, sources, state, {
-      职业: snapshot.scope.occupation, 等级: snapshot.scope.levelCode, 依据: context,
-    }, { kind, content: standard.content, requirements: snapshot.qualityRequirements });
-    if (!reuseAngle) {
-      const analysis = await callGenerationModel(snapshot, connection.apiKey, analysisPrompt, cancellation);
-      const variantType = kind === "theory" && requested[0].question_type !== "practical" ? requested[0].question_type : undefined;
-      const plan = parseAnglePlan(analysis, previous.length, sources, state.attemptedAngles, variantType);
-      state.covered = plan.covered;
-      state.selectedAngle = plan.selected;
-      state.attemptedAngles = [...state.attemptedAngles, plan.selected];
-      recordQualityRelaxation(state, plan.selected, requested[0].question_type);
-    }
-    unit.retry_state_json = state;
-    cancellation.throwIfAborted();
-    // Lease fencing preserves the plan without allowing a cancelled/old worker
-    // to write retry metadata or consume a second model request.
-    const persisted = await query<RowDataPacket[]>(
-      "SELECT id FROM authoring_generation_units WHERE id=? AND lease_token=? AND status='running'", [unit.id, unit.lease_token],
-    );
-    if (!persisted.length) throw new GenerationFailure("lease_expired", "补题分析后租约已失效，停止生成。");
-    await query("UPDATE authoring_generation_units SET retry_state_json=? WHERE id=? AND lease_token=? AND status='running'",
-      [JSON.stringify(state), unit.id, unit.lease_token]);
+    const sources = buildEvidenceCatalog(context, evidenceChapters, node.name);
+    ensureTargetedBudget(state, missing, unit.attempts - 1);
+    return generateTargeted({ snapshot, code: node.code, previous, sources, state }, {
+      signal: cancellation,
+      call: (input) => callGenerationModel(snapshot, connection.apiKey, input, cancellation),
+      persist: async () => {
+        cancellation.throwIfAborted();
+        // Check the lease on every phase, not only after analysis. A stopped
+        // request cannot consume repair/review calls or save late responses.
+        const persisted = await query<RowDataPacket[]>(
+          "SELECT id FROM authoring_generation_units WHERE id=? AND lease_token=? AND status='running'", [unit.id, unit.lease_token],
+        );
+        if (!persisted.length) throw new GenerationFailure("lease_expired", "补题租约已失效，不再生成、修复或核验。");
+        await query("UPDATE authoring_generation_units SET retry_state_json=? WHERE id=? AND lease_token=? AND status='running'",
+          [JSON.stringify(state), unit.id, unit.lease_token]);
+      },
+    });
   }
-  let { instruction, prompt } = kind === "skill"
+  const { instruction, prompt } = kind === "skill"
     ? skillQuestionPrompt(snapshot, node.code, requested.length, previous.map((item) => item.stem))
     : theoryQuestionPrompt(snapshot, node.code, requested.map((slot) => slot.question_type), previous, excerpts, unit.attempts, state.targeted);
-  if (state.selectedAngle) {
-    instruction += "\n本次为精准补题，只生成一道指定题型的新题。必须使用补题策略指定的知识、考查任务和原文依据；复用知识时须确保实际考查任务不同，不只改写原题。针对上次具体错误修正，不得忽略对应质量标准和正确性底线。";
-    prompt = JSON.stringify({ ...JSON.parse(prompt), 补题策略: retryQuestionFeedback(state, state.selectedAngle, requested[0].question_type) });
-  }
   const content = await callGenerationModel(snapshot, connection.apiKey, { instruction, prompt }, cancellation);
   let parsed: ReturnType<typeof parseQuestions>;
   try { parsed = parseQuestions(content, node.code, snapshot.scope.assessmentMode === "操作技能" ? "practical" : state.targeted ? requested[0].question_type : unit.question_type,
@@ -535,7 +569,7 @@ export async function runGenerationTick() {
   try {
     let output: RequestOutput = { questions: [], failures: [], state: retryState(unit.retry_state_json) };
     try { output = await requestQuestions(unit, request.controller.signal); }
-    catch (error) { output = { questions: [], failures: [failureOf(error)], state: retryState(unit.retry_state_json) }; }
+    catch (error) { output = { questions: [], failures: [failureOf(error)], state: retryState(unit.retry_state_json), preparationFailure: true }; }
     try {
       await saveOutput(unit, output);
     } catch (error) {

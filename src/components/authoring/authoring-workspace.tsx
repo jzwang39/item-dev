@@ -5,6 +5,7 @@ import { SkillStandardUpload, SkillWeightMatrix, SkillStructureMatrix, type Impo
 import { SkillOutlinePanel } from "./skill-outline-panel";
 import { SkillStructureEditor } from "./skill-structure-editor";
 import { SupplementButton } from "./supplement-button";
+import { ExecutionProgress } from "./execution-progress";
 import { ScoreRubric } from "@/components/questions/score-rubric";
 import { formatDirectionCode, type OccupationDirection } from "@/modules/authoring/occupations/directions";
 import type { TheoryWeightScope } from "@/modules/blueprints/theory-weights/standard";
@@ -4742,6 +4743,8 @@ type HistoryPlan = {
   created_at: string;
   updated_at: string;
   question_count: number;
+  generation_target?: number | null;
+  generation_generated?: number | null;
   generation_status?: "queued" | "running" | "partial" | "succeeded" | "cancelled" | "stopped" | null;
 };
 
@@ -4765,6 +4768,9 @@ type QuestionGenerationJob = {
   failedUnits: Array<{
     id: string; code: string; type: string; remaining: number; error: string;
     attempts?: number; failures?: Array<{ code: string; message: string }>; stopReason?: string; retryable?: boolean;
+    strategyUpgradeAvailable?: boolean;
+    modelCalls?: { used: number; limit: number };
+    missingSlots?: Array<{ id: string; ordinal: number; type: string; generations: number; repairs: number; searched: number; totalSources: number; reason?: string }>;
   }>;
 };
 
@@ -4826,6 +4832,7 @@ function AuthoringTaskPanel() {
   const [ruleTab, setRuleTab] = useState(0);
   const [taskHistory, setTaskHistory] = useState<HistoryPlan[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
+  const historyRequestId = useRef(0);
   const [historyPlanId, setHistoryPlanId] = useState<string | null>(null);
   const [executionError, setExecutionError] = useState("");
   const [generationJob, setGenerationJob] = useState<QuestionGenerationJob | null>(null);
@@ -4963,11 +4970,12 @@ function AuthoringTaskPanel() {
       JSON.stringify(customPromptTemplates),
     );
   }, [customPromptTemplates, hasLoadedCustomPromptTemplates]);
-  const loadTaskHistory = async () => {
-    setIsLoadingHistory(true);
+  const loadTaskHistory = async (showLoading = true) => {
+    const requestId = ++historyRequestId.current;
+    if (showLoading) setIsLoadingHistory(true);
     try {
       const response = await fetch("/api/v1/authoring/plans", {
-        cache: "no-store",
+        cache: "no-store", signal: AbortSignal.timeout(30_000),
       });
       const payload = (await response.json()) as {
         data?: HistoryPlan[];
@@ -4975,18 +4983,32 @@ function AuthoringTaskPanel() {
       };
       if (!response.ok)
         throw new Error(payload.error?.message ?? "历史命题计划加载失败。");
+      if (requestId !== historyRequestId.current) return;
       setTaskHistory(payload.data ?? []);
     } catch (error) {
+      if (requestId !== historyRequestId.current || !showLoading) return;
       setNotice(
         error instanceof Error ? error.message : "历史命题计划加载失败。",
       );
     } finally {
-      setIsLoadingHistory(false);
+      if (requestId === historyRequestId.current) setIsLoadingHistory(false);
     }
   };
   useEffect(() => {
     void loadTaskHistory();
   }, []);
+  const historyHasActiveGeneration = taskHistory.some((plan) => ["queued", "running"].includes(plan.generation_status ?? ""));
+  useEffect(() => {
+    if (!historyHasActiveGeneration) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      await loadTaskHistory(false);
+      if (!cancelled) timer = setTimeout(() => void refresh(), 5000);
+    };
+    timer = setTimeout(() => void refresh(), 5000);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [historyHasActiveGeneration]);
   useEffect(() => {
     const planId = new URL(window.location.href).searchParams.get("executionPlan");
     if (planId) setConfirmedPlanId(planId);
@@ -5961,7 +5983,14 @@ function AuthoringTaskPanel() {
                   <details>
                     <summary className="cursor-pointer">查看 {generationJob.failedUnits.length} 个{generationJob.status === "stopped" ? "已关闭缺额" : "失败请求"}</summary>
                     {generationJob.failedUnits.map((unit) => (
-                      <p className="mb-0 mt-2" key={unit.id}>{unit.code} · {unit.type === "mixed" ? "混合题型" : unit.type === "single" ? "单选" : unit.type === "multiple" ? "多选" : unit.type === "practical" ? "实操" : "判断"} · 缺 {unit.remaining} 题{unit.attempts !== undefined ? ` · 累计${unit.attempts}次` : ""}：{unit.error}{generationJob.status !== "stopped" && unit.retryable === false ? " · 不可自动补题，需人工处理" : ""}</p>
+                      <div className="mt-2" key={unit.id}>
+                        <p className="m-0">{unit.code} · {unit.type === "mixed" ? "混合题型" : unit.type === "single" ? "单选" : unit.type === "multiple" ? "多选" : unit.type === "practical" ? "实操" : "判断"} · 缺 {unit.remaining} 题{unit.attempts !== undefined ? ` · 累计${unit.attempts}次` : ""}：{unit.error}{generationJob.status !== "stopped" && unit.retryable === false ? " · 不可自动补题，需人工处理" : ""}</p>
+                        {unit.strategyUpgradeAvailable && generationJob.status !== "stopped" ? <p className="m-0 mt-1 text-[#6980a4]">可点击重试转入逐题补题策略，历史累计记录保留。</p> : null}
+                        {unit.modelCalls ? <p className="m-0 mt-1 text-[#6980a4]">模型调用 {unit.modelCalls.used} / {unit.modelCalls.limit} 次（含检索、生成、修复及核验）</p> : null}
+                        {unit.missingSlots?.map((slot) => (
+                          <p key={slot.id} className="m-0 mt-1 text-[#6980a4]">第{slot.ordinal}题 · {slot.type === "single" ? "单选" : slot.type === "multiple" ? "多选" : slot.type === "practical" ? "实操" : "判断"} · 候选生成{slot.generations}/3轮 · 修复{slot.repairs}/2次 · 原文查阅{slot.searched}/{slot.totalSources}段{slot.reason ? `：${slot.reason}` : ""}</p>
+                        ))}
+                      </div>
                     ))}
                   </details>
                   {generationJob.status !== "stopped" ? <>
@@ -5970,7 +5999,7 @@ function AuthoringTaskPanel() {
                     disabled={isConfirmingPlan || Boolean(stoppingPlanId || terminatingPlanId || supplementingPlanId) || generationActive || generationJob.failedUnits.every((unit) => unit.retryable === false)}
                     onClick={() => void retryFailedGeneration()} type="button"
                   >{isConfirmingPlan ? "正在重试..." : "仅重试失败部分"}</button>
-                  <p className="mb-0 mt-2">每次仅补1题，按对应质量标准选择不同考查任务；理论可采用同一知识的不同考查任务。连续两次新增0题停止，每个请求累计最多6次精准补题、12次执行。</p>
+                  <p className="mb-0 mt-2">每个缺题最多生成3轮候选、修复2次，按完整对应质量标准核验后择优填入1题；检索和网络失败不占候选生成额度，模型调用总量仍受限。原文未查阅完不直接判定依据不足；确实不足时转人工处理。</p>
                   </> : null}
                 </div>
               ) : null}
@@ -6165,13 +6194,14 @@ function AuthoringTaskPanel() {
           </button>
         </div>
         <div className="mt-6 overflow-x-auto rounded-xl border border-[#dde5f1]">
-          <table className="min-w-[900px] w-full border-collapse text-left">
+          <table className="min-w-[1100px] w-full border-collapse text-left">
             <thead className="bg-[#f4f7fc] text-sm font-medium text-[#8493aa]">
               <tr>
                 <th className="px-5 py-4">任务名称 / 职业</th>
                 <th className="px-5 py-4">技能等级</th>
                 <th className="px-5 py-4">保存时间</th>
                 <th className="px-5 py-4">阶段 / 状态</th>
+                <th className="px-5 py-4 whitespace-nowrap">执行进度</th>
                 <th className="px-5 py-4">操作</th>
               </tr>
             </thead>
@@ -6180,7 +6210,7 @@ function AuthoringTaskPanel() {
                 <tr>
                   <td
                     className="px-5 py-10 text-center text-[#7185a5]"
-                    colSpan={5}
+                    colSpan={6}
                   >
                     正在加载历史命题计划...
                   </td>
@@ -6217,6 +6247,13 @@ function AuthoringTaskPanel() {
                       {getHistoryStage(row)}
                     </td>
                     <td className="px-5 py-5">
+                      <ExecutionProgress
+                        generated={row.generation_generated ?? row.question_count}
+                        target={row.generation_target ?? row.quota_json.minimumTotal}
+                        started={Boolean(row.generation_status) || row.question_count > 0}
+                      />
+                    </td>
+                    <td className="px-5 py-5">
                       <button
                         className="rounded-xl border border-[#b9cae5] bg-white px-4 py-2.5 text-sm font-medium text-[#385578]"
                         disabled={isLoadingHistoryResult}
@@ -6241,7 +6278,7 @@ function AuthoringTaskPanel() {
                         {stoppingPlanId === row.id ? "停止生成中..." : row.generation_status === "stopped" ? "已停止，保留成果" : "停止生成，保留成果"}
                       </button>
                       <SupplementButton
-                        enabled={row.generation_status === "stopped" && row.question_count < row.quota_json.minimumTotal && !stoppingPlanId && !terminatingPlanId && !supplementingPlanId && !isLoadingHistoryResult && !isSavingHandoff}
+                        enabled={row.generation_status === "stopped" && (row.generation_generated ?? row.question_count) < (row.generation_target ?? row.quota_json.minimumTotal) && !stoppingPlanId && !terminatingPlanId && !supplementingPlanId && !isLoadingHistoryResult && !isSavingHandoff}
                         busy={supplementingPlanId === row.id}
                         onClick={() => void supplementGeneration(row.id)}
                       />
@@ -6261,7 +6298,7 @@ function AuthoringTaskPanel() {
                 <tr>
                   <td
                     className="px-5 py-10 text-center text-[#7185a5]"
-                    colSpan={5}
+                    colSpan={6}
                   >
                     暂无历史命题计划。
                   </td>

@@ -63,13 +63,20 @@ export async function GET() {
       updated_at: string;
       question_count: number;
       generation_status: string | null;
+      generation_target: number | null;
+      generation_generated: number | null;
     };
     const rows = await query<PlanRow[]>(
       `SELECT ap.id, ap.name, ap.raw_requirement, ap.scope_json, ap.quota_json, ap.status, ap.created_at, ap.updated_at,
-              COUNT(DISTINCT qv.question_id) AS question_count,MAX(gj.status) AS generation_status
+              COUNT(DISTINCT qv.question_id) AS question_count,MAX(gj.status) AS generation_status,
+              MAX(gj.target_count) AS generation_target,MAX(progress.generated_count) AS generation_generated
          FROM authoring_plans ap
          LEFT JOIN question_versions qv ON JSON_UNQUOTE(JSON_EXTRACT(qv.source_snapshot_json, '$.planId')) = ap.id
          LEFT JOIN authoring_generation_jobs gj ON gj.plan_id=ap.id
+         LEFT JOIN (
+           SELECT job_id,COUNT(question_id) AS generated_count
+           FROM authoring_generation_slots GROUP BY job_id
+         ) progress ON progress.job_id=gj.id
          INNER JOIN projects p ON p.id = ap.project_id AND p.status = 'active'
         GROUP BY ap.id
         ORDER BY ap.updated_at DESC
@@ -78,6 +85,8 @@ export async function GET() {
     return NextResponse.json({ data: rows.map((row) => ({
       ...row,
       question_count: Number(row.question_count),
+      generation_target: row.generation_target == null ? null : Number(row.generation_target),
+      generation_generated: row.generation_generated == null ? null : Number(row.generation_generated),
       scope_json: typeof row.scope_json === "string" ? JSON.parse(row.scope_json) : row.scope_json,
       quota_json: typeof row.quota_json === "string" ? JSON.parse(row.quota_json) : row.quota_json
     })) });
