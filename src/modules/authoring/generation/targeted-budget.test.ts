@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ensureTargetedBudget, recoverPrematureBlocks, markTargetedSaved, nextTargetedSlot, targetedBudgetBlocked } from "./targeted-budget";
+import { ensureTargetedBudget, grantSkillRecovery, recoverPrematureBlocks, markTargetedSaved, nextTargetedSlot, targetedBudgetBlocked } from "./targeted-budget";
 import { completeRetry, prepareManualRetry, retryBlocked, retryState } from "./retry-policy";
 
 const missing = Array.from({ length: 5 }, (_, index) => ({ id: `slot-${index}`, ordinal: index + 1, question_type: "judgement" as const }));
@@ -121,4 +121,47 @@ test("无来源、内容轮次耗尽、总预算耗尽和其他硬失败不恢�
   budget.slots["slot-0"].generations = 0;
   budget.calls = budget.maxCalls;
   assert.equal(recoverPrematureBlocks(state), false);
+});
+
+test("技能专项新增额度留痕而非重置，旧调用和执行耗尽也只可一次授权恢复", () => {
+  const state = retryState(null);
+  const budget = ensureTargetedBudget(state, missing.map((slot) => ({ ...slot, question_type: "practical" as const })), 12);
+  budget.sourceCount = 4;
+  budget.calls = budget.maxCalls;
+  for (const slot of Object.values(budget.slots)) {
+    slot.generations = 3; slot.repairs = 2;
+    slot.blocked = { code: "invalid_content", message: "评分加总失败" };
+  }
+  assert.equal(grantSkillRecovery(state, 150), true);
+  assert.equal(budget.calls, 120);
+  assert.equal(budget.maxCalls, 240);
+  assert.equal(budget.origin.attempts, 12);
+  assert.equal(budget.skillRecovery?.attempts, 150);
+  assert.equal(budget.skillRecovery?.addedCalls, 120);
+  assert.equal(budget.slots["slot-0"].generations, 3);
+  assert.equal(budget.slots["slot-0"].skill?.generationBase, 3);
+  assert.equal(retryBlocked(state, 151, true), undefined);
+  assert.equal(grantSkillRecovery(state, 152), false);
+  budget.calls = 240;
+  assert.ok(retryBlocked(state, 152, true));
+  assert.equal(grantSkillRecovery(state, 153), false);
+});
+
+test("专项恢复只适用于有原文的旧技能技术或质量失败，不绕过硬错误", () => {
+  const state = retryState(null);
+  const budget = ensureTargetedBudget(state, [missing[0]], 0);
+  budget.sourceCount = 2;
+  budget.slots["slot-0"].blocked = { code: "invalid_content", message: "错误" };
+  assert.equal(grantSkillRecovery(state, 1), false);
+  budget.slots["slot-0"].type = "practical";
+  budget.sourceCount = 0;
+  assert.equal(grantSkillRecovery(state, 1), false);
+  budget.sourceCount = 2;
+  for (const code of ["restricted_scope", "connection_changed", "save_error", "network_error"] as const) {
+    state.failures = [{ code, message: "需要人工处理" }];
+    assert.equal(grantSkillRecovery(state, 1), false);
+  }
+  state.failures = [];
+  budget.slots["slot-0"].done = true;
+  assert.equal(grantSkillRecovery(state, 1), false);
 });

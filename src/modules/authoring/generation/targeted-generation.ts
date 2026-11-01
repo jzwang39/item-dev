@@ -4,7 +4,7 @@ import { MAX_SLOT_GENERATIONS, MAX_SLOT_REPAIRS, MAX_SLOT_TRANSPORT_FAILURES, ne
 import { nextEvidencePage } from "./evidence-catalog";
 import { candidateReviewPrompt, parseCandidateReview } from "./candidate-review";
 import { theoryQuestionPrompt } from "./theory-prompt";
-import { skillQuestionPrompt } from "./skill-prompt";
+import { generateSkillTargeted } from "./skill-targeted";
 
 type ModelInput = { instruction: string; prompt: string };
 export type TargetedDependencies = {
@@ -46,6 +46,11 @@ export async function generateTargeted(input: {
     return response;
   };
   try {
+    if (kind === "skill") {
+      return await generateSkillTargeted({ snapshot, code, previous, sources, state, slotId, slot }, {
+        call, persist: dependencies.persist, signal: dependencies.signal,
+      });
+    }
     if (!sources.length) {
       block({ code: "insufficient_basis", message: "本考评点关联教材和冻结标准均无可核验原文，请补充资料或人工命题，不编造依据。" });
       return output();
@@ -63,7 +68,7 @@ export async function generateTargeted(input: {
         }
         const analysisPrompt = anglePlanningPrompt(code, snapshot.nodes.find((node) => node.code === code)!.name, slot.type,
           previous, page, state, { 职业: snapshot.scope.occupation, 等级: snapshot.scope.levelCode }, {
-            kind, content: kind === "skill" ? snapshot.skillQualityStandard ?? "" : snapshot.qualityStandard,
+            kind, content: snapshot.qualityStandard,
             requirements: snapshot.qualityRequirements,
           });
         if (failures.length) analysisPrompt.prompt = JSON.stringify({ ...JSON.parse(analysisPrompt.prompt), 上次分析错误: failures.map((failure) => failure.message) });
@@ -119,14 +124,10 @@ export async function generateTargeted(input: {
         block({ code: "invalid_content", message: "该缺题已生成3轮候选仍未通过完整标准，需人工命题；其他缺题继续处理。" });
         return output();
       }
-      const count = kind === "skill" ? 2 : 3;
-      const prompt = kind === "skill"
-        ? skillQuestionPrompt(snapshot, code, count, previous.map((question) => question.stem))
-        : theoryQuestionPrompt(snapshot, code, Array(count).fill(slot.type), previous, usedSources, slot.generations + 1, true);
+      const count = 3;
+      const prompt = theoryQuestionPrompt(snapshot, code, Array(count).fill(slot.type), previous, usedSources, slot.generations + 1, true);
       prompt.instruction += "\n本次为一个缺题槽位生成少量不同候选，不增加正式计划题数。候选只按完整质量标准择优填入一个槽位；不要复制已有题。必须使用系统提供的原文，不能把原文存在当作答案正确。";
-      const trialMethods = kind === "skill"
-        ? ["从原文明确要求提取完整操作任务", "从原文明确步骤设计成果核验任务", "从原文明确要求设计操作错误排查任务"]
-        : ["从原文明确规则设计条件辨析任务", "从原文明确适用范围设计规则应用任务", "从原文明确步骤或关系设计错误识别任务"];
+      const trialMethods = ["从原文明确规则设计条件辨析任务", "从原文明确适用范围设计规则应用任务", "从原文明确步骤或关系设计错误识别任务"];
       if (slot.trialDesign) {
         prompt.instruction += "\n本次为有依据的候选试制。先从提供的原文提取明确事实，再按指定设计路径尝试命题；这不代表已有合格任务，不得臆造条件、默认知识复用合格或简单正反改写凑数。路径不适用或完整标准不允许时不要强行使用；确实无法命题返回questions=[]并在reason说明具体缺少的依据或未满足的标准条款。";
         budget.phase = "generation";
@@ -162,11 +163,11 @@ export async function generateTargeted(input: {
         prompt: JSON.stringify({
           职业: snapshot.scope.occupation, 等级: snapshot.scope.levelCode,
           考评点: { code, name: snapshot.nodes.find((node) => node.code === code)!.name }, 指定题型: slot.type,
-          冻结依据: kind === "skill" ? snapshot.nodes.find((node) => node.code === code)!.skillContext : snapshot.nodes.find((node) => node.code === code)!.theoryContext,
+          冻结依据: snapshot.nodes.find((node) => node.code === code)!.theoryContext,
           考查任务: slot.angle, 原始候选响应: originalResponse, 具体错误: parsed.invalidReasons,
           无效候选: parsed.invalidCandidates, 原文依据: usedSources, 已有试题: previous,
-          [kind === "skill" ? "操作技能试题质量标准" : "试题质量标准"]: kind === "skill" ? snapshot.skillQualityStandard : snapshot.qualityStandard,
-          质量要求: snapshot.qualityRequirements, 冻结内容结构: kind === "skill" ? snapshot.skillStructure : undefined,
+          试题质量标准: snapshot.qualityStandard,
+          质量要求: snapshot.qualityRequirements,
         }),
       });
       slot.repairs++;

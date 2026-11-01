@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { GeneratedQuestion, Snapshot } from "./contracts";
 import { GenerationFailure, type AngleSource } from "./retry-policy";
 import { generationQualityPolicy } from "./quality-policy";
+import { parseModelJson, skillCandidateIssues } from "./skill-candidate";
 
 const reviewSchema = z.object({
   checks: z.array(z.object({
@@ -37,8 +38,8 @@ export function candidateReviewPrompt(snapshot: Snapshot, code: string, candidat
 
 export function parseCandidateReview(content: string, candidates: GeneratedQuestion[], sources: AngleSource[]) {
   let parsed: z.infer<typeof reviewSchema>;
-  try { parsed = reviewSchema.parse(JSON.parse(content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""))); }
-  catch { throw new GenerationFailure("review_invalid", "候选质量核验格式无效，不将未经核验的候选计入成果。"); }
+  try { parsed = reviewSchema.parse(parseModelJson(content)); }
+  catch (error) { throw new GenerationFailure("review_invalid", `候选质量核验格式无效：${skillCandidateIssues(error).slice(0, 20).join("；")}。不将未经核验的候选计入成果。`); }
   if (parsed.checks.length !== candidates.length || new Set(parsed.checks.map((check) => check.index)).size !== candidates.length
     || parsed.checks.some((check) => check.index >= candidates.length)) {
     throw new GenerationFailure("review_invalid", "候选核验遗漏或重复索引，需重新核验，不能按默认通过保存。");

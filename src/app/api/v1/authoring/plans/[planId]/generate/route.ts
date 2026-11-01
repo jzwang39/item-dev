@@ -29,7 +29,11 @@ export async function POST(request: Request, { params }: { params: { planId: str
   if (auth.response) return auth.response;
   try {
     const body = await request.text();
-    const action = body ? (JSON.parse(body) as { action?: string }).action : undefined;
+    const input = body ? JSON.parse(body) as { action?: string; authorizeSkillRecovery?: boolean } : {};
+    const action = input.action;
+    if (input.authorizeSkillRecovery !== undefined && typeof input.authorizeSkillRecovery !== "boolean") {
+      return NextResponse.json({ error: { message: "技能专项恢复授权必须为布尔值。" } }, { status: 400 });
+    }
     if (action === "supplement") {
       const data = await startSupplementGeneration(params.planId, auth.actorId!);
       return NextResponse.json({ data }, { status: 202 });
@@ -43,7 +47,7 @@ export async function POST(request: Request, { params }: { params: { planId: str
       return NextResponse.json({ data: { summary, ...await getGenerationState(params.planId) } });
     }
     if (action && action !== "retry_failed") return NextResponse.json({ error: { message: "不支持的任务操作。" } }, { status: 400 });
-    const data = await startGeneration(params.planId, auth.actorId!, action === "retry_failed");
+    const data = await startGeneration(params.planId, auth.actorId!, action === "retry_failed", action === "retry_failed" && input.authorizeSkillRecovery === true);
     return NextResponse.json({ data }, { status: 202 });
   } catch (error) {
     return NextResponse.json({ error: { code: "PLAN_EXECUTION_FAILED", message: error instanceof Error ? error.message : "任务启动失败。" } }, { status: 422 });

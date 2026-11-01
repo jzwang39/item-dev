@@ -22,7 +22,7 @@ import { completeRetry, failureOf, GenerationFailure, MAX_TOTAL_ATTEMPTS, MAX_TA
   prepareManualRetry, retryBlocked, retryState, validationFailure,
   type RequestOutput, type RetryFailure, type RetryState } from "./retry-policy";
 import { buildEvidenceCatalog, type EvidenceChapter } from "./evidence-catalog";
-import { ensureTargetedBudget, recoverPrematureBlocks, markTargetedSaved, MAX_SLOT_GENERATIONS, MAX_SLOT_REPAIRS, MAX_UNIT_MODEL_CALLS, type MissingSlot } from "./targeted-budget";
+import { ensureTargetedBudget, grantSkillRecovery, recoverPrematureBlocks, markTargetedSaved, MAX_SLOT_GENERATIONS, MAX_SLOT_REPAIRS, MAX_UNIT_MODEL_CALLS, type MissingSlot } from "./targeted-budget";
 import { generateTargeted } from "./targeted-generation";
 
 function json<T>(value: T | string): T {
@@ -36,7 +36,7 @@ type Unit = RowDataPacket & {
   appliedQualityStandard?: AppliedQualityStandard;
 };
 
-export async function startGeneration(planId: string, actorId: string, retryFailed = false) {
+export async function startGeneration(planId: string, actorId: string, retryFailed = false, skillRecoveryAuthorized = false) {
   const connection = await getSavedModelConnection();
   const id = await withTransaction(async (db) => {
     await db.execute("SELECT id FROM authoring_generation_capacity WHERE id=1 FOR UPDATE");
@@ -76,6 +76,7 @@ export async function startGeneration(planId: string, actorId: string, retryFail
             state.failures = [];
           }
           ensureTargetedBudget(state, missing, Number(unit.attempts), unit.error_message);
+          if (scope.assessmentMode === "操作技能" && skillRecoveryAuthorized && grantSkillRecovery(state, Number(unit.attempts))) upgraded.push(unit.id);
           if (recoverPrematureBlocks(state)) upgraded.push(unit.id);
           if (retryBlocked(state, Number(unit.attempts), true)) continue;
           const next = prepareManualRetry(state, Number(unit.attempts), unit.error_message);
@@ -85,7 +86,8 @@ export async function startGeneration(planId: string, actorId: string, retryFail
         }
         if (!retried) throw new Error("逐题补题预算已耗尽或需补充依据、人工命题，请查看缺口和查阅记录；不会原样无限重试。");
         await refreshJob(db, existing[0].id);
-        await audit(db, plan.project_id, actorId, planId, "authoring.plan.retry_failed", { jobId: existing[0].id, retried, skipped: failed.length - retried, upgraded, strategy: "per_slot_v2", workflowVersion: 3 });
+        await audit(db, plan.project_id, actorId, planId, "authoring.plan.retry_failed", { jobId: existing[0].id, retried, skipped: failed.length - retried,
+          upgraded, strategy: "per_slot_v2", workflowVersion: 3, skillRecoveryAuthorized });
       }
       return existing[0].id;
     }
@@ -199,20 +201,26 @@ export async function getGenerationState(planId: string) {
       failedUnits: failed.map((unit) => {
         const state = retryState(unit.retry_state_json);
         const recovery = retryState(JSON.stringify(state));
+        const skillUpgrade = grantSkillRecovery(recovery, Number(unit.attempts));
         const flowUpgrade = recoverPrematureBlocks(recovery) && !retryBlocked(recovery, Number(unit.attempts), true);
+        const skillRecoveryAvailable = skillUpgrade && !retryBlocked(recovery, Number(unit.attempts), true);
         return { id: unit.id, code: unit.point_code, type: unit.question_type, remaining: Number(unit.remaining),
           error: unit.error_message ?? (status === "stopped" ? "任务已停止，此缺额不再处理。" : "请求失败。"), attempts: Number(unit.attempts), failures: state.failures,
           stopReason: status === "stopped" ? "已停止，不再处理此缺额。" : state.stopReason,
-          retryable: !["stopped", "cancelled"].includes(status) && (!state.budget || flowUpgrade || !retryBlocked(state, Number(unit.attempts), true)),
+          retryable: !["stopped", "cancelled"].includes(status) && (!state.budget || skillRecoveryAvailable || flowUpgrade || !retryBlocked(state, Number(unit.attempts), true)),
           strategyUpgradeAvailable: !state.budget || flowUpgrade,
+          skillRecoveryAvailable: !["stopped", "cancelled"].includes(status) && skillRecoveryAvailable,
+          skillRecovery: state.budget?.skillRecovery,
           reviewContext: state.budget?.reviewContext,
           modelCalls: state.budget ? { used: state.budget.calls, limit: state.budget.maxCalls } : undefined,
           missingSlots: state.budget ? Object.entries(state.budget.slots).filter(([, slot]) => !slot.done).map(([id, slot]) => ({
             id, ordinal: slot.ordinal, type: slot.type, generations: slot.generations, repairs: slot.repairs,
             searched: slot.searchedSourceIds.length, totalSources: state.budget!.sourceCount ?? 0, reason: slot.blocked?.message,
+            skill: slot.skill ? { generations: slot.generations - slot.skill.generationBase, repairs: slot.repairs - slot.skill.repairBase,
+              designAttempts: slot.skill.designAttempts } : undefined,
             reviewRecord: { 原文依据: slot.evidenceSources ?? (slot.angle ? [{ id: slot.angle.sourceId, content: slot.angle.quote }] : []),
               分析记录: slot.searchReasons, 待核验候选响应: slot.pendingResponse, 修订记录: slot.candidateRepairs,
-              核验响应: slot.reviewResponses, 历史候选: slot.rejectedCandidates, 原关闭原因: slot.recoveredBlock },
+              核验响应: slot.reviewResponses, 历史候选: slot.rejectedCandidates, 原关闭原因: slot.recoveredBlock, 技能专项记录: slot.skill },
           })) : [] };
       }),
       batches: batches.map((batch) => ({
@@ -364,6 +372,9 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
         stemCleanup: question.originalStem ? { originalStem: question.originalStem, cleanedStem: question.stem, rule: "remove_identity_intro" } : undefined,
         formatRepairs: question.formatRepairs,
         candidateRepairs: question.candidateRepairs, standardReview: question.standardReview,
+        scoringCalculation: question.scoringCalculation,
+        skillTaskDesign: skill ? output.state.budget?.slots[slot.id]?.skill : undefined,
+        targetedEvidence: output.state.budget?.slots[slot.id]?.evidenceSources,
         targetedSlotId: question.targetSlotId, targetedHistory: output.state.budget?.history,
         appliedQualityStandard: unit.appliedQualityStandard,
         appliedSkillQualityStandard: skill ? unit.appliedQualityStandard : undefined,

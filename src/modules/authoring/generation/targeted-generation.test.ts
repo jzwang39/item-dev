@@ -32,6 +32,17 @@ function review(input: Parameters<TargetedDependencies["call"]>[0], passed = tru
     evidenceSourceIds: [source.id], requirements: [{ requirement: "答案正确", passed, explanation: "核对原文" }],
   })) });
 }
+function skillDesign() {
+  return JSON.stringify({ scenario: "根据模拟资料完成借阅登记和归还核对", materials: ["明确标注的模拟借阅登记资料"],
+    requirements: ["登记借阅信息并核对资料完整性"], deliverables: ["提交登记表及完整性核对记录"],
+    steps: ["核对模拟资料并逐项填写借阅登记信息"], observations: ["登记信息和核对记录完整准确"],
+    sourceIds: ["S1"], difference: "考查借阅登记与完整性核对的实际操作任务" });
+}
+function skillDesignReview(passed = true) {
+  return JSON.stringify({ evidenceSupported: passed, completeTask: passed, correctScope: true, distinctTask: true,
+    meetsQualityStandard: passed, explanation: passed ? "原文支持完整任务和可观察成果。" : "原文缺少完整操作成果要求",
+    sourceIds: ["S1"], requirements: [{ requirement: "完整操作任务", passed, explanation: "核对冻结原文" }] });
+}
 function dependencies(call: TargetedDependencies["call"], signal = new AbortController().signal) {
   return { call, persist: async () => {}, signal };
 }
@@ -208,8 +219,9 @@ test("技能候选生成和独立核验只接收完整技能标准，不混入�
     assert.doesNotMatch(prompt.prompt, /理论污染不得传入/);
     const data = JSON.parse(prompt.prompt);
     assert.equal(data.操作技能试题质量标准, input.snapshot.skillQualityStandard);
-    if (prompt.instruction.includes("补题分析助手")) return plan();
-    if (prompt.instruction.includes("独立核验助手")) return review(prompt);
+    if (prompt.instruction.includes("技能任务设计助手")) return skillDesign();
+    if (prompt.instruction.includes("技能任务设计核验助手")) return skillDesignReview();
+    if (prompt.instruction.includes("独立核验助手")) return review(prompt).replaceAll(source.id, "S1");
     return JSON.stringify({ questions: [practical] });
   }));
   assert.equal(output.questions.length, 1);
@@ -392,10 +404,10 @@ test("技能试制仍只使用专项标准和操作任务，不套用理论条�
     assert.doesNotMatch(prompt.prompt, /理论污染不得传入/);
     const data = JSON.parse(prompt.prompt);
     assert.equal(data.操作技能试题质量标准, input.snapshot.skillQualityStandard);
-    if (prompt.instruction.includes("补题分析助手")) return '{"remaining":[],"reason":"未找到完整任务"}';
-    assert.match(data.候选试制.设计路径, /操作任务/);
-    assert.doesNotMatch(data.候选试制.设计路径, /条件辨析/);
-    return '{"questions":[],"reason":"原文缺少完整操作成果要求"}';
+    if (prompt.instruction.includes("技能任务设计助手")) return skillDesign();
+    assert.match(prompt.instruction, /技能任务设计核验助手/);
+    assert.doesNotMatch(prompt.instruction, /条件辨析/);
+    return skillDesignReview(false);
   }));
   assert.equal(output.questions.length, 0);
   assert.match(output.failures[0].message, /缺少完整操作成果要求/);

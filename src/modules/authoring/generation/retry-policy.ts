@@ -57,7 +57,10 @@ export function retryDelay(attempts: number, failures: RetryFailure[]) {
 }
 export function retryBlocked(state: RetryState, attempts: number, manual = false): string | undefined {
   if (state.budget) {
-    if (attempts - state.budget.origin.attempts >= state.budget.maxCalls + Object.keys(state.budget.slots).length * 4) {
+    const recovery = state.budget.skillRecovery;
+    const executionBase = recovery?.attempts ?? state.budget.origin.attempts;
+    const executionLimit = recovery ? state.budget.maxCalls - recovery.previousCalls : state.budget.maxCalls;
+    if (attempts - executionBase >= executionLimit + Object.keys(state.budget.slots).length * 4) {
       return "本请求执行预算已耗尽，请人工处理；历史累计次数和逐题预算均保留。";
     }
     const hard = manual || state.manualRecovery ? ["restricted_scope"] : ["restricted_scope", "connection_changed", "save_error", "model_error"];
@@ -82,6 +85,23 @@ export function completeRetry(state: RetryState, attempts: number, saved: number
   if (next.budget) {
     const activeId = next.budget.activeSlotId ?? nextTargetedSlot(next)?.[0];
     const slot = activeId ? next.budget.slots[activeId] : undefined;
+    if (slot?.skill && !slot.done && saved === 0 && slot.pendingResponse && failures.some((failure) => failure.code === "duplicate")) {
+      slot.rejectedCandidates = [...(slot.rejectedCandidates ?? []), {
+        response: slot.pendingResponse, repairs: slot.candidateRepairs, failures: failures.slice(), at: new Date().toISOString(),
+        evidenceSources: slot.evidenceSources, reviewResponses: slot.reviewResponses,
+        skillDesignResponse: slot.skill.designResponse, skillDesignReviewResponse: slot.skill.designReviewResponse,
+        skillDesignReviewResponses: slot.skill.designReviewResponses,
+        scoringCalculation: slot.skill.candidateCalculation,
+      }];
+      slot.pendingResponse = undefined;
+      slot.candidateRepairs = undefined;
+      slot.reviewResponses = undefined;
+      slot.skill.design = undefined;
+      slot.skill.designReviewResponse = undefined;
+      slot.skill.designReviewResponses = undefined;
+      slot.skill.candidateRepairs = 0;
+      slot.skill.verificationFailures = 0;
+    }
     if (preparationFailure && activeId) next.budget.activeSlotId = activeId;
     if (slot && preparationFailure && failures.some((failure) => ["network_timeout", "network_error", "rate_limited", "invalid_json"].includes(failure.code))) {
       slot.transportFailures++;
@@ -90,7 +110,7 @@ export function completeRetry(state: RetryState, attempts: number, saved: number
     if (slot && !slot.done && slot.transportFailures >= MAX_SLOT_TRANSPORT_FAILURES) {
       slot.blocked ??= { code: "network_error", message: "该缺题累计网络或租约失败达到上限，请修复连接后人工处理。" };
     }
-    if (slot && !slot.done && !slot.blocked && slot.generations >= 3 && !slot.pendingResponse) {
+    if (slot && !slot.done && !slot.blocked && slot.generations - (slot.skill?.generationBase ?? 0) >= 3 && !slot.pendingResponse) {
       slot.blocked = failures[0] ?? { code: "invalid_content", message: "该缺题已完成3次候选生成仍无合格题，请人工命题。" };
     }
     if (slot?.done || slot?.blocked) {

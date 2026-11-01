@@ -109,7 +109,12 @@ export type GeneratedQuestion = z.infer<typeof questionSchema> & {
   formatRepairs?: { originalAnswers: unknown; originalOptions: unknown; rule: "normalize_judgement" };
   targetSlotId?: string;
   standardReview?: { score: number; requirements: Array<{ requirement: string; passed: boolean; explanation: string }>; evidenceSourceIds: string[] };
-  candidateRepairs?: Array<{ originalResponse: string; correctedResponse: string; errors: string[] }>;
+  candidateRepairs?: Array<{ originalResponse: string; correctedResponse: string; errors: string[]; patchResponse?: string; fields?: string[] }>;
+  scoringCalculation?: {
+    original: { totalScore: 100; criteria: Array<{ item: string; standard: string; weight: number; rationale: string }> };
+    calculated: NonNullable<z.infer<typeof questionSchema>["scoreRubric"]>;
+    rule: "largest_remainder_0.01";
+  };
 };
 
 function judgementAnswer(value: unknown): string | undefined {
@@ -195,7 +200,9 @@ export function parseQuestions(content: string, code: string, requestedType: Que
     const hash = stemHash(question.stem);
     if (!legal || seen.has(hash) || /^(?:试题|题干|测试|示例)\s*\d*$/u.test(question.stem)) {
       const reason = type === "practical" && !question.scoreRubric ? "实操题缺少评分标准"
-        : type === "practical" && (question.stem.length < 30 || question.answers.some((answer) => answer.length < 4)) ? "实操题内容或参考答案不完整"
+        : type === "practical" && (question.stem.length < 30 || question.answers.some((answer) => answer.length < 4))
+          ? [question.stem.length < 30 ? `stem：清理后题干${question.stem.length}字，至少30字，须包含完整任务、条件和提交成果` : "",
+            ...question.answers.flatMap((answer, index) => answer.length < 4 ? [`answers[${index}]：参考操作步骤${answer.length}字，至少4字，须补充具体步骤`] : [])].filter(Boolean).join("；")
         : type === "practical" || type === "judgement" ? question.options.length ? "该题型不允许选项" : "判断题答案须为正确或错误"
         : optionKeys.size !== question.options.length || options.size !== question.options.length
           || (type === "single" ? question.options.length !== 4 : question.options.length < 4) ? "选项数量或选项唯一性不符"
