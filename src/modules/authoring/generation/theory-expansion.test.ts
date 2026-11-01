@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 import { documentText, publicIpv4, trustedDocumentUrl } from "./external-document";
 import { factualTheorySources } from "./evidence-catalog";
 import { acquireTheoryExpansion, parseExpansionAudit } from "./theory-expansion";
-import { ensureTargetedBudget, recoverNoTextbookTheory, theoryGenerationLimit } from "./targeted-budget";
+import { ensureTargetedBudget, recoverCuratedTheoryBasis, recoverNoTextbookTheory, theoryGenerationLimit } from "./targeted-budget";
+import { curatedTheoryBasis } from "./curated-theory-basis";
 import { generateTargeted } from "./targeted-generation";
 import { completeRetry, retryState } from "./retry-policy";
 import type { Snapshot } from "./contracts";
@@ -32,6 +33,109 @@ function fixture() {
   return { snapshot, code: "A", previous: [], sources: scopeSources, state };
 }
 const fetchDocument = async () => ({ url, text, retrievedAt: document.retrievedAt });
+
+function curatedFixture() {
+  const input = fixture();
+  const target: Snapshot = { ...snapshot, scope: { ...snapshot.scope, occupation: "劝募员" },
+    nodes: [{ ...snapshot.nodes[0], code: "B-C-AD-002", name: "新媒体传播规律" }] };
+  return { ...input, snapshot: target, code: "B-C-AD-002" };
+}
+
+test("定向资料只匹配劝募员无教材新媒体考评点，不跨职业、考点、技能或教材", () => {
+  const input = curatedFixture();
+  assert.ok(curatedTheoryBasis(input.snapshot, input.code));
+  assert.equal(curatedTheoryBasis(input.snapshot, "OTHER"), undefined);
+  assert.equal(curatedTheoryBasis({ ...input.snapshot, scope: snapshot.scope }, input.code), undefined);
+  assert.equal(curatedTheoryBasis({ ...input.snapshot, scope: { ...input.snapshot.scope, assessmentMode: "操作技能" } }, input.code), undefined);
+  assert.equal(curatedTheoryBasis({ ...input.snapshot, nodes: [{ ...input.snapshot.nodes[0], chapterIds: ["book"] }] }, input.code), undefined);
+  assert.equal(curatedTheoryBasis({ ...input.snapshot, nodes: [{ ...input.snapshot.nodes[0], name: "其他知识" }] }, input.code), undefined);
+});
+
+test("定向恢复保留两轮失败和调用数，不新增额度，不可再次恢复核验失败", () => {
+  const input = curatedFixture();
+  const budget = input.state.budget!;
+  budget.calls = 2;
+  budget.theoryExpansion = { version: 1, discoveryAttempts: 2, reviewAttempts: 0, documents: [], sources: [],
+    errors: ["404"], discoveryResponses: ["旧响应1", "旧响应2"], reviewResponses: [] };
+  budget.slots.s.blocked = { code: "insufficient_basis", message: "两轮地址失败" };
+  input.state.failures = [budget.slots.s.blocked];
+  assert.equal(recoverCuratedTheoryBasis(input.state, input.snapshot, input.code), true);
+  assert.equal(budget.calls, 2);
+  assert.equal(budget.maxCalls, 24);
+  assert.equal(budget.theoryExpansion.discoveryAttempts, 2);
+  assert.equal(budget.theoryExpansion.discoveryResponses.length, 2);
+  assert.equal(budget.slots.s.generations, 0);
+  budget.slots.s.blocked = { code: "insufficient_basis", message: "新资料核验失败" };
+  assert.equal(recoverCuratedTheoryBasis(input.state, input.snapshot, input.code), false);
+});
+
+test("留存的真实学术正文不猜网址，不绕过独立核验且完整记录获取方式", async () => {
+  const input = curatedFixture();
+  let calls = 0;
+  const sources = await acquireTheoryExpansion(input, {
+    signal: new AbortController().signal, persist: async () => {},
+    fetchDocument: async () => { throw new Error("定向资料不请求网络"); },
+    call: async (_phase, prompt) => {
+      calls++;
+      assert.match(prompt.instruction, /扩展依据独立核验助手/);
+      const data = JSON.parse(prompt.prompt);
+      const doc = data.实际下载资料[0];
+      assert.match(doc.留存资料信息.acquisition, /不代表运行时重新下载/);
+      return audit({ quote: doc.正文, explanation: "核对学术资料的用户角色切换，适用于该知识范围。" });
+    },
+  });
+  assert.equal(calls, 1);
+  assert.equal(sources.length, 1);
+  assert.match(sources[0].content, /信息生成、传播、分享和接收/);
+  assert.match(sources[0].expansion!.url, /ustb.edu.cn/);
+});
+
+test("定向资料真实也不能抵消标准或范围核验不通过", async () => {
+  const input = curatedFixture();
+  const deps = { signal: new AbortController().signal, persist: async () => {},
+    call: async (_phase: string, prompt: { prompt: string }) => {
+      const data = JSON.parse(prompt.prompt);
+      return audit({ quote: data.实际下载资料[0].正文, correctScope: false });
+    } };
+  assert.equal((await acquireTheoryExpansion(input, deps)).length, 0);
+  assert.equal((await acquireTheoryExpansion(input, deps)).length, 0);
+  await assert.rejects(() => acquireTheoryExpansion(input, deps), /核验已达2次/);
+  assert.equal(input.state.budget!.slots.s.generations, 0);
+});
+
+test("定向候选携带角色切换建议，最后质量核验拒绝时仍不计为成果", async () => {
+  for (const passed of [true, false]) {
+    const input = curatedFixture();
+    input.previous = [];
+    let finalReviews = 0;
+    const output = await generateTargeted(input, { signal: new AbortController().signal, persist: async () => {},
+      call: async (prompt) => {
+        const data = JSON.parse(prompt.prompt);
+        if (prompt.instruction.includes("扩展依据独立核验助手")) return audit({ quote: data.实际下载资料[0].正文 });
+        if (prompt.instruction.includes("补题分析助手")) return JSON.stringify({ remaining: [{
+          angle: "短视频用户角色", sourceId: input.state.budget!.theoryExpansion!.sources[0].id,
+          task: "识别接收与创作分享之间的用户角色切换", reusesKnowledge: false, reason: "原文明确支持角色切换",
+        }] });
+        if (prompt.instruction.includes("试题独立核验助手")) {
+          finalReviews++;
+          return JSON.stringify({ checks: [{ index: 0, meetsQualityStandard: passed, answerCorrect: true,
+            evidenceSupported: true, distinctTask: true, score: 90, explanation: passed ? "用户角色切换有原文支持。" : "干扰项未满足完整质量标准。",
+            evidenceSourceIds: [data.可核验原文[0].id], requirements: [{ requirement: "完整标准核验", passed, explanation: "逐项核验" }] }] });
+        }
+        assert.match(prompt.instruction, /定向设计建议/);
+        assert.match(prompt.instruction, /不考高校意识形态政策/);
+        return JSON.stringify({ questions: [{ assessmentPointCode: input.code, questionType: "single",
+          stem: "短视频用户由观看内容转为创作、发布和分享内容，体现了传播过程中(　　)。",
+          options: [{ key: "A", content: "传播主体的角色切换" }, { key: "B", content: "传播内容的主题分类" },
+            { key: "C", content: "传播渠道的技术更新" }, { key: "D", content: "传播效果的量化评估" }],
+          answers: ["A"], analysis: "资料指出用户在信息生成、传播、分享和接收间切换。" }] });
+      } });
+    assert.equal(finalReviews, 1);
+    assert.equal(output.questions.length, passed ? 1 : 0);
+    if (passed) assert.match(output.questions[0].analysis, /\[扩展\]/);
+    else assert.equal(output.failures[0].code, "quality_rejected");
+  }
+});
 
 test("标题不能证明具体知识，基础教材版本不使无章节考点变成有教材", () => {
   assert.equal(factualTheorySources(scopeSources).length, 0);

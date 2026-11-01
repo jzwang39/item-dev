@@ -5,6 +5,7 @@ import { designCorePassed, parseDesignReviewCore } from "./skill-design-review";
 import type { Snapshot } from "./contracts";
 import type { TheoryExpansionState } from "./theory-expansion";
 import { factualTheorySources } from "./evidence-catalog";
+import { curatedTheoryBasis } from "./curated-theory-basis";
 
 export const MAX_SLOT_GENERATIONS = 3;
 export const MAX_SLOT_REPAIRS = 2;
@@ -115,6 +116,26 @@ export function recoverNoTextbookTheory(state: RetryState, snapshot: Pick<Snapsh
   }
   if (recovered) state.stopReason = undefined;
   return recovered;
+}
+
+export function recoverCuratedTheoryBasis(state: RetryState, snapshot: Pick<Snapshot, "scope" | "nodes">, code: string) {
+  const budget = state.budget;
+  const evidence = budget?.theoryExpansion;
+  if (!budget || !evidence || !curatedTheoryBasis(snapshot, code) || evidence.curatedRecovery || evidence.curatedBasisId
+    || evidence.sources.length || evidence.documents.length || evidence.reviewAttempts !== 0 || evidence.discoveryAttempts < 2
+    || budget.calls >= budget.maxCalls || state.failures.some((failure) => failure.code !== "insufficient_basis")) return false;
+  const slots = Object.entries(budget.slots).filter(([, slot]) => !slot.done && slot.type === "single"
+    && slot.generations === 0 && slot.transportFailures < MAX_SLOT_TRANSPORT_FAILURES && slot.blocked?.code === "insufficient_basis");
+  if (!slots.length) return false;
+  evidence.curatedRecovery = { at: new Date().toISOString(), previousBlocks: Object.fromEntries(slots.map(([id, slot]) => [id, slot.blocked!])),
+    previousCalls: budget.calls, previousDiscoveryAttempts: evidence.discoveryAttempts };
+  for (const [id, slot] of slots) {
+    slot.blocked = undefined;
+    budget.history = [...budget.history.slice(-59), { phase: "analysis", slotId: id, at: new Date().toISOString(),
+      outcome: "新媒体传播考评点定向资料一次恢复：保留两轮无效地址检索及全部调用计数，使用版本化学术正文重新核验，不新增额度。" }];
+  }
+  state.stopReason = undefined;
+  return true;
 }
 
 export function recoverTheoryDuplicate(state: RetryState) {
