@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { generateTargeted, type TargetedDependencies } from "./targeted-generation";
 import { completeRetry, GenerationFailure, retryState } from "./retry-policy";
-import { ensureTargetedBudget, recoverTheoryDuplicate, markTargetedSaved } from "./targeted-budget";
+import { ensureTargetedBudget, recoverTheoryDuplicate, recoverTheoryEcho, theoryGenerationLimit, markTargetedSaved } from "./targeted-budget";
 import type { GeneratedQuestion, Snapshot } from "./contracts";
 
 const snapshot: Snapshot = {
@@ -55,7 +55,8 @@ test("重复候选后累计查阅不清零，重新分析显式排除重复任�
     if (prompt.instruction.includes("补题分析助手")) {
       if (++analyses === 1) return plan();
       assert.equal(data.被查重拒绝的候选及任务.length, 1);
-      assert.match(data.被查重拒绝的候选及任务[0].response, /借阅资料/);
+      assert.match(data.被查重拒绝的候选及任务[0].stems[0], /借阅资料/);
+      assert.equal(data.被查重拒绝的候选及任务[0].response, undefined);
       // The planner repeats the same task: parser must reject it and try a
       // different evidence-based task, never weaken the duplicate rule.
       return plan();
@@ -93,6 +94,87 @@ function theoryDuplicateFixture() {
   input.state.failures = [duplicate];
   return input;
 }
+
+function echoFixture() {
+  const input = fixture();
+  const budget = input.state.budget!, slot = budget.slots["slot-0"];
+  const duplicate = { code: "duplicate" as const, message: "候选题干与已有题重复" };
+  budget.calls = 9;
+  budget.sourceCount = 1;
+  budget.reviewContext = { kind: "theory", qualityStandard: snapshot.qualityStandard, qualityRequirements: [],
+    previous: [{ stem: question.stem, answer: { answers: question.answers }, analysis: question.analysis }] };
+  slot.generations = 4;
+  slot.blocked = duplicate;
+  slot.theoryRedesignRecovery = { at: "old", previousBlock: duplicate, previousGenerations: 3, extraGenerations: 1 };
+  slot.rejectedCandidates = Array.from({ length: 4 }, () => ({
+    response: JSON.stringify({ questions: [question] }), failures: [duplicate], evidenceSources: [source], at: "old",
+  }));
+  input.state.failures = [duplicate];
+  return { ...input, previous: budget.reviewContext.previous };
+}
+
+test("旧4轮连续复述可一次恢复第5轮，隔离生成输入且独立核验仍接收完整旧题", async () => {
+  const input = echoFixture();
+  const budget = input.state.budget!, slot = budget.slots["slot-0"];
+  const original = JSON.stringify(slot.rejectedCandidates);
+  assert.equal(recoverTheoryEcho(input.state, input.snapshot, input.code), true);
+  assert.equal(slot.generations, 4);
+  assert.equal(budget.calls, 9);
+  assert.equal(budget.maxCalls, 24);
+  assert.equal(theoryGenerationLimit(slot), 5);
+  assert.equal(JSON.stringify(slot.rejectedCandidates), original);
+  assert.equal(recoverTheoryEcho(input.state, input.snapshot, input.code), false);
+  const result = await generateTargeted(input, dependencies(async (prompt) => {
+    const data = JSON.parse(prompt.prompt);
+    if (prompt.instruction.includes("补题分析助手")) return plan();
+    if (prompt.instruction.includes("独立核验助手")) {
+      assert.match(prompt.prompt, /原文明确要求借阅登记/);
+      return review(prompt);
+    }
+    assert.equal(data.本次必须生成数, 1);
+    assert.equal(data.本次候选数, 1);
+    assert.deepEqual(data.已有试题, [{ stem: question.stem }]);
+    assert.equal(data.被拒绝的候选及具体原因[0].response, undefined);
+    assert.doesNotMatch(prompt.prompt, /原文明确要求借阅登记/);
+    assert.match(prompt.instruction, /不是示例或待修订答案/);
+    return JSON.stringify({ questions: [{ ...question, stem: "归还资料时应核对资料的完整性。" }] });
+  }));
+  assert.equal(result.questions.length, 1);
+  assert.ok(result.questions[0].standardReview);
+  assert.equal(slot.generations, 5);
+  assert.equal(slot.theoryPromptVersion, 2);
+  assert.equal(budget.calls, 12);
+});
+
+test("复述恢复仍重复则关闭，不重新授予旧重设计或复述额度", async () => {
+  const input = echoFixture();
+  assert.equal(recoverTheoryEcho(input.state, input.snapshot, input.code), true);
+  const output = await generateTargeted(input, dependencies(async (prompt) =>
+    prompt.instruction.includes("补题分析助手") ? plan() : JSON.stringify({ questions: [question] })));
+  const result = completeRetry(input.state, 5, 0, 1, output.failures);
+  assert.equal(result.status, "failed");
+  assert.equal(result.state.budget!.slots["slot-0"].generations, 5);
+  assert.equal(recoverTheoryEcho(result.state, input.snapshot, input.code), false);
+  assert.equal(recoverTheoryDuplicate(result.state), false);
+});
+
+test("新版失败、质量失败、非复述、无事实依据、调用不足与已完成均不开放复述恢复", () => {
+  const mutations: Array<(input: ReturnType<typeof echoFixture>) => void> = [
+    (input) => { input.state.budget!.slots["slot-0"].theoryPromptVersion = 2; },
+    (input) => { input.state.budget!.slots["slot-0"].blocked = { code: "quality_rejected", message: "答案错误" }; },
+    (input) => { input.state.budget!.slots["slot-0"].rejectedCandidates![3].response = "{}"; },
+    (input) => { input.state.budget!.reviewContext!.previous = []; },
+    (input) => { for (const record of input.state.budget!.slots["slot-0"].rejectedCandidates!) record.evidenceSources = []; },
+    (input) => { input.state.budget!.calls = 22; },
+    (input) => { input.state.budget!.slots["slot-0"].done = true; },
+    (input) => { input.snapshot = { ...snapshot, scope: { ...snapshot.scope, assessmentMode: "操作技能" } }; },
+  ];
+  for (const mutate of mutations) {
+    const input = echoFixture();
+    mutate(input);
+    assert.equal(recoverTheoryEcho(input.state, input.snapshot, input.code), false);
+  }
+});
 
 test("三轮重复旧槽位一次追加重设计，不清零5次调用与3轮历史，第四轮仍须完整核验", async () => {
   const input = theoryDuplicateFixture();

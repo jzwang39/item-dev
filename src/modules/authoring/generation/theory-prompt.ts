@@ -24,7 +24,10 @@ export function theoryQuestionPrompt(snapshot: Snapshot, code: string, requested
       质量要求: snapshot.qualityRequirements, 试题质量标准: snapshot.qualityStandard,
       质量执行策略: generationQualityPolicy("theory", targeted),
       冻结考评点与标准依据: node.theoryContext, 教材片段: excerpts,
-      已有试题: previous, 补齐次数: attempts,
+      已有试题: targeted ? previous.map((question) => {
+        const item = question as { stem?: string };
+        return { stem: item.stem };
+      }) : previous, 补齐次数: attempts,
     }),
   };
 }

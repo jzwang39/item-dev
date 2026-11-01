@@ -1,4 +1,4 @@
-import type { GeneratedQuestion, QuestionType } from "./contracts";
+import { parseQuestions, stemHash, type GeneratedQuestion, type QuestionType } from "./contracts";
 import type { AngleSource, KnowledgeAngle, RetryFailure, RetryState } from "./retry-policy";
 import { parseSkillDesign, resolveSkillSources, type SkillTaskDesign } from "./skill-candidate";
 import { designCorePassed, parseDesignReviewCore } from "./skill-design-review";
@@ -32,6 +32,8 @@ export type SlotBudget = {
   analysisFailures: number; reviewFailures: number; searchedSourceIds: string[]; searchReasons: string[];
   analysisSearchedSourceIds?: string[];
   theoryRedesignRecovery?: { at: string; previousBlock: RetryFailure; previousGenerations: number; extraGenerations: 1 };
+  theoryPromptVersion?: 2;
+  theoryEchoRecovery?: { at: string; previousBlock: RetryFailure; previousGenerations: number; previousCalls: number; extraGenerations: 1 };
   expansionRecovery?: { at: string; previousBlock: RetryFailure; previousGenerations: number; extraGenerations: 1 };
   angle?: KnowledgeAngle; pendingResponse?: string; done?: boolean; blocked?: RetryFailure;
   evidenceSourceIds?: string[]; candidateRepairs?: GeneratedQuestion["candidateRepairs"];
@@ -87,6 +89,7 @@ export function skillSlotWorkflow(slot: SlotBudget): SkillSlotWorkflow {
 }
 
 export function theoryGenerationLimit(slot: SlotBudget) {
+  if (slot.theoryEchoRecovery) return slot.theoryEchoRecovery.previousGenerations + slot.theoryEchoRecovery.extraGenerations;
   if (slot.expansionRecovery) return slot.expansionRecovery.previousGenerations + slot.expansionRecovery.extraGenerations;
   return slot.theoryRedesignRecovery
     ? slot.theoryRedesignRecovery.previousGenerations + slot.theoryRedesignRecovery.extraGenerations
@@ -185,6 +188,38 @@ export function recoverTheoryDuplicate(state: RetryState) {
       ...slot.rejectedCandidates.flatMap((record) => record.evidenceSources?.map((source) => source.id) ?? [])])];
     budget.history = [...budget.history.slice(-59), { phase: "analysis", slotId: id, at: new Date().toISOString(),
       outcome: "理论重复失败一次性重设计：累计3轮保留，追加最多1轮候选，明确排除被拒绝的重复任务，不新增模型调用预算或降低质量标准。" }];
+    recovered = true;
+  }
+  if (recovered) state.stopReason = undefined;
+  return recovered;
+}
+
+export function recoverTheoryEcho(state: RetryState, snapshot: Pick<Snapshot, "scope" | "nodes">, code: string) {
+  const budget = state.budget;
+  if (!budget || snapshot.scope.assessmentMode !== "理论知识" || budget.reviewContext?.kind !== "theory"
+    || budget.maxCalls - budget.calls < 3 || state.failures.some((failure) => failure.code !== "duplicate")) return false;
+  const previous = new Set(budget.reviewContext.previous.map((question) => stemHash(question.stem)));
+  let recovered = false;
+  for (const [id, slot] of Object.entries(budget.slots)) {
+    if (slot.done || slot.type === "practical" || slot.theoryPromptVersion === 2 || slot.theoryEchoRecovery
+      || slot.blocked?.code !== "duplicate" || slot.transportFailures >= MAX_SLOT_TRANSPORT_FAILURES
+      || slot.generations < theoryGenerationLimit(slot) || slot.pendingResponse) continue;
+    const records = slot.rejectedCandidates?.slice(-2);
+    if (!records || records.length !== 2 || records[0].response !== records[1].response
+      || records.some((record) => !record.failures.length || record.failures.some((failure) => failure.code !== "duplicate")
+        || !factualTheorySources(record.evidenceSources ?? []).length)) continue;
+    try {
+      const parsed = parseQuestions(records[1].response, code, slot.type, snapshot.scope.occupation);
+      if (!parsed.valid.length || parsed.invalidReasons.length || parsed.valid.some((question) => !previous.has(stemHash(question.stem)))) continue;
+    } catch { continue; }
+    slot.theoryEchoRecovery = { at: new Date().toISOString(), previousBlock: slot.blocked,
+      previousGenerations: slot.generations, previousCalls: budget.calls, extraGenerations: 1 };
+    slot.blocked = undefined;
+    slot.angle = undefined;
+    slot.trialDesign = false;
+    slot.analysisSearchedSourceIds = [];
+    budget.history = [...budget.history.slice(-59), { phase: "analysis", slotId: id, at: new Date().toISOString(),
+      outcome: "旧版连续复述已有题一次性恢复：隔离旧题答案与原始失败响应，仅生成1道新候选；追加最多1轮，历史计数及调用上限保留，仍须查重和完整核验。" }];
     recovered = true;
   }
   if (recovered) state.stopReason = undefined;
@@ -299,7 +334,7 @@ export function nextTargetedSlot(state: RetryState) {
 export function targetedBudgetBlocked(state: RetryState) {
   if (!state.budget) return;
   if (state.budget.calls >= state.budget.maxCalls) return `本请求已达到${state.budget.maxCalls}次模型调用预算，请核对缺额和检索记录后人工处理。`;
-  if (!nextTargetedSlot(state)) return "剩余缺题均需补充依据或人工命题，请查看逐题缺口记录；已有成果保留。";
+  if (!nextTargetedSlot(state)) return "剩余缺题已因逐题额度或校验失败关闭，不等同于依据不足；请查看具体记录并补充资料或人工命题，已有成果保留。";
 }
 
 export function recordTargetedPhase(state: RetryState, outcome: string) {
