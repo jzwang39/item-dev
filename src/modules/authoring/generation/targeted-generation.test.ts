@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { generateTargeted, type TargetedDependencies } from "./targeted-generation";
 import { completeRetry, GenerationFailure, retryState } from "./retry-policy";
-import { ensureTargetedBudget, markTargetedSaved } from "./targeted-budget";
+import { ensureTargetedBudget, recoverTheoryDuplicate, markTargetedSaved } from "./targeted-budget";
 import type { GeneratedQuestion, Snapshot } from "./contracts";
 
 const snapshot: Snapshot = {
@@ -46,6 +46,123 @@ function skillDesignReview(passed = true) {
 function dependencies(call: TargetedDependencies["call"], signal = new AbortController().signal) {
   return { call, persist: async () => {}, signal };
 }
+
+test("重复候选后累计查阅不清零，重新分析显式排除重复任务并携带原候选", async () => {
+  const input = { ...fixture(), previous: [{ stem: question.stem }] };
+  let analyses = 0, generations = 0;
+  const deps = dependencies(async (prompt) => {
+    const data = JSON.parse(prompt.prompt);
+    if (prompt.instruction.includes("补题分析助手")) {
+      if (++analyses === 1) return plan();
+      assert.equal(data.被查重拒绝的候选及任务.length, 1);
+      assert.match(data.被查重拒绝的候选及任务[0].response, /借阅资料/);
+      // The planner repeats the same task: parser must reject it and try a
+      // different evidence-based task, never weaken the duplicate rule.
+      return plan();
+    }
+    if (prompt.instruction.includes("独立核验助手")) return review(prompt);
+    if (++generations > 1) {
+      assert.equal(data.被拒绝的候选及具体原因.length, 1);
+      assert.match(data.禁止重复的考查任务[0].task, /借阅/);
+      assert.ok(data.候选试制);
+      return JSON.stringify({ questions: [{ ...question, stem: "归还资料时应核对资料的完整性。" }] });
+    }
+    return JSON.stringify({ questions: [question] });
+  });
+  const first = await generateTargeted(input, deps);
+  assert.equal(first.failures[0].code, "duplicate");
+  const slot = input.state.budget!.slots["slot-0"];
+  assert.equal(slot.searchedSourceIds.length, 1);
+  assert.equal(slot.analysisSearchedSourceIds?.length, 0);
+  assert.equal((await generateTargeted(input, deps)).questions.length, 1);
+  assert.equal(analyses, 2);
+  assert.equal(slot.generations, 2);
+  assert.equal(slot.searchedSourceIds.length, 1);
+});
+
+function theoryDuplicateFixture() {
+  const input = fixture("single");
+  const slot = input.state.budget!.slots["slot-0"];
+  const duplicate = { code: "duplicate" as const, message: "候选题干与已有题重复" };
+  input.state.budget!.calls = 5;
+  input.state.budget!.sourceCount = 1;
+  slot.generations = 3;
+  slot.blocked = duplicate;
+  slot.rejectedCandidates = [{ response: JSON.stringify({ questions: [question] }),
+    failures: [duplicate], evidenceSources: [source], at: "old" }];
+  input.state.failures = [duplicate];
+  return input;
+}
+
+test("三轮重复旧槽位一次追加重设计，不清零5次调用与3轮历史，第四轮仍须完整核验", async () => {
+  const input = theoryDuplicateFixture();
+  const budget = input.state.budget!, slot = budget.slots["slot-0"];
+  assert.equal(recoverTheoryDuplicate(input.state), true);
+  assert.equal(budget.calls, 5);
+  assert.equal(budget.maxCalls, 24);
+  assert.equal(slot.generations, 3);
+  assert.equal(slot.searchedSourceIds.length, 1);
+  assert.equal(recoverTheoryDuplicate(input.state), false);
+  const single = { ...question, questionType: "single", stem: "归还资料时应当执行哪项核对？",
+    options: [{ key: "A", content: "核对完整性" }, { key: "B", content: "丢弃资料" },
+      { key: "C", content: "跳过核对" }, { key: "D", content: "删除记录" }], answers: ["A"] };
+  const result = await generateTargeted(input, dependencies(async (prompt) => {
+    if (prompt.instruction.includes("补题分析助手")) return plan();
+    if (prompt.instruction.includes("独立核验助手")) return review(prompt);
+    return JSON.stringify({ questions: [single] });
+  }));
+  assert.equal(result.questions.length, 1);
+  assert.ok(result.questions[0].standardReview);
+  assert.equal(slot.generations, 4);
+  assert.equal(budget.calls, 8);
+  markTargetedSaved(input.state, "slot-0");
+  assert.equal(completeRetry(input.state, 16, 1, 0, []).status, "succeeded");
+});
+
+test("一次重设计仍重复则关闭，不允许再次恢复或清零预算", async () => {
+  const input = theoryDuplicateFixture();
+  input.state.budget!.slots["slot-0"].type = "judgement";
+  recoverTheoryDuplicate(input.state);
+  const result = await generateTargeted({ ...input, previous: [{ stem: question.stem }] }, dependencies(async (prompt) =>
+    prompt.instruction.includes("补题分析助手") ? plan() : JSON.stringify({ questions: [question] })));
+  assert.equal(result.questions.length, 0);
+  assert.equal(completeRetry(input.state, 16, 0, 1, result.failures).status, "failed");
+  assert.equal(input.state.budget!.slots["slot-0"].generations, 4);
+  assert.equal(recoverTheoryDuplicate(input.state), false);
+});
+
+test("无留存证据、调用耗尽、技能或真正质量失败均不恢复理论重复任务", () => {
+  const exhausted = theoryDuplicateFixture();
+  exhausted.state.budget!.calls = 24;
+  assert.equal(recoverTheoryDuplicate(exhausted.state), false);
+  const skill = theoryDuplicateFixture();
+  skill.state.budget!.slots["slot-0"].type = "practical";
+  assert.equal(recoverTheoryDuplicate(skill.state), false);
+  const noRecord = theoryDuplicateFixture();
+  noRecord.state.budget!.slots["slot-0"].rejectedCandidates = [];
+  assert.equal(recoverTheoryDuplicate(noRecord.state), false);
+  const quality = theoryDuplicateFixture();
+  quality.state.budget!.slots["slot-0"].blocked = { code: "quality_rejected", message: "内容有错" };
+  assert.equal(recoverTheoryDuplicate(quality.state), false);
+});
+
+test("理论候选完整核验后保存层发现任务内重复，保留原候选再设计", async () => {
+  const input = fixture();
+  const result = await generateTargeted(input, dependencies(async (prompt) => {
+    if (prompt.instruction.includes("补题分析助手")) return plan();
+    if (prompt.instruction.includes("独立核验助手")) return review(prompt);
+    return JSON.stringify({ questions: [question] });
+  }));
+  assert.equal(result.questions.length, 1);
+  const slot = input.state.budget!.slots["slot-0"];
+  assert.ok(slot.pendingResponse);
+  const retry = completeRetry(input.state, 13, 0, 1, [{ code: "duplicate", message: "任务内其他点已保存同题" }]);
+  assert.equal(retry.status, "queued");
+  assert.match(slot.rejectedCandidates![0].response, /借阅资料/);
+  assert.equal(slot.angle, undefined);
+  assert.equal(slot.pendingResponse, undefined);
+  assert.equal(slot.searchedSourceIds.length, 1);
+});
 
 test("前两页无任务继续查原文，第三页找到任务后生成并核验，不因零保存提前停止", async () => {
   const input = fixture();

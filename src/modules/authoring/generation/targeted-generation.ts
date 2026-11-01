@@ -1,6 +1,6 @@
 import { parseQuestions, stemHash, type GeneratedQuestion, type Snapshot } from "./contracts";
 import { anglePlanningPrompt, failureOf, GenerationFailure, parseAnglePlan, type AngleSource, type RequestOutput, type RetryFailure, type RetryState } from "./retry-policy";
-import { MAX_SLOT_GENERATIONS, MAX_SLOT_REPAIRS, MAX_SLOT_TRANSPORT_FAILURES, nextTargetedSlot, recordTargetedPhase, type SlotBudget, type TargetedPhase } from "./targeted-budget";
+import { theoryGenerationLimit, MAX_SLOT_REPAIRS, MAX_SLOT_TRANSPORT_FAILURES, nextTargetedSlot, recordTargetedPhase, type SlotBudget, type TargetedPhase } from "./targeted-budget";
 import { nextEvidencePage } from "./evidence-catalog";
 import { candidateReviewPrompt, parseCandidateReview } from "./candidate-review";
 import { theoryQuestionPrompt } from "./theory-prompt";
@@ -59,9 +59,12 @@ export async function generateTargeted(input: {
       slot.angle = undefined;
       slot.pendingResponse = undefined;
     }
+    slot.analysisSearchedSourceIds ??= slot.searchedSourceIds.slice();
+    const duplicateRecords = (slot.rejectedCandidates ?? []).filter((record) => record.failures.some((failure) => failure.code === "duplicate"));
+    const duplicateAngles = duplicateRecords.flatMap((record) => record.angle ? [record.angle] : []);
     if (!slot.angle && !slot.trialDesign) {
       for (let pageIndex = 0; pageIndex < 2 && !slot.angle; pageIndex++) {
-        const page = nextEvidencePage(sources, slot.searchedSourceIds);
+        const page = nextEvidencePage(sources, slot.analysisSearchedSourceIds);
         if (!page.length) {
           slot.trialDesign = true;
           break;
@@ -72,15 +75,19 @@ export async function generateTargeted(input: {
             requirements: snapshot.qualityRequirements,
           });
         if (failures.length) analysisPrompt.prompt = JSON.stringify({ ...JSON.parse(analysisPrompt.prompt), 上次分析错误: failures.map((failure) => failure.message) });
+        analysisPrompt.prompt = JSON.stringify({ ...JSON.parse(analysisPrompt.prompt),
+          被查重拒绝的候选及任务: duplicateRecords,
+          重新设计要求: "查重拒绝的任务须重新设计实际考查内容，不反复选择同一任务或只换词；格式和答案错误不是成功覆盖，不一律排除。" });
         try {
           const content = await call("analysis", analysisPrompt);
           // Only successful saved tasks are excluded; failed attempts remain
           // available for repair or a genuinely different candidate.
-          const plan = parseAnglePlan(content, previous.length, page, budget.completedAngles,
+          const plan = parseAnglePlan(content, previous.length, page, [...budget.completedAngles, ...duplicateAngles],
             kind === "theory" && slot.type !== "practical" ? slot.type : undefined);
           slot.angle = plan.selected;
           slot.evidenceSourceIds = page.map((source) => source.id);
           slot.searchedSourceIds = [...new Set([...slot.searchedSourceIds, ...page.map((source) => source.id)])];
+          slot.analysisSearchedSourceIds = [...new Set([...slot.analysisSearchedSourceIds, ...page.map((source) => source.id)])];
           state.covered = plan.covered;
           state.selectedAngle = plan.selected;
           state.attemptedAngles = [...state.attemptedAngles.slice(-59), plan.selected];
@@ -88,6 +95,7 @@ export async function generateTargeted(input: {
           const failure = failureOf(error);
           if (failure.code === "no_task_in_excerpt" || failure.code === "angle_duplicate") {
             slot.searchedSourceIds = [...new Set([...slot.searchedSourceIds, ...page.map((source) => source.id)])];
+            slot.analysisSearchedSourceIds = [...new Set([...slot.analysisSearchedSourceIds, ...page.map((source) => source.id)])];
             slot.searchReasons = [...slot.searchReasons.slice(-19), failure.message];
           } else if (failure.code === "angle_plan_invalid" || failure.code === "evidence_invalid") {
             slot.analysisFailures++;
@@ -101,7 +109,7 @@ export async function generateTargeted(input: {
         await dependencies.persist();
       }
       if (!slot.angle) {
-        if (nextEvidencePage(sources, slot.searchedSourceIds).length) {
+        if (nextEvidencePage(sources, slot.analysisSearchedSourceIds).length) {
           failures.push({ code: "search_pending", message: `已查阅${slot.searchedSourceIds.length}/${sources.length}段原文，继续检索其他关联段落。` });
           return output();
         } else {
@@ -120,8 +128,8 @@ export async function generateTargeted(input: {
     slot.evidenceSources = usedSources;
     let repairs: NonNullable<GeneratedQuestion["candidateRepairs"]> = slot.candidateRepairs ?? [];
     if (!slot.pendingResponse) {
-      if (slot.generations >= MAX_SLOT_GENERATIONS) {
-        block({ code: "invalid_content", message: "该缺题已生成3轮候选仍未通过完整标准，需人工命题；其他缺题继续处理。" });
+      if (slot.generations >= theoryGenerationLimit(slot)) {
+        block({ code: "invalid_content", message: "该缺题候选生成及一次性重设计额度已耗尽，需人工命题；其他缺题继续处理。" });
         return output();
       }
       const count = 3;
@@ -131,13 +139,15 @@ export async function generateTargeted(input: {
       if (slot.trialDesign) {
         prompt.instruction += "\n本次为有依据的候选试制。先从提供的原文提取明确事实，再按指定设计路径尝试命题；这不代表已有合格任务，不得臆造条件、默认知识复用合格或简单正反改写凑数。路径不适用或完整标准不允许时不要强行使用；确实无法命题返回questions=[]并在reason说明具体缺少的依据或未满足的标准条款。";
         budget.phase = "generation";
-        recordTargetedPhase(state, `候选试制第${slot.generations + 1}轮：${trialMethods[slot.generations]}`);
+        recordTargetedPhase(state, `候选试制第${slot.generations + 1}轮：${trialMethods[slot.generations % trialMethods.length]}`);
       }
       prompt.prompt = JSON.stringify({ ...JSON.parse(prompt.prompt), 本次候选数: count, 本次实际填槽数: 1,
         本次指定缺额题型: slot.type, 考查任务: slot.angle, 原文依据: usedSources, 上次具体错误: state.failures,
-        候选试制: slot.trialDesign ? { 设计路径: trialMethods[slot.generations], 分析未选出任务的原因: slot.searchReasons,
+        被拒绝的候选及具体原因: slot.rejectedCandidates, 禁止重复的考查任务: duplicateAngles,
+        候选试制: slot.trialDesign ? { 设计路径: trialMethods[slot.generations % trialMethods.length], 分析未选出任务的原因: slot.searchReasons,
           原文支持和任务差异须另行核验: true } : undefined });
       slot.pendingResponse = await call("generation", prompt);
+      slot.searchedSourceIds = [...new Set([...slot.searchedSourceIds, ...usedSources.map((source) => source.id)])];
       slot.generations++;
       await dependencies.persist();
     }
@@ -245,8 +255,6 @@ export async function generateTargeted(input: {
         review = parseCandidateReview(content, candidates, usedSources);
       }
       if (review.questions.length) {
-        slot.pendingResponse = undefined;
-        slot.candidateRepairs = undefined;
         recordTargetedPhase(state, `通过完整标准核验，仅保存一个缺额；其他合格候选作为重复冲突备选。${review.failures.map((failure) => failure.message).join("；")}`);
         return { questions: review.questions.map((question) => ({ ...question, targetSlotId: slotId, candidateRepairs: repairs })),
           failures: [], state };
@@ -275,7 +283,7 @@ export async function generateTargeted(input: {
 }
 
 function clearCandidates(slot: SlotBudget, failures: RetryFailure[]) {
-  slot.rejectedCandidates = [...(slot.rejectedCandidates ?? []).slice(-2), {
+  slot.rejectedCandidates = [...(slot.rejectedCandidates ?? []).slice(-5), {
     response: slot.pendingResponse ?? "", repairs: slot.candidateRepairs, angle: slot.angle,
     failures: failures.slice(), at: new Date().toISOString(), evidenceSources: slot.evidenceSources, reviewResponses: slot.reviewResponses,
   }];
@@ -288,5 +296,10 @@ function clearCandidates(slot: SlotBudget, failures: RetryFailure[]) {
   slot.reviewResponses = undefined;
   // A failed generated candidate is not a successful knowledge coverage.
   // If every source was previously inspected, a new design may reuse it.
-  if (slot.generations < MAX_SLOT_GENERATIONS) slot.searchedSourceIds = [];
+  if (slot.generations < theoryGenerationLimit(slot)) {
+    if (!slot.trialDesign || failures.some((failure) => failure.code === "duplicate")) {
+      slot.analysisSearchedSourceIds = [];
+      slot.trialDesign = false;
+    }
+  }
 }

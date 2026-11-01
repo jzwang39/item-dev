@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { GeneratedQuestion, QuestionType } from "./contracts";
 import { generationQualityPolicy, type QualityRelaxation } from "./quality-policy";
 import type { QualityStandardKind } from "../quality-standard";
-import { MAX_SLOT_TRANSPORT_FAILURES, nextTargetedSlot, targetedBudgetBlocked, type TargetedBudget } from "./targeted-budget";
+import { theoryGenerationLimit, MAX_SLOT_TRANSPORT_FAILURES, nextTargetedSlot, targetedBudgetBlocked, type TargetedBudget } from "./targeted-budget";
 
 export const MAX_TOTAL_ATTEMPTS = 12;
 export const MAX_TARGETED_ATTEMPTS = 6;
@@ -85,6 +85,22 @@ export function completeRetry(state: RetryState, attempts: number, saved: number
   if (next.budget) {
     const activeId = next.budget.activeSlotId ?? nextTargetedSlot(next)?.[0];
     const slot = activeId ? next.budget.slots[activeId] : undefined;
+    if (slot && !slot.skill && !slot.done && saved === 0 && slot.pendingResponse && failures.some((failure) => failure.code === "duplicate")) {
+      slot.rejectedCandidates = [...(slot.rejectedCandidates ?? []).slice(-5), {
+        response: slot.pendingResponse, repairs: slot.candidateRepairs, angle: slot.angle,
+        failures: failures.slice(), at: new Date().toISOString(), evidenceSources: slot.evidenceSources, reviewResponses: slot.reviewResponses,
+      }];
+      slot.pendingResponse = undefined;
+      slot.candidateRepairs = undefined;
+      slot.angle = undefined;
+      slot.trialDesign = false;
+      slot.analysisSearchedSourceIds = [];
+      slot.reviewMode = undefined;
+      slot.singleReviews = undefined;
+      slot.singleReviewFailures = undefined;
+      slot.reviewResponses = undefined;
+      next.selectedAngle = undefined;
+    }
     if (slot?.skill && !slot.done && saved === 0 && slot.pendingResponse && failures.some((failure) => failure.code === "duplicate")) {
       slot.rejectedCandidates = [...(slot.rejectedCandidates ?? []), {
         response: slot.pendingResponse, repairs: slot.candidateRepairs, failures: failures.slice(), at: new Date().toISOString(),
@@ -115,7 +131,9 @@ export function completeRetry(state: RetryState, attempts: number, saved: number
     if (slot && !slot.done && slot.transportFailures >= MAX_SLOT_TRANSPORT_FAILURES) {
       slot.blocked ??= { code: "network_error", message: "该缺题累计网络或租约失败达到上限，请修复连接后人工处理。" };
     }
-    if (slot && !slot.done && !slot.blocked && slot.generations - (slot.skill?.generationBase ?? 0) >= 3 && !slot.pendingResponse) {
+    if (slot && !slot.done && !slot.blocked
+      && (slot.skill ? slot.generations - slot.skill.generationBase >= 3 : slot.generations >= theoryGenerationLimit(slot))
+      && !slot.pendingResponse) {
       slot.blocked = failures[0] ?? { code: "invalid_content", message: "该缺题已完成3次候选生成仍无合格题，请人工命题。" };
     }
     if (slot?.done || slot?.blocked) {

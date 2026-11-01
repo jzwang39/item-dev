@@ -24,6 +24,8 @@ export type TargetedPhase = "analysis" | "generation" | "repair" | "verification
 export type SlotBudget = {
   ordinal: number; type: QuestionType; generations: number; repairs: number; transportFailures: number;
   analysisFailures: number; reviewFailures: number; searchedSourceIds: string[]; searchReasons: string[];
+  analysisSearchedSourceIds?: string[];
+  theoryRedesignRecovery?: { at: string; previousBlock: RetryFailure; previousGenerations: number; extraGenerations: 1 };
   angle?: KnowledgeAngle; pendingResponse?: string; done?: boolean; blocked?: RetryFailure;
   evidenceSourceIds?: string[]; candidateRepairs?: GeneratedQuestion["candidateRepairs"];
   trialDesign?: boolean;
@@ -74,6 +76,39 @@ export function ensureTargetedBudget(state: RetryState, missing: MissingSlot[], 
 export function skillSlotWorkflow(slot: SlotBudget): SkillSlotWorkflow {
   return slot.skill ??= { version: 1, designProtocolVersion: 2, generationBase: 0, repairBase: 0, designAttempts: 0,
     designReviewFailures: 0, candidateRepairs: 0, verificationFailures: 0 };
+}
+
+export function theoryGenerationLimit(slot: SlotBudget) {
+  return slot.theoryRedesignRecovery
+    ? slot.theoryRedesignRecovery.previousGenerations + slot.theoryRedesignRecovery.extraGenerations
+    : MAX_SLOT_GENERATIONS;
+}
+
+export function recoverTheoryDuplicate(state: RetryState) {
+  const budget = state.budget;
+  if (!budget || budget.calls >= budget.maxCalls || !(budget.sourceCount! > 0)
+    || state.failures.some((failure) => ["restricted_scope", "connection_changed", "save_error", "network_error",
+      "network_timeout", "rate_limited", "lease_expired"].includes(failure.code))) return false;
+  let recovered = false;
+  for (const [id, slot] of Object.entries(budget.slots)) {
+    if (slot.type === "practical" || slot.done || slot.theoryRedesignRecovery || slot.blocked?.code !== "duplicate"
+      || slot.transportFailures >= MAX_SLOT_TRANSPORT_FAILURES || slot.generations !== MAX_SLOT_GENERATIONS
+      || !slot.rejectedCandidates?.some((record) => record.response && record.evidenceSources?.length
+        && record.failures.some((failure) => failure.code === "duplicate"))) continue;
+    slot.theoryRedesignRecovery = { at: new Date().toISOString(), previousBlock: slot.blocked,
+      previousGenerations: slot.generations, extraGenerations: 1 };
+    slot.blocked = undefined;
+    slot.angle = undefined;
+    slot.trialDesign = false;
+    slot.analysisSearchedSourceIds = [];
+    slot.searchedSourceIds = [...new Set([...slot.searchedSourceIds,
+      ...slot.rejectedCandidates.flatMap((record) => record.evidenceSources?.map((source) => source.id) ?? [])])];
+    budget.history = [...budget.history.slice(-59), { phase: "analysis", slotId: id, at: new Date().toISOString(),
+      outcome: "理论重复失败一次性重设计：累计3轮保留，追加最多1轮候选，明确排除被拒绝的重复任务，不新增模型调用预算或降低质量标准。" }];
+    recovered = true;
+  }
+  if (recovered) state.stopReason = undefined;
+  return recovered;
 }
 
 export function recoverSkillDesignProtocol(state: RetryState) {
