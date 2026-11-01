@@ -22,7 +22,7 @@ import { completeRetry, failureOf, GenerationFailure, MAX_TOTAL_ATTEMPTS, MAX_TA
   prepareManualRetry, retryBlocked, retryState, validationFailure,
   type RequestOutput, type RetryFailure, type RetryState } from "./retry-policy";
 import { buildEvidenceCatalog, type EvidenceChapter } from "./evidence-catalog";
-import { ensureTargetedBudget, grantSkillRecovery, recoverTheoryDuplicate, theoryGenerationLimit, recoverSkillDesignProtocol, recoverPrematureBlocks, markTargetedSaved, MAX_SLOT_GENERATIONS, MAX_SLOT_REPAIRS, MAX_UNIT_MODEL_CALLS, type MissingSlot } from "./targeted-budget";
+import { ensureTargetedBudget, grantSkillRecovery, recoverNoTextbookTheory, recoverTheoryDuplicate, theoryGenerationLimit, recoverSkillDesignProtocol, recoverPrematureBlocks, markTargetedSaved, MAX_SLOT_GENERATIONS, MAX_SLOT_REPAIRS, MAX_UNIT_MODEL_CALLS, type MissingSlot } from "./targeted-budget";
 import { generateTargeted } from "./targeted-generation";
 
 function json<T>(value: T | string): T {
@@ -47,7 +47,7 @@ export async function startGeneration(planId: string, actorId: string, retryFail
     if (!plan || plan.status !== "confirmed") throw new Error("计划不存在或未确认。");
     const scope = json<Scope>(plan.scope_json);
     await assertFrozenPlanBasis(db, plan.project_id, scope);
-    const [existing] = await db.execute<(RowDataPacket & { id: string; status: string })[]>("SELECT id,status FROM authoring_generation_jobs WHERE plan_id=?", [planId]);
+    const [existing] = await db.execute<(RowDataPacket & { id: string; status: string; snapshot_json: Snapshot | string })[]>("SELECT id,status,snapshot_json FROM authoring_generation_jobs WHERE plan_id=?", [planId]);
     if (existing[0]) {
       if (existing[0].status === "stopped") throw new Error("原请求已停止，不能恢复或原样重试；请使用“补题”创建新的缺额请求。");
       if (existing[0].status === "cancelled") throw new Error("任务已终止，不能恢复生成或重试；如需补题请新建计划。");
@@ -56,8 +56,8 @@ export async function startGeneration(planId: string, actorId: string, retryFail
           "SELECT id FROM authoring_generation_units WHERE job_id=? AND status IN ('queued','running') LIMIT 1", [existing[0].id],
         );
         if (active.length) throw new Error("任务仍在执行，请待本轮结束后重试失败部分。");
-        const [failed] = await db.execute<(RowDataPacket & { id: string; attempts: number; retry_state_json: unknown; error_message: string | null })[]>(
-          "SELECT id,attempts,retry_state_json,error_message FROM authoring_generation_units WHERE job_id=? AND status='failed' FOR UPDATE", [existing[0].id],
+        const [failed] = await db.execute<(RowDataPacket & { id: string; point_code: string; attempts: number; retry_state_json: unknown; error_message: string | null })[]>(
+          "SELECT id,point_code,attempts,retry_state_json,error_message FROM authoring_generation_units WHERE job_id=? AND status='failed' FOR UPDATE", [existing[0].id],
         );
         const [missingSlots] = await db.execute<(RowDataPacket & MissingSlot & { unit_id: string })[]>(
           "SELECT id,unit_id,ordinal,question_type FROM authoring_generation_slots WHERE job_id=? AND question_id IS NULL FOR UPDATE", [existing[0].id],
@@ -76,6 +76,7 @@ export async function startGeneration(planId: string, actorId: string, retryFail
             state.failures = [];
           }
           ensureTargetedBudget(state, missing, Number(unit.attempts), unit.error_message);
+          if (recoverNoTextbookTheory(state, json<Snapshot>(existing[0].snapshot_json), unit.point_code)) upgraded.push(unit.id);
           if (scope.assessmentMode === "操作技能" && recoverSkillDesignProtocol(state)) upgraded.push(unit.id);
           if (scope.assessmentMode !== "操作技能" && recoverTheoryDuplicate(state)) upgraded.push(unit.id);
           if (scope.assessmentMode === "操作技能" && skillRecoveryAuthorized && grantSkillRecovery(state, Number(unit.attempts))) upgraded.push(unit.id);
@@ -166,11 +167,12 @@ export async function startSupplementGeneration(planId: string, actorId: string)
 }
 
 export async function getGenerationState(planId: string) {
-  const jobs = await query<(RowDataPacket & { id: string; status: string; target_count: number; termination_summary_json: unknown; stop_summary_json: unknown })[]>(
-    "SELECT id,status,target_count,termination_summary_json,stop_summary_json FROM authoring_generation_jobs WHERE plan_id=?", [planId],
+  const jobs = await query<(RowDataPacket & { id: string; status: string; target_count: number; snapshot_json: Snapshot | string; termination_summary_json: unknown; stop_summary_json: unknown })[]>(
+    "SELECT id,status,target_count,snapshot_json,termination_summary_json,stop_summary_json FROM authoring_generation_jobs WHERE plan_id=?", [planId],
   );
   if (!jobs[0]) return { job: null };
   const job = jobs[0];
+  const snapshot = json<Snapshot>(job.snapshot_json);
   const batches = await query<(RowDataPacket & { ordinal: number; target: number; generated_count: number; failed: number; pending: number; running: number })[]>(
     `SELECT b.ordinal,b.target_count AS target,COUNT(s.question_id) AS generated_count,
        COUNT(DISTINCT IF(u.status='failed',u.id,NULL)) AS failed,
@@ -203,6 +205,7 @@ export async function getGenerationState(planId: string) {
       failedUnits: failed.map((unit) => {
         const state = retryState(unit.retry_state_json);
         const recovery = retryState(JSON.stringify(state));
+        const expansionUpgrade = recoverNoTextbookTheory(recovery, snapshot, unit.point_code);
         const protocolUpgrade = recoverSkillDesignProtocol(recovery);
         const theoryUpgrade = recoverTheoryDuplicate(recovery);
         const skillUpgrade = grantSkillRecovery(recovery, Number(unit.attempts));
@@ -212,10 +215,11 @@ export async function getGenerationState(planId: string) {
           error: unit.error_message ?? (status === "stopped" ? "任务已停止，此缺额不再处理。" : "请求失败。"), attempts: Number(unit.attempts), failures: state.failures,
           stopReason: status === "stopped" ? "已停止，不再处理此缺额。" : state.stopReason,
           retryable: !["stopped", "cancelled"].includes(status) && (!state.budget || skillRecoveryAvailable || flowUpgrade
-            || ((protocolUpgrade || theoryUpgrade) && !retryBlocked(recovery, Number(unit.attempts), true)) || !retryBlocked(state, Number(unit.attempts), true)),
+            || ((protocolUpgrade || theoryUpgrade || expansionUpgrade) && !retryBlocked(recovery, Number(unit.attempts), true)) || !retryBlocked(state, Number(unit.attempts), true)),
           theoryRedesignAvailable: !["stopped", "cancelled"].includes(status) && theoryUpgrade && !retryBlocked(recovery, Number(unit.attempts), true),
+          theoryExpansionAvailable: !["stopped", "cancelled"].includes(status) && expansionUpgrade && !retryBlocked(recovery, Number(unit.attempts), true),
           designProtocolRecoveryAvailable: !["stopped", "cancelled"].includes(status) && protocolUpgrade && !retryBlocked(recovery, Number(unit.attempts), true),
-          strategyUpgradeAvailable: !state.budget || flowUpgrade,
+          strategyUpgradeAvailable: !state.budget || flowUpgrade || expansionUpgrade,
           skillRecoveryAvailable: !["stopped", "cancelled"].includes(status) && skillRecoveryAvailable,
           skillRecovery: state.budget?.skillRecovery,
           reviewContext: state.budget?.reviewContext,
@@ -223,13 +227,16 @@ export async function getGenerationState(planId: string) {
           missingSlots: state.budget ? Object.entries(state.budget.slots).filter(([, slot]) => !slot.done).map(([id, slot]) => ({
             id, ordinal: slot.ordinal, type: slot.type, generations: slot.generations, repairs: slot.repairs,
             generationLimit: theoryGenerationLimit(slot),
-            searched: slot.searchedSourceIds.length, totalSources: state.budget!.sourceCount ?? 0, reason: slot.blocked?.message,
+            expansionRecovered: Boolean(slot.expansionRecovery),
+            searched: state.budget!.catalogIds ? slot.searchedSourceIds.filter((id) => state.budget!.catalogIds!.includes(id)).length : slot.searchedSourceIds.length,
+            totalSources: state.budget!.sourceCount ?? 0, reason: slot.blocked?.message,
             skill: slot.skill ? { generations: slot.generations - slot.skill.generationBase, repairs: slot.repairs - slot.skill.repairBase,
               designAttempts: slot.skill.designAttempts, designAttemptCredits: slot.skill.designProtocolRecovery?.designAttemptCredits ?? 0,
               designChecklistFailures: slot.skill.designChecklistFailures ?? 0 } : undefined,
             reviewRecord: { 原文依据: slot.evidenceSources ?? (slot.angle ? [{ id: slot.angle.sourceId, content: slot.angle.quote }] : []),
               分析记录: slot.searchReasons, 待核验候选响应: slot.pendingResponse, 修订记录: slot.candidateRepairs,
-              核验响应: slot.reviewResponses, 历史候选: slot.rejectedCandidates, 原关闭原因: slot.recoveredBlock, 技能专项记录: slot.skill },
+              核验响应: slot.reviewResponses, 历史候选: slot.rejectedCandidates, 原关闭原因: slot.recoveredBlock, 技能专项记录: slot.skill,
+              无教材扩展依据: state.budget!.theoryExpansion, 扩展流程恢复: slot.expansionRecovery },
           })) : [] };
       }),
       batches: batches.map((batch) => ({
@@ -384,6 +391,7 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
         scoringCalculation: question.scoringCalculation,
         skillTaskDesign: skill ? output.state.budget?.slots[slot.id]?.skill : undefined,
         targetedEvidence: output.state.budget?.slots[slot.id]?.evidenceSources,
+        theoryExpansionEvidence: !skill ? output.state.budget?.theoryExpansion : undefined,
         targetedSlotId: question.targetSlotId, targetedHistory: output.state.budget?.history,
         appliedQualityStandard: unit.appliedQualityStandard,
         appliedSkillQualityStandard: skill ? unit.appliedQualityStandard : undefined,
@@ -520,7 +528,8 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
       });
   });
   unit.retry_state_json = state;
-  if (state.targeted) {
+  if (state.targeted || (kind === "theory" && !node.chapterIds.length)) {
+    state.targeted = true;
     const context = snapshot.scope.assessmentMode === "操作技能" ? node.skillContext : node.theoryContext;
     const sources = buildEvidenceCatalog(context, evidenceChapters, node.name);
     ensureTargetedBudget(state, missing, unit.attempts - 1);

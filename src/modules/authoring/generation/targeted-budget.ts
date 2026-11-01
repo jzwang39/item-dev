@@ -2,6 +2,9 @@ import type { GeneratedQuestion, QuestionType } from "./contracts";
 import type { AngleSource, KnowledgeAngle, RetryFailure, RetryState } from "./retry-policy";
 import { parseSkillDesign, resolveSkillSources, type SkillTaskDesign } from "./skill-candidate";
 import { designCorePassed, parseDesignReviewCore } from "./skill-design-review";
+import type { Snapshot } from "./contracts";
+import type { TheoryExpansionState } from "./theory-expansion";
+import { factualTheorySources } from "./evidence-catalog";
 
 export const MAX_SLOT_GENERATIONS = 3;
 export const MAX_SLOT_REPAIRS = 2;
@@ -26,6 +29,7 @@ export type SlotBudget = {
   analysisFailures: number; reviewFailures: number; searchedSourceIds: string[]; searchReasons: string[];
   analysisSearchedSourceIds?: string[];
   theoryRedesignRecovery?: { at: string; previousBlock: RetryFailure; previousGenerations: number; extraGenerations: 1 };
+  expansionRecovery?: { at: string; previousBlock: RetryFailure; previousGenerations: number; extraGenerations: 1 };
   angle?: KnowledgeAngle; pendingResponse?: string; done?: boolean; blocked?: RetryFailure;
   evidenceSourceIds?: string[]; candidateRepairs?: GeneratedQuestion["candidateRepairs"];
   trialDesign?: boolean;
@@ -47,6 +51,7 @@ export type TargetedBudget = {
   workflowVersion?: 3;
   skillRecovery?: { version: 1; attempts: number; previousCalls: number; previousMaxCalls: number; addedCalls: number; slotIds: string[]; at: string };
   sourceCount?: number; slots: Record<string, SlotBudget>; completedAngles: KnowledgeAngle[];
+  catalogIds?: string[]; theoryExpansion?: TheoryExpansionState;
   reviewContext?: {
     kind: "theory" | "skill"; qualityStandard: string; qualityRequirements: string[];
     previous: Array<{ stem: string; content?: unknown; answer?: unknown; analysis?: string | null }>;
@@ -79,9 +84,37 @@ export function skillSlotWorkflow(slot: SlotBudget): SkillSlotWorkflow {
 }
 
 export function theoryGenerationLimit(slot: SlotBudget) {
+  if (slot.expansionRecovery) return slot.expansionRecovery.previousGenerations + slot.expansionRecovery.extraGenerations;
   return slot.theoryRedesignRecovery
     ? slot.theoryRedesignRecovery.previousGenerations + slot.theoryRedesignRecovery.extraGenerations
     : MAX_SLOT_GENERATIONS;
+}
+
+export function recoverNoTextbookTheory(state: RetryState, snapshot: Pick<Snapshot, "scope" | "nodes">, code: string) {
+  const budget = state.budget;
+  const node = snapshot.nodes.find((item) => item.code === code);
+  if (!budget || snapshot.scope.assessmentMode === "操作技能" || !node || node.chapterIds.length || budget.calls >= budget.maxCalls
+    || state.failures.some((failure) => ["restricted_scope", "connection_changed", "save_error", "network_error",
+      "network_timeout", "rate_limited", "lease_expired"].includes(failure.code))) return false;
+  let recovered = false;
+  for (const [id, slot] of Object.entries(budget.slots)) {
+    const original = [...(slot.evidenceSources ?? []), ...(slot.rejectedCandidates?.flatMap((record) => record.evidenceSources ?? []) ?? [])];
+    if (slot.type === "practical" || slot.done || slot.expansionRecovery || budget.theoryExpansion || !slot.blocked
+      || slot.transportFailures >= MAX_SLOT_TRANSPORT_FAILURES || !["duplicate", "insufficient_basis", "evidence_invalid"].includes(slot.blocked.code)
+      || !original.length || factualTheorySources(original).length) continue;
+    slot.expansionRecovery = { at: new Date().toISOString(), previousBlock: slot.blocked,
+      previousGenerations: slot.generations, extraGenerations: 1 };
+    slot.blocked = undefined;
+    slot.pendingResponse = undefined;
+    slot.angle = undefined;
+    slot.trialDesign = false;
+    slot.analysisSearchedSourceIds = [];
+    budget.history = [...budget.history.slice(-59), { phase: "analysis", slotId: id, at: new Date().toISOString(),
+      outcome: "无教材标题不足一次性流程恢复：先下载并核验可靠扩展依据，最多追加1轮候选，历史调用和生成计数保留，不增加调用预算。" }];
+    recovered = true;
+  }
+  if (recovered) state.stopReason = undefined;
+  return recovered;
 }
 
 export function recoverTheoryDuplicate(state: RetryState) {

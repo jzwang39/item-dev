@@ -156,7 +156,8 @@ export function prepareManualRetry(state: RetryState, attempts: number, legacyEr
   };
 }
 
-export type AngleSource = { id: string; content: string; title?: string; start?: number; systemQuote?: boolean };
+export type AngleSource = { id: string; content: string; title?: string; start?: number; systemQuote?: boolean;
+  expansion?: { label: "扩展"; url: string; retrievedAt: string; documentHash: string; review: string } };
 function normalized(value: string) { return value.normalize("NFKC").replace(/\s+/g, "").toLowerCase(); }
 export function angleSources(context: unknown, excerpts: Array<{ content: string }>): AngleSource[] {
   const sources: AngleSource[] = excerpts.map((excerpt, index) => ({ id: `textbook-${index + 1}`, content: excerpt.content }));

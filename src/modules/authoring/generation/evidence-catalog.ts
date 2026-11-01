@@ -4,6 +4,14 @@ import type { AngleSource } from "./retry-policy";
 export type EvidenceChapter = { id: string; chapter_title: string; section_title: string | null; content_text: string };
 export const EVIDENCE_PAGE_SIZE = 6;
 
+export function factualTheorySources(sources: AngleSource[]) {
+  return sources.filter((source) => {
+    const text = source.content.trim();
+    // A section heading identifies scope, not a factual proposition.
+    return text.length >= 80 || /[。！？；;!?]/u.test(text.replace(/^\d+(?:\.\d+)*\s*/, ""));
+  });
+}
+
 function referenceId(prefix: string, content: string) {
   return `${prefix}:${createHash("sha256").update(content).digest("hex").slice(0, 16)}`;
 }
