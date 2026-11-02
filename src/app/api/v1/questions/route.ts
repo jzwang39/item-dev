@@ -178,13 +178,35 @@ export async function GET(request: Request) {
           [occupationId, levelCode],
         );
         const groups = new Map<string, string[]>();
+        const validNames = (structure.rows ?? []).map(r => String(r.name ?? "").replace(/\s*[A-Z]$/, "").trim());
+        
         for (const outline of outlineRows) {
-          const requirement = parseJson(outline.requirement_json) as Record<string, unknown>;
-          const primary = String(requirement.primaryName ?? requirement.level1Name ?? "").replace(/\s*[A-Z]$/, "").trim();
-          const secondary = String(requirement.secondaryName ?? requirement.level2Name ?? "").trim();
-          if (!primary || !secondary) continue;
+          const requirement = parseJson(outline.requirement_json) as Record<string, any>;
+          
+          const l1 = String(requirement.level1Name ?? "").replace(/\s*[A-Z]$/, "").trim();
+          const l2 = String(requirement.level2Name ?? "").replace(/\s*[A-Z]$/, "").trim();
+          const l3 = String(requirement.level3Name ?? "").replace(/\s*[A-Z]$/, "").trim();
+          const fn = String(requirement.sourceStandardRequirement?.functionName ?? "").trim();
+          const cn = String(requirement.sourceStandardRequirement?.contentName ?? "").trim();
+          
+          let primary = "";
+          let secondary = "";
+          
+          if (validNames.includes(l1)) { primary = l1; secondary = l2 || l3; }
+          else if (validNames.includes(l2)) { primary = l2; secondary = cn || l3; }
+          else if (validNames.includes(l3)) { primary = l3; secondary = cn || l3; }
+          else if (validNames.includes(fn)) { primary = fn; secondary = cn; }
+          
+          if (!primary) {
+            primary = String(requirement.primaryName ?? requirement.level1Name ?? "").replace(/\s*[A-Z]$/, "").trim();
+            secondary = String(requirement.secondaryName ?? requirement.level2Name ?? "").trim();
+          }
+          
+          if (secondary === primary) secondary = "";
+          if (!primary) continue;
+          
           const children = groups.get(primary) ?? [];
-          if (!children.includes(secondary)) children.push(secondary);
+          if (secondary && !children.includes(secondary)) children.push(secondary);
           groups.set(primary, children);
         }
         const bytes = await createSkillStructureWord({
