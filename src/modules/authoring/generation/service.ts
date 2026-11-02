@@ -77,8 +77,8 @@ export async function startGeneration(planId: string, actorId: string, retryFail
           const missing = missingSlots.filter((slot) => slot.unit_id === unit.id);
           if (!missing.length) continue;
           if (old.scope.commonGroupId) {
-            state.targeted = false;
-            delete state.budget;
+            if (state.targeted) state.targeted = false;
+            if (state.budget) delete state.budget;
           } else {
             if (!state.budget) {
               ensureTargetedBudget(state, missing, Number(unit.attempts), unit.error_message);
@@ -340,8 +340,8 @@ async function claimUnit(): Promise<Unit | null> {
     const snapshot = json<Snapshot>(unit.snapshot_json);
     const state = retryState(unit.retry_state_json);
     if (snapshot.scope.commonGroupId) {
-      state.targeted = false;
-      delete state.budget;
+      if (state.targeted) state.targeted = false;
+      if (state.budget) delete state.budget;
     }
     if (state.supplement) unit.created_by = state.supplement.actorId;
     if (!unit.retry_state_json && Number(unit.attempts) > 0 && unit.error_message) {
