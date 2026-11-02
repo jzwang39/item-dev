@@ -167,7 +167,7 @@ export async function GET(request: Request) {
         );
         if (!rows[0]) throw new Error("当前范围尚未维护操作技能考核内容结构表，无法生成成果文件。");
         const structure = parseJson(rows[0].snapshot_json) as {
-          pathway?: string; totalMinutes?: number; rows?: Array<{ code?: string; name?: string; selection?: string; score?: number; minutes?: number; method?: string }>;
+          pathway?: string; totalMinutes?: number; rows?: Array<{ code?: string; name?: string; selection?: string; score?: number | string; minutes?: number; method?: string }>;
         };
         const outlineRows = await query<(RowDataPacket & { requirement_json: unknown })[]>(
           `SELECT bn.requirement_json
@@ -194,7 +194,7 @@ export async function GET(request: Request) {
           totalMinutes: typeof structure.totalMinutes === "number" ? structure.totalMinutes : null,
           rows: (structure.rows ?? []).map((row) => ({
             code: row.code ?? "待核对", name: row.name ?? "待核对", selection: row.selection ?? null,
-            score: typeof row.score === "number" ? row.score : null,
+            score: row.score != null ? Number(String(row.score).replace(/[^0-9.]/g, "")) : null,
             minutes: typeof row.minutes === "number" ? row.minutes : null, method: row.method ?? null,
           })),
           headerGroups: [...groups.entries()].map(([name, children]) => ({ name, children })),
