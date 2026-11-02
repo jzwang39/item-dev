@@ -1,5 +1,5 @@
 -- Public basic questions keep one editorial identity and immutable releases.
-CREATE TABLE common_question_groups (
+CREATE TABLE IF NOT EXISTS common_question_groups (
   id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
   project_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   occupation_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -15,7 +15,7 @@ CREATE TABLE common_question_groups (
   CONSTRAINT fk_common_occupation FOREIGN KEY (occupation_id) REFERENCES project_occupations(id)
 ) ENGINE=InnoDB;
 
-CREATE TABLE common_question_points (
+CREATE TABLE IF NOT EXISTS common_question_points (
   group_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   point_key CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   level_code VARCHAR(16) NOT NULL,
@@ -26,7 +26,7 @@ CREATE TABLE common_question_points (
   CONSTRAINT fk_cqp_node FOREIGN KEY (blueprint_node_id) REFERENCES blueprint_nodes(id)
 ) ENGINE=InnoDB;
 
-CREATE TABLE common_question_members (
+CREATE TABLE IF NOT EXISTS common_question_members (
   question_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
   group_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   point_key CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -38,7 +38,7 @@ CREATE TABLE common_question_members (
   CONSTRAINT fk_cqm_question FOREIGN KEY (question_id) REFERENCES questions(id)
 ) ENGINE=InnoDB;
 
-CREATE TABLE common_question_releases (
+CREATE TABLE IF NOT EXISTS common_question_releases (
   id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
   group_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   version_no INT UNSIGNED NOT NULL,
@@ -49,7 +49,7 @@ CREATE TABLE common_question_releases (
   CONSTRAINT fk_cqr_group FOREIGN KEY (group_id) REFERENCES common_question_groups(id)
 ) ENGINE=InnoDB;
 
-CREATE TABLE common_question_release_items (
+CREATE TABLE IF NOT EXISTS common_question_release_items (
   release_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   question_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   question_version_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -60,7 +60,7 @@ CREATE TABLE common_question_release_items (
   CONSTRAINT fk_cqri_version FOREIGN KEY (question_version_id) REFERENCES question_versions(id)
 ) ENGINE=InnoDB;
 
-CREATE TABLE common_question_plan_links (
+CREATE TABLE IF NOT EXISTS common_question_plan_links (
   plan_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
   group_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   release_at_confirmation CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NULL,
@@ -70,20 +70,52 @@ CREATE TABLE common_question_plan_links (
   CONSTRAINT fk_cqpl_release FOREIGN KEY (release_at_confirmation) REFERENCES common_question_releases(id)
 ) ENGINE=InnoDB;
 
--- Only published common versions are available for formal use. The current
--- editorial version/status may change during a revision without losing these.
--- A public question may fill one slot in more than one historical common plan.
-ALTER TABLE authoring_generation_slots ADD KEY idx_ags_question (question_id);
-ALTER TABLE authoring_generation_slots DROP INDEX uk_ags_question,
-  ADD UNIQUE KEY uk_ags_job_question (job_id,question_id);
+-- This migration may resume after a previous deployment created the tables
+-- but failed before it could be recorded. MySQL has no portable CREATE INDEX
+-- IF NOT EXISTS syntax, so check information_schema before each index change.
+SET @idx_ags_question_exists := (
+  SELECT COUNT(*)
+  FROM information_schema.statistics
+  WHERE table_schema = DATABASE()
+    AND table_name = 'authoring_generation_slots'
+    AND index_name = 'idx_ags_question'
+);
+SET @sql := IF(
+  @idx_ags_question_exists = 0,
+  'ALTER TABLE authoring_generation_slots ADD KEY idx_ags_question (question_id)',
+  'SELECT 1'
+);
+PREPARE migration_stmt FROM @sql;
+EXECUTE migration_stmt;
+DEALLOCATE PREPARE migration_stmt;
 
-CREATE VIEW common_published_questions AS
-SELECT q.id,q.project_id,q.question_no,q.occupation_id,p.level_code,q.assessment_mode,
-  q.question_type,i.question_version_id AS current_version_id,'stored' AS current_status,
-  q.difficulty,q.archived_at,q.row_version,q.created_at,q.updated_at,
-  g.id AS common_group_id,g.current_release_id AS common_release_id,p.blueprint_node_id
-FROM common_question_groups g
-JOIN common_question_release_items i ON i.release_id=g.current_release_id
-JOIN common_question_members m ON m.question_id=i.question_id AND m.group_id=g.id AND m.suspended=0
-JOIN questions q ON q.id=i.question_id AND q.archived_at IS NULL
-JOIN common_question_points p ON p.group_id=g.id AND p.point_key=i.point_key;
+SET @uk_ags_question_exists := (
+  SELECT COUNT(*)
+  FROM information_schema.statistics
+  WHERE table_schema = DATABASE()
+    AND table_name = 'authoring_generation_slots'
+    AND index_name = 'uk_ags_question'
+);
+SET @uk_ags_job_question_exists := (
+  SELECT COUNT(*)
+  FROM information_schema.statistics
+  WHERE table_schema = DATABASE()
+    AND table_name = 'authoring_generation_slots'
+    AND index_name = 'uk_ags_job_question'
+);
+SET @sql := IF(
+  @uk_ags_question_exists > 0 AND @uk_ags_job_question_exists = 0,
+  'ALTER TABLE authoring_generation_slots DROP INDEX uk_ags_question, ADD UNIQUE KEY uk_ags_job_question (job_id,question_id)',
+  IF(
+    @uk_ags_question_exists > 0,
+    'ALTER TABLE authoring_generation_slots DROP INDEX uk_ags_question',
+    IF(
+      @uk_ags_job_question_exists = 0,
+      'ALTER TABLE authoring_generation_slots ADD UNIQUE KEY uk_ags_job_question (job_id,question_id)',
+      'SELECT 1'
+    )
+  )
+);
+PREPARE migration_stmt FROM @sql;
+EXECUTE migration_stmt;
+DEALLOCATE PREPARE migration_stmt;

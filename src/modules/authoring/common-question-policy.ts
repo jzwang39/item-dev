@@ -80,12 +80,23 @@ export function legacyBasicExclusion(alias = "q") {
         OR JSON_UNQUOTE(JSON_EXTRACT(cbn.requirement_json,'$.primaryName'))='基本要求')))`;
 }
 
+// Keep this as an inline source rather than a database view. Production
+// application accounts only need table privileges to complete migrations.
 export const formalQuestionSource = `(SELECT q.id,q.project_id,q.question_no,q.occupation_id,q.level_code,q.assessment_mode,
   q.question_type,q.current_version_id,q.current_status,q.difficulty,q.archived_at,q.row_version,q.created_at,q.updated_at,
   NULL AS common_group_id,NULL AS common_release_id,NULL AS blueprint_node_id
   FROM questions q WHERE NOT EXISTS(SELECT 1 FROM common_question_members cm WHERE cm.question_id=q.id)
     AND ${legacyBasicExclusion("q")}
-  UNION ALL SELECT * FROM common_published_questions)`;
+  UNION ALL
+  SELECT q.id,q.project_id,q.question_no,q.occupation_id,p.level_code,q.assessment_mode,
+    q.question_type,i.question_version_id AS current_version_id,'stored' AS current_status,
+    q.difficulty,q.archived_at,q.row_version,q.created_at,q.updated_at,
+    g.id AS common_group_id,g.current_release_id AS common_release_id,p.blueprint_node_id
+  FROM common_question_groups g
+  JOIN common_question_release_items i ON i.release_id=g.current_release_id
+  JOIN common_question_members m ON m.question_id=i.question_id AND m.group_id=g.id AND m.suspended=0
+  JOIN questions q ON q.id=i.question_id AND q.archived_at IS NULL
+  JOIN common_question_points p ON p.group_id=g.id AND p.point_key=i.point_key)`;
 
 export function commonEditorialLevelFilter(alias = "q") {
   return `(${alias}.level_code=? OR (${alias}.level_code IS NULL AND ${alias}.assessment_mode='theory'

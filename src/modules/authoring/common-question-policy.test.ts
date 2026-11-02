@@ -44,7 +44,7 @@ test("公共题组仅配置选择题，省略判断题默认零，非零判断�
   assert.throws(() => validateCommonQuota(points, [{ key, single: 4, multiple: 2, judgement: 1 }]));
 });
 test("正式取题排除维护版本，以公共发布版本取代旧等级基本题，技能不受影响", () => {
-  assert.match(formalQuestionSource, /common_published_questions/);
+  assert.match(formalQuestionSource, /common_question_release_items/);
   assert.match(formalQuestionSource, /NOT EXISTS\(SELECT 1 FROM common_question_members/);
   assert.match(formalQuestionSource, /assessment_mode='theory'/);
   assert.match(formalQuestionSource, /current_release_id IS NOT NULL/);

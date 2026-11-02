@@ -41,7 +41,11 @@ test("隔离MySQL：选用旧题、发布共用、修订保旧版、统一停用
       if (!indexes.length) {
         await db.query("ALTER TABLE authoring_generation_slots DROP INDEX uk_ags_job_question, DROP INDEX idx_ags_question, ADD UNIQUE KEY uk_ags_question(question_id)");
       }
-      await db.query(await readFile("database/migrations/0022_common_theory_questions.sql", "utf8"));
+      const commonMigration = await readFile("database/migrations/0022_common_theory_questions.sql", "utf8");
+      await db.query(commonMigration);
+      // Production may have created the schema before a later statement fails.
+      // The same migration must therefore be safe to resume without cleanup.
+      await db.query(commonMigration);
       await db.execute("INSERT INTO authoring_generation_capacity(id) VALUES(1)");
       const actor = createUlid(), project = createUlid(), occupation = createUlid();
       await db.execute("INSERT INTO accounts(id,username,display_name,role,password_hash) VALUES(?,?,'测试管理员','admin','not-a-login')", [actor, actor]);
@@ -131,7 +135,7 @@ test("隔离MySQL：选用旧题、发布共用、修订保旧版、统一停用
       assert.notEqual(newVersion, version);
       assert.equal(revisedQuestion.current_status, "pending_review");
       await assert.rejects(publishCommonGroup(group.id, detail.rowVersion, actor), /尚未入库/);
-      const [duringRevision] = await db.query<RowDataPacket[]>("SELECT current_version_id FROM common_published_questions");
+      const [duringRevision] = await db.query<RowDataPacket[]>(`SELECT current_version_id FROM ${formalQuestionSource} q WHERE q.common_group_id IS NOT NULL`);
       assert.ok(duringRevision.every((row) => row.current_version_id === version));
       await db.execute("UPDATE questions SET current_status='stored' WHERE id=?", [question]);
       await db.execute("INSERT INTO question_review_confirmations(question_version_id,confirmed_by,opinion) VALUES(?,?,'测试新版本确认')", [newVersion, actor]);
@@ -140,7 +144,7 @@ test("隔离MySQL：选用旧题、发布共用、修订保旧版、统一停用
       const [history] = await db.query<RowDataPacket[]>("SELECT question_version_id FROM common_question_release_items WHERE release_id=?", [release.releaseId]);
       assert.equal(history[0].question_version_id, version);
       await commonQuestionAction(group.id, question, newVersion, "suspend", "错误题统一停用测试", actor);
-      assert.equal((await db.query<RowDataPacket[]>("SELECT * FROM common_published_questions"))[0].length, 0);
+      assert.equal((await db.query<RowDataPacket[]>(`SELECT * FROM ${formalQuestionSource} q WHERE q.common_group_id IS NOT NULL`))[0].length, 0);
       assert.equal((await commonPlanProgress(plan))!.ready, false);
       const generatedPlans = await Promise.all([prepareCommonGeneration(group.id, actor), prepareCommonGeneration(group.id, actor)]);
       assert.equal(generatedPlans[0], generatedPlans[1], "并发只能创建一个公共任务计划");
