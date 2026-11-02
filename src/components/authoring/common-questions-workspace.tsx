@@ -10,6 +10,7 @@ type Counts = { key: string; single: number; multiple: number; judgement: number
 type Item = { question_id: string; current_version_id: string; question_no: string; current_status: string; stem: string;
   suspended?: number; confirmed?: number; content_json: { options?: Array<{ key: string; content: string }> };
   answer_json: { answers?: string[] }; analysis_text: string };
+type GenerationRecord = { id: string; questionNo: string; point: string; questionType: string; stem: string; status: string };
 type Detail = { id: string; rowVersion: number; quota: Counts[]; currentReleaseId: string | null; generationPlanId: string | null;
   basis: { points: Array<{ key: string; name: string }>; scopes: Record<string, { occupation: string }> };
   coverage: Array<{ key: string; type: string; count: number; target: number }>;
@@ -34,6 +35,8 @@ export function CommonQuestionsWorkspace() {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
   const [configOpen, setConfigOpen] = useState(false);
+  const [recordsOpen, setRecordsOpen] = useState(false);
+  const [records, setRecords] = useState<GenerationRecord[]>([]);
   const [quotaPage, setQuotaPage] = useState(1);
   const loadSequence = useRef(0);
 
@@ -57,10 +60,17 @@ export function CommonQuestionsWorkspace() {
       const data = await read<Detail>(`${api}?groupId=${selected}&page=${page}&view=${candidates ? "candidates" : "members"}`);
       if (sequence !== loadSequence.current) return;
       setDetail(data);
-      if (!configOpen) setQuota(data.quota.map((point) => ({ ...point, judgement: 0 })));
+      if (!configOpen) setQuota(data.quota.map((point) => ({
+        ...point, multiple: 0, judgement: point.multiple > 0 && point.judgement === 0 ? 2 : point.judgement,
+      })));
+      if (recordsOpen && data.generationPlanId) {
+        const result = await read<{ questions: GenerationRecord[] }>(`/api/v1/authoring/plans/${data.generationPlanId}`);
+        if (sequence !== loadSequence.current) return;
+        setRecords(result.questions);
+      }
     }
     setLoading(false);
-  }, [read, groupId, page, candidates, configOpen]);
+  }, [read, groupId, page, candidates, configOpen, recordsOpen]);
   useEffect(() => {
     void read<Array<{ id: string; name: string }>>("/api/v1/authoring/occupations").then(setOccupations).catch((error: Error) => setMessage(error.message));
   }, [read]);
@@ -133,9 +143,11 @@ export function CommonQuestionsWorkspace() {
       <div className="rounded-xl border bg-white p-5">
         <h2 className="text-lg font-semibold">{detail.basis.scopes.level_5.occupation} · 公共基本要求</h2>
         <p className="text-sm">当前发布：{detail.currentReleaseId ? `V${detail.releases.find((release) => release.id === detail.currentReleaseId)?.version_no}` : "未发布"}；
-          选择题配额完成 {detail.coverage.filter((item) => item.type !== "judgement").reduce((sum, item) => sum + Math.min(item.count, item.target), 0)} / {detail.quota.reduce((sum, item) => sum + item.single + item.multiple, 0)} 题</p>
+          公共配额完成 {detail.coverage.reduce((sum, item) => sum + Math.min(item.count, item.target), 0)} / {detail.quota.reduce((sum, item) => sum + item.single + item.judgement, 0)} 题</p>
         <div className="flex flex-wrap gap-2">
-          <button className={button} disabled={busy} onClick={() => { setQuota(detail.quota.map((point) => ({ ...point, judgement: 0 }))); setConfigOpen(!configOpen); }}>统一配额</button>
+          <button className={button} disabled={busy} onClick={() => { setQuota(detail.quota.map((point) => ({
+            ...point, multiple: 0, judgement: point.multiple > 0 && point.judgement === 0 ? 2 : point.judgement,
+          }))); setConfigOpen(!configOpen); }}>统一配额</button>
           <button className={button} disabled={busy || active} onClick={() => void act({ action: "generate", retry: detail.generation?.job?.status === "partial" })}>{busy ? "处理中..." : "生成 / 补齐公共题"}</button>
           <button className={button} disabled={busy || !detail.generationPlanId || detail.generation?.job?.status === "stopped"} onClick={() => void act({ action: "stop", confirmed: true }, "确认停止公共生成并保留全部成果？不会停止各等级其他知识要求的生成。")}>停止生成，保留成果</button>
           <button className={button} disabled={busy || !detail.generationPlanId} onClick={() => void act({ action: "terminate", confirmed: true }, "确认终止公共任务？只清理本次新生成且未经审核的草稿，选用旧题及已审核、已发布题保留。")}>终止公共任务</button>
@@ -144,24 +156,30 @@ export function CommonQuestionsWorkspace() {
         </div>
         <div className="mt-4 rounded-xl border border-[#d6e3ff] bg-[#f6f8ff] p-4">
           <p className="mb-3 text-sm">公共任务：{detail.generation?.job ? jobLabels[detail.generation.job.status] ?? "待核对" : "未开始"}</p>
-          <ExecutionProgress generated={detail.generation?.job?.generated ?? detail.coverage.filter((item) => item.type !== "judgement").reduce((sum, item) => sum + Math.min(item.count, item.target), 0)}
-            target={detail.generation?.job?.target ?? detail.quota.reduce((sum, item) => sum + item.single + item.multiple, 0)}
+          <ExecutionProgress generated={detail.generation?.job?.generated ?? detail.coverage.reduce((sum, item) => sum + Math.min(item.count, item.target), 0)}
+            target={detail.generation?.job?.target ?? detail.quota.reduce((sum, item) => sum + item.single + item.judgement, 0)}
             started={Boolean(detail.generation?.job) || detail.total > 0} completedLabel="已有 / 已生成" />
           {detail.generation?.job && <p className="mt-3 text-sm text-slate-500">
             已完成 {detail.generation.job.completedBatches} / {detail.generation.job.totalBatches} 批 · {active ? "每5秒自动更新，离开页面不影响生成" : "任务记录保留"} ·{" "}
-            <Link className="underline" href={`/workspace/authoring?executionPlan=${detail.generationPlanId}`}>查看逐题生成记录</Link>
+            <button className="underline" onClick={() => setRecordsOpen((open) => !open)}>{recordsOpen ? "收起逐题生成记录" : "查看逐题生成记录"}</button>
           </p>}
+          {recordsOpen && <div className="mt-3 rounded-lg border bg-white p-3">
+            <p className="text-sm font-medium">本公共任务已保存试题：{records.length} 道</p>
+            {records.map((record) => <p className="my-2 text-sm" key={record.id}>
+              {record.point} · {record.questionType} · {record.questionNo} · {record.status}：{record.stem}
+            </p>)}
+            {!records.length && <p className="text-sm text-slate-500">暂未保存试题，生成中的请求完成后会自动显示。</p>}
+          </div>}
         </div>
-        {detail.quota.some((point) => point.judgement > 0) && <p className="mt-3 text-sm text-amber-700">
-          历史配置含判断题。新配额只保留单选、多选；旧任务进度按原题量展示，不删除历史记录。
-          {active ? "请先停止生成并保留成果，再保存新配额。" : "保存统一配额后生效；未发布且没有判断题成果的题组，下次生成会自动更新配额。"}
+        {detail.quota.some((point) => point.multiple > 0) && <p className="mt-3 text-sm text-amber-700">
+          当前任务沿用旧的多选配额。公共题现改为单选、判断题；请终止本任务，保存新配额后重新生成。
         </p>}
         {configOpen && <div className="mt-4 overflow-x-auto">
-          <p className="text-sm">公共配额独立于等级权重，默认单选4、多选2，可逐点修改。已发布题组的选择题配额只允许扩充。</p>
-          <table className="w-full text-sm"><thead><tr><th>考评点</th><th>单选</th><th>多选</th></tr></thead>
+          <p className="text-sm">公共配额独立于等级权重，默认单选4、判断2，可逐点修改。已发布题组的配额只允许扩充。</p>
+          <table className="w-full text-sm"><thead><tr><th>考评点</th><th>单选</th><th>判断</th></tr></thead>
             <tbody>{quota.slice((quotaPage - 1) * 20, quotaPage * 20).map((item) => <tr key={item.key} className="border-t">
               <td className="p-2">{detail.basis.points.find((point) => point.key === item.key)?.name}</td>
-              {(["single", "multiple"] as const).map((type) => <td key={type} className="p-2"><input className="w-20 rounded border p-2" disabled={busy || active}
+              {(["single", "judgement"] as const).map((type) => <td key={type} className="p-2"><input className="w-20 rounded border p-2" disabled={busy || active}
                 aria-label={`${item.key}-${type}`} type="number" min={0} max={100} value={item[type]} onChange={(event) =>
                   setQuota((current) => current.map((point) => point.key === item.key ? { ...point, [type]: Number(event.target.value) } : point))} /></td>)}
             </tr>)}</tbody></table>

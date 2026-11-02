@@ -80,7 +80,7 @@ export async function createCommonGroup(occupationId: string, actor: string) {
     const [existing] = await db.execute<Group[]>("SELECT * FROM common_question_groups WHERE occupation_id=? FOR UPDATE", [occupationId]);
     if (existing.length) throw new Error("该职业已有公共题组，请进入现有题组管理。");
     const group = { id: createUlid(), project_id: basis.projectId };
-    const quota = basis.points.map((point) => ({ key: point.key, single: 4, multiple: 2, judgement: 0 }));
+    const quota = basis.points.map((point) => ({ key: point.key, single: 4, multiple: 0, judgement: 2 }));
     await db.execute(`INSERT INTO common_question_groups(id,project_id,occupation_id,basis_json,quota_json) VALUES(?,?,?,?,?)`,
       [group.id, basis.projectId, occupationId, JSON.stringify(basis), JSON.stringify(quota)]);
     for (const point of basis.points) for (const level of commonLevels) await db.execute(
@@ -99,7 +99,7 @@ export async function commonPlanQuota(db: PoolConnection, scope: Scope, nodes: C
   const group = groups[0];
   if (!group) throw new Error("本计划包含基本要求，请先在“基本要求公共题组”创建并配置共用题组。");
   const basis = decodeCommon<CommonBasis>(group.basis_json), quota = decodeCommon<CommonQuota>(group.quota_json);
-  if (quota.some((point) => point.judgement > 0)) throw new Error("公共题组已取消判断题，请先在公共题组保存仅单选、多选的统一配额，再创建等级计划。");
+  if (quota.some((point) => point.multiple > 0)) throw new Error("公共题组不生成多选题，请先在公共题组保存单选、判断题的统一配额，再创建等级计划。");
   const identities = basics.map((node) => ({ node, identity: basicIdentity(node)! }));
   if (identities.length !== basis.points.length || identities.some(({ node, identity }) =>
     !basis.points.some((point) => point.key === identity.key && point.signature === identity.signature
@@ -140,7 +140,7 @@ export async function configureCommonGroup(id: string, quota: unknown, expectedV
     const next = validateCommonQuota(points, quota), previous = decodeCommon<CommonQuota>(group.quota_json);
     if (group.current_release_id && next.some((item) => {
       const old = previous.find((entry) => entry.key === item.key)!;
-      return item.single < old.single || item.multiple < old.multiple;
+      return item.single < old.single || item.judgement < old.judgement;
     })) throw new Error("已发布公共题组仅允许扩充配额，不能缩减并影响已有等级计划。");
     const coverage = commonCoverage(next, (await members(db, id)).filter((item) => !item.suspended));
     if (coverage.some((item) => item.count > item.target)) throw new Error("配额不能小于现有题数，请先核对题目或停用多余题。");
@@ -185,7 +185,7 @@ export async function adoptCommonQuestions(id: string, selections: Array<{ quest
         FOR UPDATE`, [selection.questionId, group.project_id, group.occupation_id]);
       const question = questions[0];
       if (!question || question.current_version_id !== selection.versionId) throw new Error("旧题已变化、已选用或仍在生成，请刷新后重新选择。");
-      if (!/单.*选|多.*选/.test(question.question_type)) throw new Error("公共题组仅支持单选、多选，不再选用判断题。");
+      if (!/单.*选|判断/.test(question.question_type)) throw new Error("公共题组仅支持单选、判断题，不再选用多选题。");
       const [nodes] = await db.execute<(RowDataPacket & CommonNode)[]>(`SELECT n.* FROM question_assessment_points p
         JOIN blueprint_nodes n ON n.id=p.blueprint_node_id WHERE p.question_version_id=?`, [selection.versionId]);
       const point = nodes.length === 1 ? basicIdentity(nodes[0]) : null;
@@ -212,18 +212,12 @@ export async function prepareCommonGeneration(id: string, actor: string) {
   return withTransaction(async (db) => {
     const group = await lockGroup(db, id);
     const previous = decodeCommon<CommonQuota>(group.quota_json);
-    if (previous.some((point) => point.judgement > 0)) {
+    if (previous.some((point) => point.multiple > 0)) {
       await assertIdle(db, group);
-      if (group.current_release_id || (await members(db, id)).some((item) => !item.suspended && /判断/.test(item.question_type))) {
-        throw new Error("公共题组已取消判断题。请先核对并停用历史判断题，再保存仅单选、多选的统一配额；历史任务和发布记录保留。");
+      if (group.current_release_id || (await members(db, id)).some((item) => !item.suspended && /多.*选/.test(item.question_type))) {
+        throw new Error("公共题组改为单选、判断题。请先核对并停用历史多选题，再保存新配额；历史任务和发布记录保留。");
       }
-      const next = validateCommonQuota(decodeCommon<CommonBasis>(group.basis_json).points,
-        previous.map((point) => ({ ...point, judgement: 0 })));
-      await db.execute("UPDATE common_question_groups SET quota_json=?,generation_plan_id=NULL,row_version=row_version+1 WHERE id=?",
-        [JSON.stringify(next), id]);
-      await commonAudit(db, group, actor, "quota", { previous, next, previousPlanId: group.generation_plan_id, reason: "公共题组取消判断题，保留历史任务" });
-      group.quota_json = next;
-      group.generation_plan_id = null;
+      throw new Error("公共题组配额仍包含多选题。请先终止当前任务，再在“统一配额”将多选设为0、判断设为2后重新生成。");
     }
     if (group.generation_plan_id) {
       const [jobs] = await db.execute<(RowDataPacket & { status: string })[]>("SELECT status FROM authoring_generation_jobs WHERE plan_id=?", [group.generation_plan_id]);
@@ -256,7 +250,7 @@ export async function publishCommonGroup(id: string, expectedVersion: number, ac
     if (group.row_version !== expectedVersion) throw new Error("题组已变化，请刷新后再发布。");
     const rows = (await members(db, id)).filter((item) => !item.suspended);
     const quota = decodeCommon<CommonQuota>(group.quota_json);
-    if (quota.some((point) => point.judgement > 0)) throw new Error("公共题组已取消判断题，请先核对历史判断题并保存选择题配额，再发布新版本。");
+    if (quota.some((point) => point.multiple > 0)) throw new Error("公共题组不生成多选题，请先核对历史多选题并保存单选、判断题配额，再发布新版本。");
     if (!rows.length || commonCoverage(quota, rows).some((item) => item.count !== item.target)) {
       throw new Error("公共题组尚未逐考评点、逐题型满足配置，不可发布。");
     }
@@ -343,7 +337,7 @@ export async function getCommonGroup(id: string, page: number, candidates = fals
     if (candidates) {
       const nodeIds = basis.points.flatMap((point) => Object.values(point.nodes).map((node) => node.id));
       const where = `q.occupation_id=? AND q.assessment_mode='theory' AND q.archived_at IS NULL
-        AND q.question_type IN ('单项选择题','多项选择题')
+        AND q.question_type IN ('单项选择题','判断题')
         AND q.level_code IN ('level_5','level_4','level_3')
         AND NOT EXISTS(SELECT 1 FROM common_question_members m WHERE m.question_id=q.id)
         AND EXISTS(SELECT 1 FROM question_assessment_points a WHERE a.question_version_id=q.current_version_id

@@ -31,17 +31,17 @@ test("缺少标识、来源或名称不一致、遗漏和重复考评点均拒�
 });
 test("公共配额逐点逐型校验，不用总数掩盖缺额，各等级引用同一配额", () => {
   const points = matchCommonPoints(basis()), key = points[0].key;
-  const quota = validateCommonQuota(points, [{ key, single: 4, multiple: 2, judgement: 0 }]);
+  const quota = validateCommonQuota(points, [{ key, single: 4, multiple: 0, judgement: 2 }]);
   for (const level of commonLevels) assert.equal(commonQuotaPoints(points, quota, level)[0].total, 6);
   const coverage = commonCoverage(quota, Array.from({ length: 8 }, () => ({ point_key: key, question_type: "单项选择题" })));
-  assert.equal(coverage.find((item) => item.type === "multiple")!.count, 0);
+  assert.equal(coverage.find((item) => item.type === "judgement")!.count, 0);
   assert.throws(() => validateCommonQuota(points, [...quota, ...quota]), /不能重复/);
   assert.throws(() => validateCommonQuota(points, [{ key, single: 0, multiple: 0, judgement: 0 }]));
 });
-test("公共题组仅配置选择题，省略判断题默认零，非零判断配额被后端拒绝", () => {
+test("公共题组仅配置单选、判断题，拒绝多选配额", () => {
   const points = matchCommonPoints(basis()), key = points[0].key;
-  assert.equal(validateCommonQuota(points, [{ key, single: 4, multiple: 2 }])[0].judgement, 0);
-  assert.throws(() => validateCommonQuota(points, [{ key, single: 4, multiple: 2, judgement: 1 }]));
+  assert.equal(validateCommonQuota(points, [{ key, single: 4, judgement: 2 }])[0].multiple, 0);
+  assert.throws(() => validateCommonQuota(points, [{ key, single: 4, multiple: 1, judgement: 2 }]));
 });
 test("正式取题排除维护版本，以公共发布版本取代旧等级基本题，技能不受影响", () => {
   assert.match(formalQuestionSource, /common_question_release_items/);

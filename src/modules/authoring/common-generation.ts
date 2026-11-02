@@ -13,8 +13,8 @@ export async function assertCommonGeneration(db: PoolConnection, planId: string,
     if (!groups[0] || groups[0].generation_plan_id !== planId) throw new Error("公共题组配置已更新，请从公共题组重新启动。");
     const basis = decodeCommon<CommonBasis>(groups[0].basis_json);
     const [plans] = await db.execute<(RowDataPacket & { quota_json: unknown })[]>("SELECT quota_json FROM authoring_plans WHERE id=?", [planId]);
-    const quota = decodeCommon<{ points?: Array<{ judgement: number }> }>(plans[0]?.quota_json);
-    if (quota.points?.some((point) => point.judgement > 0)) throw new Error("公共题组不再生成判断题，请先停止旧任务并保留成果，再从公共题组生成选择题任务。");
+    const quota = decodeCommon<{ points?: Array<{ multiple: number }> }>(plans[0]?.quota_json);
+    if (quota.points?.some((point) => point.multiple > 0)) throw new Error("公共题组改为单选、判断题，请先终止旧多选任务，再从公共题组生成新任务。");
     if (nodes.some((node) => {
       const identity = basicIdentity(node);
       return !identity || !basis.points.some((point) => point.key === identity.key && point.signature === identity.signature);

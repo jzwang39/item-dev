@@ -73,18 +73,13 @@ test("隔离MySQL：选用旧题、发布共用、修订保旧版、统一停用
       await assert.rejects(createCommonGroup(occupation, actor), /已有公共题组/);
       let detail = await getCommonGroup(group.id, 1);
       const key = detail.basis.points[0].key, quota = [{ key, single: 1, multiple: 0, judgement: 0 }];
-      assert.equal(detail.quota[0].judgement, 0, "新公共题组不配置判断题");
+      assert.equal(detail.quota[0].judgement, 2, "新公共题组默认每点配置两道判断题");
       const oldPlan = createUlid(), oldJob = createUlid();
       await db.execute("INSERT INTO authoring_plans(id,project_id,name,raw_requirement,scope_json,quota_json,status) VALUES(?,?,'历史公共任务','测试','{}','{}','confirmed')", [oldPlan, project]);
       await db.execute("INSERT INTO authoring_generation_jobs(id,plan_id,snapshot_json,target_count,status) VALUES(?,?,'{}',8,'cancelled')", [oldJob, oldPlan]);
       await db.execute("UPDATE common_question_groups SET quota_json=?,generation_plan_id=? WHERE id=?",
-        [JSON.stringify([{ key, single: 4, multiple: 2, judgement: 2 }]), oldPlan, group.id]);
-      const choicePlan = await prepareCommonGeneration(group.id, actor);
-      assert.notEqual(choicePlan, oldPlan);
-      const [newPlans] = await db.query<RowDataPacket[]>("SELECT quota_json FROM authoring_plans WHERE id=?", [choicePlan]);
-      const newQuota = decodeCommon<{ minimumTotal: number; points: Array<{ judgement: number }> }>(newPlans[0].quota_json);
-      assert.equal(newQuota.minimumTotal, 6);
-      assert.equal(newQuota.points[0].judgement, 0);
+        [JSON.stringify([{ key, single: 4, multiple: 2, judgement: 0 }]), oldPlan, group.id]);
+      await assert.rejects(prepareCommonGeneration(group.id, actor), /多选题/);
       const [oldJobs] = await db.query<RowDataPacket[]>("SELECT target_count,status FROM authoring_generation_jobs WHERE id=?", [oldJob]);
       assert.equal(oldJobs[0].target_count, 8);
       assert.equal(oldJobs[0].status, "cancelled");

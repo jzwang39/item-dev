@@ -41,10 +41,10 @@ export function matchCommonPoints(levelNodes: Record<string, CommonNode[]>): Com
 }
 export const commonQuotaSchema = z.array(z.object({
   key: z.string().length(64), single: z.number().int().min(0).max(100),
-  multiple: z.number().int().min(0).max(100), judgement: z.literal(0).default(0),
+  multiple: z.literal(0).default(0), judgement: z.number().int().min(0).max(100),
 }).refine((point) => point.single + point.multiple + point.judgement > 0, "每个公共考评点至少配置1题。")).min(1);
-// Historical snapshots can still contain judgement quotas; only new writes
-// are restricted by the schema above.
+// Historical snapshots can contain multiple-choice quotas. New public basic
+// question groups only use single-choice and judgement questions.
 export type CommonQuota = Array<{ key: string; single: number; multiple: number; judgement: number }>;
 export function validateCommonQuota(points: CommonPoint[], value: unknown): CommonQuota {
   const quota = commonQuotaSchema.parse(value);
