@@ -13,16 +13,16 @@ const point: ExportPoint = {
     importanceCode: "X", textbookPage: "1.1.1-20",
   },
 };
-test("13列表头、样例样式、层级合并与字符串序号可读回", async () => {
+test("12列表头、样例样式、层级合并与字符串序号可读回", async () => {
   const workbook = buildOutlineWorkbook([point, { ...point, code: "A-A-A-002", name: "第二点" }]);
   const restored = new ExcelJS.Workbook();
   await restored.xlsx.load(await workbook.xlsx.writeBuffer());
   const sheet = restored.worksheets[0];
   assert.equal(sheet.name, "评价要素细目表");
-  assert.equal(sheet.columnCount, 13);
+  assert.equal(sheet.columnCount, 12);
   assert.equal(sheet.rowCount, 3);
   assert.equal(sheet.getCell("A1").value, "一级");
-  assert.equal(sheet.getCell("M1").value, "页码");
+  assert.equal(sheet.getCell("L1").value, "重要程度");
   assert.equal(sheet.getColumn(11).width, 38);
   assert.equal(sheet.getRow(1).height, 26);
   assert.equal(sheet.getRow(2).height, 18);
@@ -30,12 +30,11 @@ test("13列表头、样例样式、层级合并与字符串序号可读回", asy
   assert.deepEqual(sheet.getCell("A1").fill, { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9E1F2" } });
   assert.equal(sheet.getCell("J2").value, "001");
   assert.equal(sheet.getCell("L2").value, "X");
-  assert.equal(sheet.getCell("M2").value, "1.1.1-20");
   for (const column of ["A", "B", "C", "D", "E", "F", "G", "H", "I"]) {
     assert.equal(sheet.getCell(`${column}3`).master.address, `${column}2`);
   }
   assert.equal(sheet.views[0].state, "frozen");
-  assert.equal(sheet.pageSetup.printArea, "A1:M3");
+  assert.equal(sheet.pageSetup.printArea, "A1:L3");
 });
 
 test("技能使用冻结层级、权重与重要度，不编造三级权重或页码", () => {
@@ -52,7 +51,6 @@ test("技能使用冻结层级、权重与重要度，不编造三级权重或�
   assert.equal(sheet.getCell("I2").value, "");
   assert.equal(sheet.getCell("J2").value, "007");
   assert.equal(sheet.getCell("L2").value, "Y");
-  assert.equal(sheet.getCell("M2").value, "");
 });
 
 test("不同父层级和不连续的同名层级不能跨组合并，空层级不合并", () => {

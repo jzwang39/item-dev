@@ -9,6 +9,8 @@ import { query, withTransaction } from "@/shared/database/mysql";
 import { bulkStorageSchema } from "@/modules/authoring/question-storage-policy";
 import { storeQuestions } from "@/modules/authoring/question-storage";
 import { commonEditorialLevelFilter, formalQuestionSource } from "@/modules/authoring/common-question-policy";
+import { buildOutlineWorkbook, type ExportPoint } from "@/modules/blueprints/outline-export";
+import { createSkillOutlineWord, createSkillStructureWord } from "@/modules/documents/skill-blueprint-word";
 
 const levelCodes = [
   "level_5",
@@ -123,7 +125,7 @@ export async function GET(request: Request) {
       !assessmentModes.includes(
         assessmentMode as (typeof assessmentModes)[number],
       ) ||
-      !["question-bank", "outline"].includes(file ?? "")
+      !["question-bank", "theory-outline", "skill-structure", "skill-outline"].includes(file ?? "")
     ) {
       return NextResponse.json(
         {
@@ -153,6 +155,83 @@ export async function GET(request: Request) {
           { error: { code: "NOT_FOUND", message: "职业范围不存在或已归档。" } },
           { status: 404 },
         );
+
+      const levelLabel = levelLabels[levelCode as (typeof levelCodes)[number]];
+      if (file === "skill-structure") {
+        const rows = await query<(RowDataPacket & { snapshot_json: unknown })[]>(
+          `SELECT v.snapshot_json FROM blueprints b
+             INNER JOIN blueprint_versions v ON v.id=b.current_version_id
+            WHERE b.occupation_id=? AND b.level_code=? AND b.assessment_mode='skill'
+              AND b.blueprint_kind='skill_structure' LIMIT 1`,
+          [occupationId, levelCode],
+        );
+        if (!rows[0]) throw new Error("当前范围尚未维护操作技能考核内容结构表，无法生成成果文件。");
+        const structure = parseJson(rows[0].snapshot_json) as {
+          pathway?: string; totalMinutes?: number; rows?: Array<{ code?: string; name?: string; selection?: string; score?: number; minutes?: number; method?: string }>;
+        };
+        const bytes = await createSkillStructureWord({
+          occupationName: scope.occupation_name,
+          levelLabel,
+          pathway: structure.pathway ?? null,
+          totalMinutes: typeof structure.totalMinutes === "number" ? structure.totalMinutes : null,
+          rows: (structure.rows ?? []).map((row) => ({
+            code: row.code ?? "待核对", name: row.name ?? "待核对", selection: row.selection ?? null,
+            score: typeof row.score === "number" ? row.score : null,
+            minutes: typeof row.minutes === "number" ? row.minutes : null, method: row.method ?? null,
+          })),
+        });
+        const filename = `${scope.occupation_name}-${levelLabel}-操作技能考核内容结构表.docx`;
+        return new NextResponse(new Uint8Array(bytes), { headers: {
+          "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+        } });
+      }
+
+      if (file === "skill-outline") {
+        const rows = await query<(RowDataPacket & ExportPoint & { question_count: number })[]>(
+          `SELECT bn.node_code AS code,bn.name,bn.importance,bn.requirement_json AS requirement,
+             (SELECT COUNT(*) FROM questions q
+                INNER JOIN question_assessment_points qap ON qap.question_version_id=q.current_version_id
+               WHERE qap.blueprint_node_id=bn.id AND q.occupation_id=? AND q.level_code=?
+                 AND q.assessment_mode='skill' AND q.current_status='stored' AND q.archived_at IS NULL) AS question_count
+             FROM blueprints b INNER JOIN blueprint_nodes bn ON bn.blueprint_version_id=b.current_version_id
+            WHERE b.occupation_id=? AND b.level_code=? AND b.assessment_mode='skill'
+              AND b.blueprint_kind='skill_outline' AND bn.node_kind='assessment_point'
+            ORDER BY bn.ordinal,bn.id`,
+          [occupationId, levelCode, occupationId, levelCode],
+        );
+        if (!rows.length) throw new Error("当前范围尚未维护操作技能鉴定要素细目表，无法生成成果文件。");
+        const bytes = await createSkillOutlineWord({
+          occupationName: scope.occupation_name, levelLabel,
+          rows: rows.map((row) => ({
+            code: row.code, name: row.name, importance: row.importance,
+            requirement: row.requirement, questionCount: Number(row.question_count),
+          })),
+        });
+        const filename = `${scope.occupation_name}-${levelLabel}-操作技能鉴定要素细目表.docx`;
+        return new NextResponse(new Uint8Array(bytes), { headers: {
+          "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+        } });
+      }
+
+      if (file === "theory-outline") {
+        const rows = await query<(RowDataPacket & ExportPoint)[]>(
+          `SELECT bn.node_code AS code,bn.name,bn.importance,bn.requirement_json AS requirement
+             FROM blueprints b INNER JOIN blueprint_nodes bn ON bn.blueprint_version_id=b.current_version_id
+            WHERE b.occupation_id=? AND b.level_code=? AND b.assessment_mode='theory'
+              AND b.blueprint_kind='theory_outline' AND bn.node_kind='assessment_point'
+            ORDER BY bn.ordinal,bn.id`,
+          [occupationId, levelCode],
+        );
+        if (!rows.length) throw new Error("当前范围尚未维护理论知识考评要素细目表，无法生成成果文件。");
+        const bytes = await buildOutlineWorkbook(rows).xlsx.writeBuffer();
+        const filename = `${scope.occupation_name}-${levelLabel}-理论知识考评要素细目表.xlsx`;
+        return new NextResponse(bytes, { headers: {
+          "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+        } });
+      }
 
       const workbook = new ExcelJS.Workbook();
       workbook.creator = "技能人才评价国家题库智能命题平台";
@@ -298,32 +377,18 @@ export async function GET(request: Request) {
            INNER JOIN projects p ON p.id = po.project_id AND p.status = 'active'
            INNER JOIN (
              SELECT 'level_5' AS level_code, 'theory' AS assessment_mode
+             UNION ALL SELECT 'level_5', 'skill'
              UNION ALL SELECT 'level_4', 'theory'
+             UNION ALL SELECT 'level_4', 'skill'
              UNION ALL SELECT 'level_3', 'theory'
-             UNION ALL SELECT 'level_2', 'skill'
-             UNION ALL SELECT 'level_1', 'skill'
+             UNION ALL SELECT 'level_3', 'skill'
            ) scope
-           LEFT JOIN project_occupation_levels pol
-             ON pol.occupation_id = po.id
-            AND pol.level_code = scope.level_code
-            AND pol.assessment_mode = scope.assessment_mode
            LEFT JOIN ${formalQuestionSource} q ON q.occupation_id = po.id
                                AND q.level_code = scope.level_code
                                AND q.assessment_mode = scope.assessment_mode
                                AND q.current_status = 'stored'
                                AND q.archived_at IS NULL
           WHERE po.status = 'active'
-            AND (
-              pol.occupation_id IS NOT NULL
-              OR NOT EXISTS (SELECT 1 FROM project_occupation_levels existing WHERE existing.occupation_id = po.id)
-              OR EXISTS (
-                SELECT 1 FROM questions existing_question
-                 WHERE existing_question.occupation_id = po.id
-                   AND existing_question.level_code = scope.level_code
-                   AND existing_question.assessment_mode = scope.assessment_mode
-                   AND existing_question.archived_at IS NULL
-              )
-            )
           GROUP BY po.id, po.name, po.code, scope.level_code, scope.assessment_mode
           ORDER BY po.name, FIELD(scope.level_code, 'level_5', 'level_4', 'level_3', 'level_2', 'level_1'), scope.assessment_mode`,
       );

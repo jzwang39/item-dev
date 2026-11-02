@@ -588,6 +588,29 @@ function ResultDownloads({
   scopes,
   onOpen,
 }: Readonly<{ scopes: ResultScope[]; onOpen: (scope: ResultScope) => void }>) {
+  const rows = Array.from(
+    scopes.reduce((groups, scope) => {
+      const key = `${scope.occupationId}-${scope.levelCode}`;
+      const group = groups.get(key) ?? {
+        occupationId: scope.occupationId,
+        occupationName: scope.occupationName,
+        occupationCode: scope.occupationCode,
+        levelCode: scope.levelCode,
+        levelLabel: scope.levelLabel,
+        modes: new Map<AssessmentMode, ResultScope>(),
+      };
+      group.modes.set(scope.assessmentMode, scope);
+      groups.set(key, group);
+      return groups;
+    }, new Map<string, {
+      occupationId: string;
+      occupationName: string;
+      occupationCode: string;
+      levelCode: string;
+      levelLabel: string;
+      modes: Map<AssessmentMode, ResultScope>;
+    }>()),
+  ).map(([, row]) => row);
   return (
     <div className="pt-12">
       <h1 className="m-0 text-[30px] font-semibold text-[#293242]">成果下载</h1>
@@ -607,28 +630,33 @@ function ResultDownloads({
               </tr>
             </thead>
             <tbody>
-              {scopes.map((scope) => (
+              {rows.map((row) => (
                 <tr
                   className="border-t border-[#e6ebf3]"
-                  key={`${scope.occupationId}-${scope.levelCode}-${scope.assessmentMode}`}
+                  key={`${row.occupationId}-${row.levelCode}`}
                 >
                   <td className="px-7 py-7 text-xl text-[#30415e]">
-                    {scope.occupationName}
+                    {row.occupationName}
                   </td>
                   <td className="px-7 py-7 text-xl text-[#30415e]">
-                    {scope.occupationCode || "待维护"}
+                    {row.occupationCode || "待维护"}
                   </td>
                   <td className="px-7 py-7 text-xl text-[#30415e]">
-                    {scope.levelLabel}
+                    {row.levelLabel}
                   </td>
-                  <td className="px-7 py-7">
-                    <button
-                      className={`rounded-xl border px-6 py-3 text-lg font-medium ${scope.assessmentMode === "theory" ? "border-[#b7cdf7] bg-[#edf4ff] text-[#1d62d9]" : "border-[#9edfd1] bg-[#e7f8f4] text-[#008c70]"}`}
-                      onClick={() => onOpen(scope)}
-                      type="button"
-                    >
-                      {modeLabel[scope.assessmentMode]}（{scope.questionCount}）
-                    </button>
+                  <td className="flex flex-wrap gap-3 px-7 py-7">
+                    {(["theory", "skill"] as const).map((mode) => {
+                      const scope = row.modes.get(mode);
+                      if (!scope) return null;
+                      return <button
+                        className={`rounded-xl border px-6 py-3 text-lg font-medium ${mode === "theory" ? "border-[#b7cdf7] bg-[#edf4ff] text-[#1d62d9]" : "border-[#9edfd1] bg-[#e7f8f4] text-[#008c70]"}`}
+                        key={mode}
+                        onClick={() => onOpen(scope)}
+                        type="button"
+                      >
+                        {modeLabel[mode]}
+                      </button>;
+                    })}
                   </td>
                 </tr>
               ))}
@@ -670,8 +698,11 @@ function ResultModal({
         "《操作技能考评内容结构表》",
         "《操作技能考评要素细目表》",
       ];
-  const formats = isTheory ? ["Excel", "Excel"] : ["Excel", "Word", "Excel"];
-  const downloadUrl = (file: "question-bank" | "outline") =>
+  const formats = isTheory ? ["Excel", "Excel"] : ["Excel", "Word", "Word"];
+  const fileKeys = isTheory
+    ? ["question-bank", "theory-outline"]
+    : ["question-bank", "skill-structure", "skill-outline"];
+  const downloadUrl = (file: string) =>
     `/api/v1/questions?view=download&occupationId=${encodeURIComponent(scope.occupationId)}&levelCode=${encodeURIComponent(scope.levelCode)}&assessmentMode=${scope.assessmentMode}&file=${file}`;
   return (
     <div
@@ -724,9 +755,8 @@ function ResultModal({
             </thead>
             <tbody>
               {files.map((file, index) => {
-                const downloadable =
-                  scope.questionCount > 0 && (isTheory || index !== 1);
-                const fileKey = index === 0 ? "question-bank" : "outline";
+                const downloadable = index === 0 ? scope.questionCount > 0 : true;
+                const fileKey = fileKeys[index];
                 return (
                   <tr className="border-b border-[#e6ebf3]" key={file}>
                     <td className="px-4 py-6 text-lg text-[#30415e]">
@@ -765,8 +795,7 @@ function ResultModal({
             </p>
           ) : (
             <p className="mb-0 mt-8 text-lg text-[#6680a5]">
-              题库与细目表将由已审定题库记录和当前维护数据实时生成；操作技能结构表须维护正式
-              Word 模板后开放。
+              题库由已入库题目生成；细目表与内容结构表只读取当前维护的数据，不会补造标准内容。
             </p>
           )}
           <p className="mb-0 mt-6 text-base leading-8 text-[#8293a9]">

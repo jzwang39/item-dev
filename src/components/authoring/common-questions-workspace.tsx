@@ -11,11 +11,16 @@ type Item = { question_id: string; current_version_id: string; question_no: stri
   suspended?: number; confirmed?: number; content_json: { options?: Array<{ key: string; content: string }> };
   answer_json: { answers?: string[] }; analysis_text: string };
 type GenerationRecord = { id: string; questionNo: string; point: string; questionType: string; stem: string; status: string };
+type GenerationError = { id: string; code: string; type?: string; attempts: number; remaining?: number; error: string };
 type Detail = { id: string; rowVersion: number; quota: Counts[]; currentReleaseId: string | null; generationPlanId: string | null;
   basis: { points: Array<{ key: string; name: string }>; scopes: Record<string, { occupation: string }> };
   coverage: Array<{ key: string; type: string; count: number; target: number }>;
   releases: Array<{ id: string; version_no: number; published_at: string }>; total: number; questions: Item[];
-  generation: { job: { status: string; generated: number; target: number; completedBatches: number; totalBatches: number } | null } | null };
+  generation: { job: {
+    status: string; generated: number; target: number; completedBatches: number; totalBatches: number;
+    activity?: { recentErrors: Array<{ code: string; attempts: number; error: string }> };
+    failedUnits?: GenerationError[];
+  } | null } | null };
 const api = "/api/v1/authoring/common-questions";
 const button = "rounded-lg border border-[#d6dce5] bg-white px-3 py-2 text-sm disabled:opacity-40";
 const labels: Record<string, string> = { draft: "草稿", pending_review: "待审核", returned: "退回", approved: "已审定", stored: "已入库", archived: "已归档" };
@@ -119,6 +124,8 @@ export function CommonQuestionsWorkspace() {
       action === "reopen" ? "确认创建待审新版本？修改完成后须重新审核、确认、入库并统一发布。" : "确认统一停用？不更改历史试卷；请在公共题组补齐缺额。");
   }
   const active = ["queued", "running"].includes(detail?.generation?.job?.status ?? "");
+  const recentErrors = detail?.generation?.job?.activity?.recentErrors ?? [];
+  const failedUnits = detail?.generation?.job?.failedUnits ?? [];
   return <section className="space-y-5">
     <div className="flex items-center justify-between"><h1 className="text-2xl font-semibold">基本要求公共题组</h1><Link href="/workspace/authoring">返回智能命题</Link></div>
     <p className="text-sm text-slate-500">五四三级共用一套题和发布版本，统一审核修改；各等级仍按自己的权重与试卷结构抽题。</p>
@@ -163,6 +170,15 @@ export function CommonQuestionsWorkspace() {
             已完成 {detail.generation.job.completedBatches} / {detail.generation.job.totalBatches} 批 · {active ? "每5秒自动更新，离开页面不影响生成" : "任务记录保留"} ·{" "}
             <button className="underline" onClick={() => setRecordsOpen((open) => !open)}>{recordsOpen ? "收起逐题生成记录" : "查看逐题生成记录"}</button>
           </p>}
+          {(recentErrors.length > 0 || failedUnits.length > 0) && <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+            <p className="font-medium">生成异常记录（自动刷新后保留，便于排查）</p>
+            {recentErrors.map((error, index) => <p className="mt-2 whitespace-pre-wrap break-words" key={`recent-${error.code}-${index}`}>
+              处理中：{error.code} · 已尝试 {error.attempts} 次 · {error.error}
+            </p>)}
+            {failedUnits.map((error) => <p className="mt-2 whitespace-pre-wrap break-words" key={error.id}>
+              未完成：{error.code}{error.type ? ` · ${error.type}` : ""} · 缺 {error.remaining ?? 0} 题 · 已尝试 {error.attempts} 次 · {error.error}
+            </p>)}
+          </div>}
           {recordsOpen && <div className="mt-3 rounded-lg border bg-white p-3">
             <p className="text-sm font-medium">本公共任务已保存试题：{records.length} 道</p>
             {records.map((record) => <p className="my-2 text-sm" key={record.id}>

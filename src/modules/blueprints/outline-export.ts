@@ -31,8 +31,8 @@ export function buildOutlineWorkbook(points: ExportPoint[]) {
       printTitlesRow: "1:1",
     },
   });
-  const headers = ["一级", "一级名称", "权重(%)", "二级序号", "二级名称", "权重(%)", "三级序号", "三级名称", "权重(%)", "考评点序号", "考评点名称", "重要程度", "页码"];
-  const widths = [6, 16, 8, 8, 18, 8, 10, 26, 8, 9, 38, 9, 11];
+  const headers = ["一级", "一级名称", "权重(%)", "二级序号", "二级名称", "权重(%)", "三级序号", "三级名称", "权重(%)", "考评点序号", "考评点名称", "重要程度"];
+  const widths = [6, 16, 8, 8, 18, 8, 10, 26, 8, 9, 38, 9];
   sheet.columns = widths.map((width) => ({ width }));
   sheet.addRow(headers);
   const values = points.map((point): CellValue[] => {
@@ -49,7 +49,7 @@ export function buildOutlineWorkbook(points: ExportPoint[]) {
       text(r.tertiaryNo ?? r.level3Code), text(r.tertiaryName ?? r.level3Name),
       weight(r.tertiaryWeight ?? r.level3Weight),
       point.code.match(/(?:^|-)(\d+)$/)?.[1] ?? point.code,
-      point.name, importance, text(r.textbookPage),
+      point.name, importance,
     ];
   });
   for (const row of values) sheet.addRow(row);
@@ -77,7 +77,7 @@ export function buildOutlineWorkbook(points: ExportPoint[]) {
       start = end;
     }
   }
-  sheet.pageSetup.printArea = `A1:M${points.length + 1}`;
+  sheet.pageSetup.printArea = `A1:L${points.length + 1}`;
   return workbook;
 }
 
