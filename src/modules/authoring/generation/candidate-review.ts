@@ -16,6 +16,41 @@ const reviewSchema = z.object({
   })).min(1).max(3),
 });
 
+function normalizeReviewPayload(content: string) {
+  const payload = parseModelJson(content) as { checks?: unknown };
+  const checks = Array.isArray(payload?.checks) ? payload.checks : [];
+  return {
+    ...payload,
+    checks: checks.map((value) => {
+      if (!value || typeof value !== "object") return value;
+      const item = value as Record<string, unknown>;
+      const rawRequirements = item.requirements
+        ?? item.requirementChecks
+        ?? item.criteria
+        ?? item.rules
+        ?? (typeof item.explanation === "string"
+          ? [{
+              requirement: "完整质量标准核验",
+              passed: Boolean(item.meetsQualityStandard),
+              explanation: item.explanation,
+            }]
+          : undefined);
+      const requirements = Array.isArray(rawRequirements)
+        ? rawRequirements.map((entry) => {
+            if (!entry || typeof entry !== "object") return entry;
+            const requirement = entry as Record<string, unknown>;
+            return {
+              requirement: requirement.requirement ?? requirement.name ?? requirement.rule ?? requirement.item ?? requirement.check,
+              passed: requirement.passed ?? requirement.ok ?? requirement.result,
+              explanation: requirement.explanation ?? requirement.reason ?? requirement.detail ?? requirement.note,
+            };
+          })
+        : rawRequirements;
+      return { ...item, requirements };
+    }),
+  };
+}
+
 export function candidateReviewPrompt(snapshot: Snapshot, code: string, candidates: GeneratedQuestion[], previous: unknown[], sources: AngleSource[]) {
   const kind = snapshot.scope.assessmentMode === "操作技能" ? "skill" : "theory";
   return {
@@ -23,7 +58,7 @@ export function candidateReviewPrompt(snapshot: Snapshot, code: string, candidat
 核对题干、条件、所有选项、答案及解析；单选必须唯一正确，多选答案集合必须完整且唯一确定，判断须有明确正误依据。原文存在不等于能支持答案，必须说明原文如何支持答案。
 与已有试题比较实际考查任务及实质内容；仅换词、语序或选项位置的题不合格。同知识不同任务只在完整标准允许时合格，不得覆盖知识独立性、多样性要求。
 技能只按操作技能标准核验情境、任务、完整步骤、成果、评分项目和分值，不套用理论变式放宽；正式参数缺失不得编造。
-覆盖完整标准的所有适用要求，requirements逐条列出要求、是否通过和理由；任一要求不通过，则meetsQualityStandard必须为false。不能确认答案或依据时必须判不通过，不猜测。
+覆盖完整标准的所有适用要求，requirements逐条列出要求、是否通过和理由；requirements为必填数组，即使只有1条也必须返回。任一要求不通过，则meetsQualityStandard必须为false。不能确认答案或依据时必须判不通过，不猜测。
 每个候选必须返回唯一index，包含所有候选索引，不得遗漏。evidenceSourceIds只能选择输入中存在的稳定编号，不自行复制或编造原文。
 只返回JSON：{"checks":[{"index":0,"meetsQualityStandard":true,"answerCorrect":true,"evidenceSupported":true,"distinctTask":true,"score":90,"explanation":"说明原文如何支持答案及任务差异","evidenceSourceIds":["输入编号"],"requirements":[{"requirement":"适用标准原文要求","passed":true,"explanation":"核验理由"}]}]}。`,
     prompt: JSON.stringify({
@@ -38,7 +73,7 @@ export function candidateReviewPrompt(snapshot: Snapshot, code: string, candidat
 
 export function parseCandidateReview(content: string, candidates: GeneratedQuestion[], sources: AngleSource[]) {
   let parsed: z.infer<typeof reviewSchema>;
-  try { parsed = reviewSchema.parse(parseModelJson(content)); }
+  try { parsed = reviewSchema.parse(normalizeReviewPayload(content)); }
   catch (error) { throw new GenerationFailure("review_invalid", `候选质量核验格式无效：${skillCandidateIssues(error).slice(0, 20).join("；")}。不将未经核验的候选计入成果。`); }
   if (parsed.checks.length !== candidates.length || new Set(parsed.checks.map((check) => check.index)).size !== candidates.length
     || parsed.checks.some((check) => check.index >= candidates.length)) {

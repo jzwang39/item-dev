@@ -127,6 +127,17 @@ test("判断题明确正误值和冗余正误选项规范化后校验，并保�
   }
 });
 
+test("判断题答案写成A/B时，可按正误选项内容归一化，不再误判为无效", () => {
+  const result = parseQuestions(JSON.stringify({ questions: [question({
+    questionType: "judgement",
+    options: [{ key: "A", content: "正确" }, { key: "B", content: "错误" }],
+    answers: ["A"],
+  })] }), "A", "judgement", undefined, { judgement: true });
+  assert.equal(result.valid.length, 1);
+  assert.deepEqual(result.valid[0].answers, ["正确"]);
+  assert.deepEqual(result.valid[0].options, []);
+});
+
 test("规范化不推断A/B或缺失、模糊及多个判断答案，不丢弃有实质内容的选项", () => {
   for (const answers of [["A"], [], ["正确", "错误"], ["不一定"], undefined]) {
     assert.equal(parseQuestions(JSON.stringify({ questions: [question({

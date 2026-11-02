@@ -228,7 +228,9 @@ export async function generateTargeted(input: {
     while (!parsed.valid.length && slot.repairs < MAX_SLOT_REPAIRS) {
       const originalResponse = slot.pendingResponse!;
       const corrected = await call("repair", {
-        instruction: "你是职业技能试题修订助手。修复给定候选及具体校验错误，不另找考评点、不降低完整质量标准。答案键和格式可修复，但答案对错、唯一解必须依据原文重新论证，不能猜答案或随意删除正确选项。无法保证正确性时返回questions=[]。只返回与原题相同结构的questions JSON数组。",
+        instruction: `你是职业技能试题修订助手。修复给定候选及具体校验错误，不另找考评点、不降低完整质量标准。答案键和格式可修复，但答案对错、唯一解必须依据原文重新论证，不能猜答案或随意删除正确选项。无法保证正确性时返回questions=[]。只返回与原题相同结构的questions JSON数组。${
+          slot.type === "judgement" ? " 判断题必须满足：questionType='judgement'、options=[]、answers只能是['正确']或['错误']，禁止A/B、对/错、true/false。" : ""
+        }`,
         prompt: JSON.stringify({
           职业: snapshot.scope.occupation, 等级: snapshot.scope.commonGroupId ? "五级、四级、三级共用基本要求" : snapshot.scope.levelCode,
           考评点: { code, name: snapshot.nodes.find((node) => node.code === code)!.name }, 指定题型: slot.type,

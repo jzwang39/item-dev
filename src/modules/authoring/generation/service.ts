@@ -537,11 +537,21 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
   let excerpts: Array<{ title: string; content: string; start: number }> = [];
   let evidenceChapters: EvidenceChapter[] = [];
   if (node.chapterIds.length && snapshot.sourceVersionIds.length) {
-    const chapters = await query<(RowDataPacket & { id: string; ordinal: number; chapter_title: string; section_title: string | null; content_text: string })[]>(
+    let chapters = await query<(RowDataPacket & { id: string; ordinal: number; chapter_title: string; section_title: string | null; content_text: string })[]>(
       `SELECT id,ordinal,chapter_title,section_title,content_text FROM textbook_chapters
        WHERE id IN (${node.chapterIds.map(() => "?").join(",")}) AND source_version_id IN (${snapshot.sourceVersionIds.map(() => "?").join(",")}) ORDER BY ordinal`,
       [...node.chapterIds, ...snapshot.sourceVersionIds],
     );
+    if (!chapters.length) {
+      // Chapter ids are already frozen in the snapshot. If source_version_ids
+      // drift across historical public-group retries, prefer the exact chapter
+      // rows instead of dropping all evidence and misreporting "无可核验原文".
+      chapters = await query<(RowDataPacket & { id: string; ordinal: number; chapter_title: string; section_title: string | null; content_text: string })[]>(
+        `SELECT id,ordinal,chapter_title,section_title,content_text FROM textbook_chapters
+         WHERE id IN (${node.chapterIds.map(() => "?").join(",")}) ORDER BY ordinal`,
+        node.chapterIds,
+      );
+    }
     evidenceChapters = chapters;
     const pool = buildChapterExcerptPool(chapters.map((chapter) => ({
       id: chapter.id, ordinal: chapter.ordinal, chapterTitle: chapter.chapter_title, sectionTitle: chapter.section_title, content: chapter.content_text,

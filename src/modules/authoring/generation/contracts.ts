@@ -133,6 +133,14 @@ function judgementAnswer(value: unknown): string | undefined {
   if (["错误", "错", "false", "×"].includes(text)) return "错误";
 }
 
+function judgementAnswerFromOptions(answer: unknown, options: unknown) {
+  if (typeof answer !== "string" || !Array.isArray(options)) return;
+  const matched = options.find((option) => option && typeof option === "object"
+    && String((option as Record<string, unknown>).key ?? "").trim().toUpperCase() === answer.trim().toUpperCase());
+  if (!matched || typeof matched !== "object") return;
+  return judgementAnswer((matched as Record<string, unknown>).content);
+}
+
 export function stemHash(stem: string) {
   return createHash("sha256").update(stem.normalize("NFKC").replace(/\s+/g, "").toLowerCase()).digest("hex");
 }
@@ -165,7 +173,7 @@ export function parseQuestions(content: string, code: string, requestedType: Que
     const answer = item.answers ?? item.answer ?? item["答案"] ?? item["参考答案"];
     const answerList = Array.isArray(answer) ? answer : [answer];
     const normalizedAnswer = normalization.judgement && item.questionType === "judgement" && answerList.length === 1
-      ? judgementAnswer(answerList[0]) : undefined;
+      ? judgementAnswer(answerList[0]) ?? judgementAnswerFromOptions(answerList[0], item.options) : undefined;
     // Only remove redundant true/false choices; arbitrary options may carry
     // essential conditions and must still fail structural validation.
     const redundantOptions = normalizedAnswer && Array.isArray(item.options) && item.options.length > 0

@@ -30,6 +30,23 @@ test("只在全部检查通过后排序择优，遗漏或重复索引不能默�
   assert.throws(() => parseCandidateReview("broken", [candidate], sources), /格式无效/);
 });
 
+test("核验结果兼容 requirements 别名和缺省回填，避免因格式小偏差直接废弃候选", () => {
+  const alias = parseCandidateReview(JSON.stringify({ checks: [{
+    ...check,
+    requirements: undefined,
+    requirementChecks: [{ name: "判断须有明确正误", ok: true, reason: "原文可支持" }],
+  }] }), [candidate], sources);
+  assert.equal(alias.questions.length, 1);
+  assert.equal(alias.questions[0].standardReview?.requirements[0].requirement, "判断须有明确正误");
+
+  const fallback = parseCandidateReview(JSON.stringify({ checks: [{
+    ...check,
+    requirements: undefined,
+  }] }), [candidate], sources);
+  assert.equal(fallback.questions.length, 1);
+  assert.equal(fallback.questions[0].standardReview?.requirements[0].requirement, "完整质量标准核验");
+});
+
 test("候选核验也严格隔离数据库标准，不覆盖独立性和多样性要求", () => {
   const base: Snapshot = {
     projectId: "p", requirement: "补题", points: [], qualityRequirements: ["唯一解"], qualityStandard: "理论数据库完整标准",
