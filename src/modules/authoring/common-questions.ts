@@ -320,10 +320,12 @@ export async function commonQuestionAction(id: string, questionId: string, versi
 
 export async function listCommonGroups() {
   return query<RowDataPacket[]>(`SELECT g.id,g.occupation_id,g.row_version,g.updated_at,o.name AS occupation_name,
-    j.status AS generation_status,g.generation_plan_id,
+    CASE WHEN j.status='cancelled' OR p2.status='cancelled' THEN NULL ELSE j.status END AS generation_status,
+    CASE WHEN j.status='cancelled' OR p2.status='cancelled' THEN NULL ELSE g.generation_plan_id END AS generation_plan_id,
     r.version_no,(SELECT COUNT(*) FROM common_question_members m WHERE m.group_id=g.id AND m.suspended=0) AS question_count
     FROM common_question_groups g JOIN project_occupations o ON o.id=g.occupation_id AND o.status='active'
     JOIN projects p ON p.id=g.project_id AND p.status='active'
+    LEFT JOIN authoring_plans p2 ON p2.id=g.generation_plan_id
     LEFT JOIN authoring_generation_jobs j ON j.plan_id=g.generation_plan_id
     LEFT JOIN common_question_releases r ON r.id=g.current_release_id
     ORDER BY CASE WHEN j.status IN ('queued','running') THEN 0 ELSE 1 END,g.updated_at DESC,g.id DESC`);
@@ -331,6 +333,16 @@ export async function listCommonGroups() {
 export async function getCommonGroup(id: string, page: number, candidates = false) {
   return withTransaction(async (db) => {
     const group = await lockGroup(db, id), basis = decodeCommon<CommonBasis>(group.basis_json);
+    const [generation] = group.generation_plan_id
+      ? await db.execute<(RowDataPacket & { plan_status: string | null; job_status: string | null })[]>(
+        `SELECT p.status AS plan_status,j.status AS job_status
+           FROM authoring_plans p LEFT JOIN authoring_generation_jobs j ON j.plan_id=p.id
+          WHERE p.id=?`, [group.generation_plan_id],
+      )
+      : [[]];
+    const effectiveGenerationPlanId = generation[0] && !["cancelled"].includes(String(generation[0].plan_status))
+      && !["cancelled"].includes(String(generation[0].job_status))
+      ? group.generation_plan_id : null;
     const all = await members(db, id), quota = decodeCommon<CommonQuota>(group.quota_json);
     const [releases] = await db.execute<RowDataPacket[]>("SELECT id,version_no,published_at FROM common_question_releases WHERE group_id=? ORDER BY version_no DESC LIMIT 20", [id]);
     let result: RowDataPacket[], total: number;
@@ -356,7 +368,7 @@ export async function getCommonGroup(id: string, page: number, candidates = fals
         ORDER BY q.updated_at DESC,q.id DESC LIMIT 20 OFFSET ${20 * (page - 1)}`, [id]);
       total = all.length;
     }
-    return { id, rowVersion: group.row_version, basis, quota, releases, generationPlanId: group.generation_plan_id,
+    return { id, rowVersion: group.row_version, basis, quota, releases, generationPlanId: effectiveGenerationPlanId,
       currentReleaseId: group.current_release_id, coverage: commonCoverage(quota, all.filter((item) => !item.suspended)), total,
       questions: result.map((row) => ({ ...row, content_json: decodeCommon(row.content_json), answer_json: decodeCommon(row.answer_json) })) };
   });
