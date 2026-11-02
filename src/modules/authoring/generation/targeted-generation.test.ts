@@ -246,6 +246,29 @@ test("理论候选完整核验后保存层发现任务内重复，保留原候�
   assert.equal(slot.searchedSourceIds.length, 1);
 });
 
+test("历史被判重复的候选题干加入本地黑名单，不再进入下一轮核验", async () => {
+  const input = fixture();
+  const duplicate = { code: "duplicate" as const, message: "候选题干与已有题重复" };
+  input.state.budget!.slots["slot-0"].rejectedCandidates = [{
+    response: JSON.stringify({ questions: [question] }),
+    failures: [duplicate],
+    evidenceSources: [source],
+    at: "old",
+  }];
+  let reviewCalls = 0;
+  const output = await generateTargeted(input, dependencies(async (prompt) => {
+    if (prompt.instruction.includes("补题分析助手")) return plan();
+    if (prompt.instruction.includes("独立核验助手")) {
+      reviewCalls++;
+      return review(prompt);
+    }
+    return JSON.stringify({ questions: [question] });
+  }));
+  assert.equal(output.questions.length, 0);
+  assert.equal(output.failures[0].code, "duplicate");
+  assert.equal(reviewCalls, 0);
+});
+
 test("前两页无任务继续查原文，第三页找到任务后生成并核验，不因零保存提前停止", async () => {
   const input = fixture();
   input.sources = Array.from({ length: 18 }, (_, index) => ({ ...source, id: index === 12 ? source.id : `source-${index}` }));
@@ -297,8 +320,10 @@ test("答案键错误携带原候选修复并重新核验，不重新消耗候�
 test("失败尝试不当作已覆盖，完整质量核验不通过始终不保存，其他槽位有独立额度", async () => {
   const input = fixture("judgement", 2);
   input.state.attemptedAngles = [{ angle: "借阅登记", sourceId: source.id, quote: source.content, task: "辨析资料借阅是否需要登记", questionType: "judgement" }];
+  let candidates = 0;
   const deps = dependencies(async (prompt) => prompt.instruction.includes("补题分析助手") ? plan()
-    : prompt.instruction.includes("独立核验助手") ? review(prompt, false) : JSON.stringify({ questions: [question] }));
+    : prompt.instruction.includes("独立核验助手") ? review(prompt, false)
+      : JSON.stringify({ questions: [{ ...question, stem: `借阅资料需要完成登记手续（失败候选${++candidates}）。` }] }));
   for (let index = 0; index < 3; index++) {
     const output = await generateTargeted(input, deps);
     assert.equal(output.questions.length, 0);
@@ -487,6 +512,7 @@ test("候选试制三轮使用不同路径，质量拒绝不保存也不无限�
   const input = fixture();
   const paths: string[] = [];
   let analyses = 0;
+  let candidates = 0;
   const deps = dependencies(async (prompt) => {
     if (prompt.instruction.includes("补题分析助手")) {
       analyses++;
@@ -494,7 +520,7 @@ test("候选试制三轮使用不同路径，质量拒绝不保存也不无限�
     }
     if (prompt.instruction.includes("独立核验助手")) return review(prompt, false);
     paths.push(JSON.parse(prompt.prompt).候选试制.设计路径);
-    return JSON.stringify({ questions: [question] });
+    return JSON.stringify({ questions: [{ ...question, stem: `借阅资料需要完成登记手续（试制${++candidates}）。` }] });
   });
   for (let index = 0; index < 3; index++) {
     const output = await generateTargeted(input, deps);

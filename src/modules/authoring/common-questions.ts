@@ -340,9 +340,13 @@ export async function getCommonGroup(id: string, page: number, candidates = fals
           WHERE p.id=?`, [group.generation_plan_id],
       )
       : [[]];
-    const effectiveGenerationPlanId = generation[0] && !["cancelled"].includes(String(generation[0].plan_status))
-      && !["cancelled"].includes(String(generation[0].job_status))
-      ? group.generation_plan_id : null;
+    const cancelledGeneration = generation[0] && (String(generation[0].plan_status) === "cancelled" || String(generation[0].job_status) === "cancelled");
+    if (cancelledGeneration && group.generation_plan_id) {
+      await db.execute("UPDATE common_question_groups SET generation_plan_id=NULL,row_version=row_version+1 WHERE id=?", [id]);
+      group.generation_plan_id = null;
+      group.row_version = Number(group.row_version) + 1;
+    }
+    const effectiveGenerationPlanId = generation[0] && !cancelledGeneration ? group.generation_plan_id : null;
     const all = await members(db, id), quota = decodeCommon<CommonQuota>(group.quota_json);
     const [releases] = await db.execute<RowDataPacket[]>("SELECT id,version_no,published_at FROM common_question_releases WHERE group_id=? ORDER BY version_no DESC LIMIT 20", [id]);
     let result: RowDataPacket[], total: number;
