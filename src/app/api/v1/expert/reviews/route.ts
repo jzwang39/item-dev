@@ -53,6 +53,7 @@ export async function GET() {
         question_version_id: string;
         question_no: string;
         occupation_name: string;
+        occupation_id: string | null;
         level_code: string | null;
         assessment_mode: "theory" | "skill";
         question_type: string;
@@ -67,7 +68,7 @@ export async function GET() {
       })[]
     >(
       `SELECT ra.id AS assignment_id, q.id AS question_id, qv.id AS question_version_id, q.question_no, COALESCE(po.name,'通用') AS occupation_name,
-              q.level_code, q.assessment_mode, q.question_type, qv.stem, qv.content_json, qv.answer_json, qv.analysis_text, qv.score_rubric_json,
+              q.level_code,q.occupation_id, q.assessment_mode, q.question_type, qv.stem, qv.content_json, qv.answer_json, qv.analysis_text, qv.score_rubric_json,
               (SELECT GROUP_CONCAT(DISTINCT bn.name ORDER BY bn.ordinal SEPARATOR '、')
                 FROM question_assessment_points qap JOIN blueprint_nodes bn ON bn.id=qap.blueprint_node_id
                 WHERE qap.question_version_id=qv.id) AS point_name, ra.assigned_at,q.current_status
@@ -102,7 +103,7 @@ export async function GET() {
           questionVersionId: task.question_version_id,
           questionNo: task.question_no,
           occupationName: task.occupation_name,
-          levelLabel: task.level_code ? levels[task.level_code] ?? task.level_code : "通用",
+          levelLabel: task.level_code ? levels[task.level_code] ?? task.level_code : task.occupation_id ? "公共 · 五四三级" : "通用",
           assessmentMode: task.assessment_mode,
           questionType: task.question_type,
           stem: task.stem,

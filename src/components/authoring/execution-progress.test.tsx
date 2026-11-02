@@ -35,3 +35,10 @@ test("异常数值安全显示，不输出无效进度", () => {
   assert.match(html, /已生成 0 \/ 100 道/);
   assert.doesNotMatch(html, /NaN|Infinity/);
 });
+
+test("公共任务复用进度条，明确含已有成果且显示真实百分比", () => {
+  const html = renderToStaticMarkup(<ExecutionProgress generated={123} target={492} started completedLabel="已有 / 已生成" />);
+  assert.match(html, /已有 \/ 已生成 123 \/ 492 道/);
+  assert.match(html, /25%/);
+  assert.match(html, /role="progressbar"/);
+});

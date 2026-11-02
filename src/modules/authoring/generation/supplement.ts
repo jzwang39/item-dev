@@ -4,6 +4,7 @@ import { assertOutlineConfirmed } from "@/modules/blueprints/point-review";
 import { assertFrozenPlanBasis } from "./plan-basis";
 import { questionTypes, quotaTotal, type QuestionType, type Snapshot } from "./contracts";
 import { retryState, type RetryState } from "./retry-policy";
+import { assertCommonGeneration } from "../common-generation";
 
 const MAX_GAPS_PER_REQUEST = 6;
 
@@ -64,6 +65,10 @@ export async function queueSupplementRound(db: PoolConnection, planId: string, a
   const job = jobs[0];
   if (!job || job.status !== "stopped" || !job.stop_summary_json) throw new Error("仅停止生成并保留成果后的计划可以补题。");
   const snapshot = typeof job.snapshot_json === "string" ? JSON.parse(job.snapshot_json) as Snapshot : job.snapshot_json;
+  await assertCommonGeneration(db, planId, snapshot.scope, snapshot.nodes.map((node) => {
+    const context = node.theoryContext as { point?: unknown; source?: unknown } | undefined;
+    return { id: node.id, name: node.name, node_code: node.code, requirement_json: context?.point, source_ref_json: context?.source };
+  }));
   if (snapshot.projectId !== plan.project_id || Number(job.target_count) !== snapshot.points.reduce((sum, point) => sum + quotaTotal(point), 0)) {
     throw new Error("冻结计划与任务题量不一致，不能补题。");
   }

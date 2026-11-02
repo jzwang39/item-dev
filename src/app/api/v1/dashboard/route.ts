@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 
 import { getVerifiedSession } from "@/auth";
 import { query } from "@/shared/database/mysql";
+import { commonEditorialLevelFilter } from "@/modules/authoring/common-question-policy";
 
 const levels = ["level_5", "level_4", "level_3", "level_2", "level_1"] as const;
 const levelLabels: Record<typeof levels[number], string> = {
@@ -22,7 +23,7 @@ export async function GET(request: Request) {
   const conditions = ["q.archived_at IS NULL", "p.status = 'active'"];
   const values: string[] = [];
   if (occupationId) { conditions.push("q.occupation_id = ?"); values.push(occupationId); }
-  if (levels.includes(levelCode as typeof levels[number])) { conditions.push("q.level_code = ?"); values.push(levelCode); }
+  if (levels.includes(levelCode as typeof levels[number])) { conditions.push(commonEditorialLevelFilter()); values.push(levelCode, levelCode); }
   if (["theory", "skill"].includes(assessmentMode)) { conditions.push("q.assessment_mode = ?"); values.push(assessmentMode); }
   if (["draft", "pending_review", "returned", "approved"].includes(status)) { conditions.push("q.current_status = ?"); values.push(status); }
   const where = conditions.join(" AND ");
@@ -43,7 +44,14 @@ export async function GET(request: Request) {
         `SELECT q.question_type, COUNT(*) AS total ${fromQuestions} GROUP BY q.question_type`, values
       ),
       query<(RowDataPacket & { level_code: typeof levels[number]; total: number })[]>(
-        `SELECT q.level_code, COUNT(*) AS total ${fromQuestions} GROUP BY q.level_code`, values
+        `SELECT scope.level_code,COUNT(DISTINCT q.id) AS total FROM questions q
+         INNER JOIN projects p ON p.id=q.project_id
+         JOIN (SELECT 'level_5' AS level_code UNION ALL SELECT 'level_4' UNION ALL SELECT 'level_3'
+           UNION ALL SELECT 'level_2' UNION ALL SELECT 'level_1') scope
+           ON q.level_code=scope.level_code OR EXISTS(SELECT 1 FROM common_question_members m
+             JOIN common_question_points cp ON cp.group_id=m.group_id AND cp.point_key=m.point_key
+             WHERE m.question_id=q.id AND cp.level_code=scope.level_code)
+         WHERE ${where} GROUP BY scope.level_code`, values
       )
     ]);
     const base = summary[0] ?? { total: 0, theory: 0, skill: 0, approved: 0, types: 0 };

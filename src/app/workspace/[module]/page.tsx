@@ -5,8 +5,10 @@ import { AuthoringWorkspace } from "@/components/authoring/authoring-workspace";
 import { AssemblyWorkspace } from "@/components/assembly/assembly-workspace";
 import { QuestionBankWorkspace } from "@/components/questions/question-bank-workspace";
 import { ExpertReviewWorkspace } from "@/components/review/expert-review-workspace";
+import { CommonQuestionsWorkspace } from "@/components/authoring/common-questions-workspace";
 
 const moduleNames: Record<string, { title: string; description: string }> = {
+  "common-questions": { title: "基本要求公共题组", description: "五四三级基本要求统一生成、审核和发布。" },
   authoring: {
     title: "智能命题",
     description: "管理考评蓝图、命题计划、资料依据与批次生成。",
@@ -35,6 +37,11 @@ export default async function ModulePlaceholderPage({
 
   if (params.module === "authoring") {
     return <AuthoringWorkspace />;
+  }
+  if (params.module === "common-questions") {
+    const session = await getVerifiedSession();
+    if (session?.user.role !== "admin") notFound();
+    return <CommonQuestionsWorkspace />;
   }
   if (params.module === "review") {
     const session = await getVerifiedSession();

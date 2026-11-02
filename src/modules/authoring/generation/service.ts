@@ -25,6 +25,8 @@ import { buildEvidenceCatalog, type EvidenceChapter } from "./evidence-catalog";
 import { ensureTargetedBudget, grantSkillRecovery, recoverExpansionReviewProtocol, recoverCuratedTheoryBasis, recoverNoTextbookTheory, recoverTheoryDuplicate, theoryGenerationLimit, recoverSkillDesignProtocol, recoverPrematureBlocks, markTargetedSaved, MAX_SLOT_GENERATIONS, MAX_SLOT_REPAIRS, MAX_UNIT_MODEL_CALLS, type MissingSlot } from "./targeted-budget";
 import { generateTargeted } from "./targeted-generation";
 import { recoverTheoryBasisRevision, recoverTheoryEcho } from "./targeted-budget";
+import { assertCommonGeneration, prefillCommonSlots, registerCommonGenerated } from "../common-generation";
+import { commonPlanProgress } from "../common-questions";
 
 function json<T>(value: T | string): T {
   return typeof value === "string" ? JSON.parse(value) as T : value;
@@ -53,6 +55,11 @@ export async function startGeneration(planId: string, actorId: string, retryFail
       if (existing[0].status === "stopped") throw new Error("原请求已停止，不能恢复或原样重试；请使用“补题”创建新的缺额请求。");
       if (existing[0].status === "cancelled") throw new Error("任务已终止，不能恢复生成或重试；如需补题请新建计划。");
       if (retryFailed) {
+        const old = json<Snapshot>(existing[0].snapshot_json);
+        await assertCommonGeneration(db, planId, scope, old.nodes.map((node) => {
+          const context = node.theoryContext as { point?: unknown; source?: unknown } | undefined;
+          return { id: node.id, name: node.name, node_code: node.code, requirement_json: context?.point, source_ref_json: context?.source };
+        }));
         const [active] = await db.execute<RowDataPacket[]>(
           "SELECT id FROM authoring_generation_units WHERE job_id=? AND status IN ('queued','running') LIMIT 1", [existing[0].id],
         );
@@ -108,12 +115,15 @@ export async function startGeneration(planId: string, actorId: string, retryFail
     const quota = json<{ points: QuotaPoint[]; qualityRequirements: string[] }>(plan.quota_json);
     const skillBasis = scope.assessmentMode === "操作技能" ? await loadSkillPlanBasis(db, scope.occupationId, scope.levelCode, scope.blueprintVersions) : null;
     validateQuota(quota.points, scope.levelCode, scope.assessmentMode);
+    const generationPoints = scope.commonReference
+      ? quota.points.filter((point) => !scope.commonReference!.codes.includes(point.code)) : quota.points;
     const [nodes] = await db.execute<(RowDataPacket & { id: string; node_code: string; name: string; requirement_json: unknown; source_ref_json: string | { chapterIds?: string[] } })[]>(
       "SELECT id,node_code,name,requirement_json,source_ref_json FROM blueprint_nodes WHERE blueprint_version_id=? AND node_kind='assessment_point'", [scope.blueprintVersions.outline.id],
     );
     const byCode = new Map(nodes.map((node) => [node.node_code, node]));
     if (quota.points.some((point) => !byCode.has(point.code))) throw new Error("计划考评点不属于冻结细目表。");
     if (quota.points.some((point) => isLegalPoint(byCode.get(point.code)!))) throw new Error("此计划包含法律法规考评点，不能通过普通AI命题。请重新生成计划，并在题库检索使用法律法规智能体。");
+    await assertCommonGeneration(db, planId, scope, nodes.filter((node) => generationPoints.some((point) => point.code === node.node_code)));
     const [sources] = await db.execute<(RowDataPacket & { source_version_id: string })[]>(
       "SELECT source_version_id FROM blueprint_version_sources WHERE blueprint_version_id=?", [scope.blueprintVersions.outline.id],
     );
@@ -125,13 +135,13 @@ export async function startGeneration(planId: string, actorId: string, retryFail
     const standardContent = qualityStandardContent(settings[0]?.setting_value_json, standardConfig.defaultContent);
     const snapshot: Snapshot = {
       projectId: plan.project_id, requirement: plan.raw_requirement, scope,
-      points: quota.points.map((point) => ({ ...point, total: quotaTotal(point) })),
+      points: generationPoints.map((point) => ({ ...point, total: quotaTotal(point) })),
       skillStructure: skillBasis?.structure,
       qualityRequirements: quota.qualityRequirements ?? [],
       qualityStandard: scope.assessmentMode === "操作技能" ? "" : standardContent,
       skillQualityStandard: scope.assessmentMode === "操作技能" ? standardContent : undefined,
       sourceVersionIds: sources.map((source) => source.source_version_id),
-      nodes: quota.points.map((point) => {
+      nodes: generationPoints.map((point) => {
         const node = byCode.get(point.code)!;
         return { id: node.id, code: node.node_code, name: node.name, chapterIds: node.source_ref_json ? json<{ chapterIds?: string[] }>(node.source_ref_json).chapterIds ?? [] : [],
           skillContext: skillBasis ? { point: node.requirement_json ? json(node.requirement_json) : null,
@@ -156,6 +166,8 @@ export async function startGeneration(planId: string, actorId: string, retryFail
         }
       }
     }
+    if (scope.commonGroupId) await prefillCommonSlots(db, scope.commonGroupId, jobId);
+    await refreshJob(db, jobId);
     await audit(db, plan.project_id, actorId, planId, "authoring.plan.generation_started", { jobId, total: batches.reduce((sum, batch) => sum + batch.target, 0), batches: batches.length });
     return jobId;
   });
@@ -172,10 +184,11 @@ export async function startSupplementGeneration(planId: string, actorId: string)
 }
 
 export async function getGenerationState(planId: string) {
+  const common = await commonPlanProgress(planId);
   const jobs = await query<(RowDataPacket & { id: string; status: string; target_count: number; snapshot_json: Snapshot | string; termination_summary_json: unknown; stop_summary_json: unknown })[]>(
     "SELECT id,status,target_count,snapshot_json,termination_summary_json,stop_summary_json FROM authoring_generation_jobs WHERE plan_id=?", [planId],
   );
-  if (!jobs[0]) return { job: null };
+  if (!jobs[0]) return { job: null, common };
   const job = jobs[0];
   const snapshot = json<Snapshot>(job.snapshot_json);
   const batches = await query<(RowDataPacket & { ordinal: number; target: number; generated_count: number; failed: number; pending: number; running: number })[]>(
@@ -196,6 +209,7 @@ export async function getGenerationState(planId: string) {
   const pending = batches.reduce((sum, batch) => sum + Number(batch.pending), 0);
   const status = ["cancelled", "stopped"].includes(job.status) ? job.status : generated === Number(job.target_count) ? "succeeded" : pending ? job.status === "queued" ? "queued" : "running" : "partial";
   return {
+    common,
     job: {
       id: job.id, status, target: Number(job.target_count), generated,
       retryLimits: { strategy: "per_slot_v2", perSlotGenerations: MAX_SLOT_GENERATIONS, perSlotRepairs: MAX_SLOT_REPAIRS,
@@ -422,7 +436,7 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
       };
       await db.execute(`INSERT INTO questions(id,project_id,question_no,occupation_id,level_code,assessment_mode,question_type,current_version_id,current_status)
         VALUES(?,?,?,?,?,?,?,?,?)`, [questionId, snapshot.projectId, `AI-${unit.plan_id}-${String(slot.ordinal).padStart(4, "0")}`,
-        snapshot.scope.occupationId, snapshot.scope.levelCode, skill ? "skill" : "theory", type, versionId, status]);
+        snapshot.scope.occupationId, snapshot.scope.commonGroupId ? null : snapshot.scope.levelCode, skill ? "skill" : "theory", type, versionId, status]);
       await db.execute(`INSERT INTO question_versions(id,question_id,version_no,stem,content_json,answer_json,analysis_text,score_rubric_json,source_snapshot_json,content_hash,created_by)
         VALUES(?,?,1,?,?,?,?,?,?,?,?)`, [versionId, questionId, question.stem, JSON.stringify({ options: question.options }),
         JSON.stringify({ answers: question.answers }), question.analysis, question.scoreRubric ? JSON.stringify(question.scoreRubric) : null, JSON.stringify(source),
@@ -432,6 +446,7 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
           [createUlid(), versionId, option.key, option.content, question.answers.includes(option.key) ? 1 : 0]);
       }
       await db.execute("INSERT INTO question_assessment_points(question_version_id,blueprint_node_id) VALUES(?,?)", [versionId, node.id]);
+      await registerCommonGenerated(db, snapshot.scope, questionId, node, unit.plan_id);
       await db.execute(`INSERT INTO question_quality_checks(id,question_version_id,check_round,check_code,severity,result,detail_json)
         VALUES(?,?,'rule','authoring.basic_structure','info','pass',?)`, [createUlid(), versionId, JSON.stringify({ planId: unit.plan_id, unitId: unit.id, optionsValid: true })]);
       if (question.standardReview) {
@@ -549,7 +564,7 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
       });
   });
   unit.retry_state_json = state;
-  if (state.targeted || (kind === "theory" && !node.chapterIds.length)) {
+  if (state.targeted || (kind === "theory" && (!node.chapterIds.length || snapshot.scope.commonGroupId))) {
     state.targeted = true;
     const context = snapshot.scope.assessmentMode === "操作技能" ? node.skillContext : node.theoryContext;
     const sources = buildEvidenceCatalog(context, evidenceChapters, node.name);

@@ -11,6 +11,8 @@ import { getActiveProjectIdForUpdate } from "@/modules/authoring/occupations/ser
 import { assertPlanVersions, readCurrentTheoryVersion } from "@/modules/blueprints/current-theory-version";
 import { createUlid } from "@/shared/database/ulid";
 import { withTransaction } from "@/shared/database/mysql";
+import { commonPlanQuota } from "@/modules/authoring/common-questions";
+import type { Scope } from "@/modules/authoring/generation/contracts";
 
 const schema = z.object({
   requirement: z.string().trim().min(1).max(12000),
@@ -79,20 +81,20 @@ export async function POST(request: Request) {
         throw new Error("操作技能内容结构表已更新，请重新生成计划。");
       }
       await assertOutlineConfirmed(connection, outlineVersionId);
-      const [allNodes] = await connection.execute<(RowDataPacket & { node_code: string; name: string; requirement_json: unknown; source_ref_json: unknown })[]>(
-        "SELECT node_code,name,requirement_json,source_ref_json FROM blueprint_nodes WHERE blueprint_version_id=? AND node_kind='assessment_point'", [outlineVersionId]
+      const [allNodes] = await connection.execute<(RowDataPacket & { id: string; node_code: string; name: string; requirement_json: unknown; source_ref_json: unknown })[]>(
+        "SELECT id,node_code,name,requirement_json,source_ref_json FROM blueprint_nodes WHERE blueprint_version_id=? AND node_kind='assessment_point'", [outlineVersionId]
       );
       const nodes = allNodes.filter((node) => !isLegalPoint(node));
       if (nodes.length !== data.points.length || data.points.some((point) => !nodes.some((node) => node.node_code === point.code))) {
         throw new Error("计划考评点与当前细目表不一致，请重新生成计划。");
       }
-      const points = data.points.map((point) => ({
+      let points = data.points.map((point) => ({
         ...point, name: nodes.find((node) => node.node_code === point.code)!.name,
         total: quotaTotal(point)
       }));
 
       const planId = createUlid();
-      const scope = {
+      const scope: Scope = {
         occupationId: occupations[0].id,
         occupation: occupations[0].name,
         levelCode: data.levelCode,
@@ -102,6 +104,15 @@ export async function POST(request: Request) {
           weights: { id: weightVersionId, versionNo: Number("version_no" in current.weights! ? current.weights.version_no : current.weights!.versionNo) },
         },
       };
+      const common = await commonPlanQuota(connection, scope, nodes, points);
+      if (common) {
+        if (common.shared.some((item) => {
+          const supplied = points.find((point) => point.code === item.code);
+          return !supplied || supplied.single !== item.single || supplied.multiple !== item.multiple || supplied.judgement !== item.judgement;
+        })) throw new Error("公共题组配额已变化或被单独修改，请重新生成计划后确认。");
+        points = common.points;
+        scope.commonReference = { groupId: common.groupId, codes: common.shared.map((point) => point.code) };
+      }
       const quota = {
         minimumTotal: points.reduce((sum, point) => sum + point.total, 0),
         points,
@@ -124,6 +135,7 @@ export async function POST(request: Request) {
           session.user.id
         ]
       );
+      if (common) await commonPlanQuota(connection, scope, nodes, points, planId);
       for (const id of [outlineVersionId, weightVersionId, ...(skillBasis ? [skillBasis.versions.structure.id] : [])]) {
         await connection.execute("INSERT INTO authoring_plan_blueprints (plan_id, blueprint_version_id) VALUES (?, ?)", [planId, id]);
       }

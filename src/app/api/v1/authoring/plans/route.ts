@@ -14,6 +14,8 @@ import { isLegalPoint } from "@/modules/authoring/legal-topics";
 import { loadSkillPlanBasis } from "@/modules/authoring/skill-plan";
 import { practicalQuota } from "@/modules/authoring/generation/quota";
 import { findPlanOccupation, parseModelRequirement, type ParsedRequirement } from "@/modules/authoring/requirement-parser";
+import { commonPlanProgress, commonPlanQuota } from "@/modules/authoring/common-questions";
+import type { CommonNode } from "@/modules/authoring/common-question-policy";
 
 export const dynamic = "force-dynamic";
 
@@ -82,14 +84,17 @@ export async function GET() {
         ORDER BY ap.updated_at DESC
         LIMIT 100`
     );
-    return NextResponse.json({ data: rows.map((row) => ({
+    return NextResponse.json({ data: await Promise.all(rows.map(async (row) => {
+      const scope = typeof row.scope_json === "string" ? JSON.parse(row.scope_json) : row.scope_json as { commonReference?: unknown };
+      return {
       ...row,
+      common: scope?.commonReference ? await commonPlanProgress(row.id) : null,
       question_count: Number(row.question_count),
       generation_target: row.generation_target == null ? null : Number(row.generation_target),
       generation_generated: row.generation_generated == null ? null : Number(row.generation_generated),
-      scope_json: typeof row.scope_json === "string" ? JSON.parse(row.scope_json) : row.scope_json,
+      scope_json: scope,
       quota_json: typeof row.quota_json === "string" ? JSON.parse(row.quota_json) : row.quota_json
-    })) });
+    }; })) });
   } catch (error) {
     return NextResponse.json({
       error: { code: "PLAN_LIST_FAILED", message: error instanceof Error ? error.message : "历史命题计划加载失败。" }
@@ -180,7 +185,7 @@ export async function POST(request: Request) {
     }
     const quota = mergeQuota(systemRule, ai.temporaryMinimums);
     const legalCount = outline.points.filter(isLegalPoint).length;
-    const points = outline.points.filter((point) => !isLegalPoint(point)).map((point) => ({
+    let points = outline.points.filter((point) => !isLegalPoint(point)).map((point) => ({
       name: point.name,
       code: point.code,
       single: quota.single,
@@ -195,6 +200,23 @@ export async function POST(request: Request) {
       ...(points.length ? [] : ["当前范围仅有法律法规考评点，请使用题库检索中的“法律法规智能体命题”。"]),
       ...(weights ? (Math.abs(weightTotal! - 100) < 0.001 ? [] : [`权重表合计为 ${weightTotal}%，不等于 100%。`]) : ["当前职业尚未保存理论知识权重表。"])
     ];
+    let commonReference: { groupId: string; codes: string[] } | undefined;
+    if (weights) {
+      try {
+        const common = await withTransaction(async (db) => {
+          const [nodes] = await db.execute<(RowDataPacket & CommonNode)[]>(
+            "SELECT id,node_code,name,requirement_json,source_ref_json FROM blueprint_nodes WHERE blueprint_version_id=? AND node_kind='assessment_point'", [outline.versionId]);
+          return commonPlanQuota(db, { occupationId: occupation.id, occupation: occupation.name, levelCode,
+            assessmentMode: "理论知识", blueprintVersions: {
+              outline: { id: outline.versionId, versionNo: outline.versionNo }, weights: { id: weights.versionId, versionNo: weights.versionNo },
+            } }, nodes.filter((node) => !isLegalPoint(node)), points);
+        });
+        if (common) {
+          points = common.points;
+          commonReference = { groupId: common.groupId, codes: common.shared.map((point) => point.code) };
+        }
+      } catch (error) { blockers.push(error instanceof Error ? error.message : "公共题组关联失败。"); }
+    }
     const validations = [
       { name: "职业与等级识别", status: "passed", detail: `${occupation.name} · ${levelLabels[levelCode]} · 理论知识` },
       { name: "理论知识细目表", status: "passed", detail: `已加载 V${outline.versionNo}，共 ${outline.points.length} 个考评点` },
@@ -222,6 +244,7 @@ export async function POST(request: Request) {
         temporaryMinimums: ai.temporaryMinimums,
         qualityRequirements: ai.qualityRequirements,
         points,
+        commonReference,
         minimumTotal: points.reduce((sum, point) => sum + point.total, 0),
         ruleHint: quota.hint
       }

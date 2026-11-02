@@ -9,6 +9,7 @@ import { quotaPointSchema, quotaTotal, validateQuota, type Scope } from "@/modul
 import { isLegalPoint } from "@/modules/authoring/legal-topics";
 import { createUlid } from "@/shared/database/ulid";
 import { withTransaction } from "@/shared/database/mysql";
+import { assertCommonPlanQuotaUnchanged } from "@/modules/authoring/common-generation";
 
 const schema = z.object({
   points: z.array(quotaPointSchema).min(1)
@@ -65,7 +66,9 @@ export async function PATCH(request: Request, { params }: Readonly<{ params: { p
       const [jobs] = await connection.execute<RowDataPacket[]>("SELECT id FROM authoring_generation_jobs WHERE plan_id=? LIMIT 1", [params.planId]);
       if (jobs.length) throw new Error("计划已开始执行，题量与版本已锁定；调整需求请新建计划。");
       const scope = typeof plan.scope_json === "string" ? JSON.parse(plan.scope_json) as Scope : plan.scope_json;
+      if (scope.commonGroupId) throw new Error("公共题组配额请从公共题组入口统一修改。");
       validateQuota(parsed.data.points, scope.levelCode, scope.assessmentMode);
+      await assertCommonPlanQuotaUnchanged(connection, params.planId, parsed.data.points);
       const [allNodes] = await connection.execute<(RowDataPacket & { node_code: string; name: string; requirement_json: unknown; source_ref_json: unknown })[]>(
         "SELECT node_code,name,requirement_json,source_ref_json FROM blueprint_nodes WHERE blueprint_version_id=? AND node_kind='assessment_point'", [scope.blueprintVersions.outline.id]);
       const nodes = allNodes.filter((node) => !isLegalPoint(node));

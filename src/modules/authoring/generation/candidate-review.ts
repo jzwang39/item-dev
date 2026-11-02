@@ -27,7 +27,7 @@ export function candidateReviewPrompt(snapshot: Snapshot, code: string, candidat
 每个候选必须返回唯一index，包含所有候选索引，不得遗漏。evidenceSourceIds只能选择输入中存在的稳定编号，不自行复制或编造原文。
 只返回JSON：{"checks":[{"index":0,"meetsQualityStandard":true,"answerCorrect":true,"evidenceSupported":true,"distinctTask":true,"score":90,"explanation":"说明原文如何支持答案及任务差异","evidenceSourceIds":["输入编号"],"requirements":[{"requirement":"适用标准原文要求","passed":true,"explanation":"核验理由"}]}]}。`,
     prompt: JSON.stringify({
-      职业: snapshot.scope.occupation, 等级: snapshot.scope.levelCode, 考评点: snapshot.nodes.find((node) => node.code === code),
+      职业: snapshot.scope.occupation, 等级: snapshot.scope.commonGroupId ? "五级、四级、三级共用基本要求" : snapshot.scope.levelCode, 考评点: snapshot.nodes.find((node) => node.code === code),
       [kind === "skill" ? "操作技能试题质量标准" : "试题质量标准"]: kind === "skill" ? snapshot.skillQualityStandard : snapshot.qualityStandard,
       质量要求: snapshot.qualityRequirements, 质量执行策略: generationQualityPolicy(kind, true),
       候选: candidates.map((candidate, index) => ({ index, ...candidate })), 已有试题: previous,

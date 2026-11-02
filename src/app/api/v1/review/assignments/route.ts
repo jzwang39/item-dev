@@ -72,6 +72,7 @@ export async function GET() {
           project_id: string;
           question_no: string;
           occupation_name: string;
+          occupation_id: string | null;
           level_code: string | null;
           assessment_mode: "theory" | "skill";
           question_type: string;
@@ -90,7 +91,7 @@ export async function GET() {
           review_opinion: string | null;
         })[]
       >(
-        `SELECT q.id, q.project_id, q.question_no, COALESCE(po.name,'通用') AS occupation_name, q.level_code, q.assessment_mode, q.question_type,
+        `SELECT q.id, q.project_id, q.question_no,q.occupation_id, COALESCE(po.name,'通用') AS occupation_name, q.level_code, q.assessment_mode, q.question_type,
                 qv.stem, qv.content_json, qv.answer_json, qv.analysis_text, qv.score_rubric_json, ra.id AS assignment_id, ra.assigned_at,
                 assigned.display_name AS assigned_expert_name,q.current_status,q.current_version_id,assigned.role AS reviewer_role,qrc.confirmed_at,
                 (SELECT rr.comment FROM review_records rr WHERE rr.question_version_id=qv.id ORDER BY rr.submitted_at DESC,rr.id DESC LIMIT 1) AS review_opinion
@@ -143,7 +144,7 @@ export async function GET() {
           projectId: question.project_id,
           questionNo: question.question_no,
           occupationName: question.occupation_name,
-          levelLabel: question.level_code ? levelLabels[question.level_code] ?? question.level_code : "通用",
+          levelLabel: question.level_code ? levelLabels[question.level_code] ?? question.level_code : question.occupation_id ? "公共 · 五四三级" : "通用",
           assessmentMode: question.assessment_mode,
           questionType: question.question_type,
           stem: question.stem,
@@ -155,7 +156,7 @@ export async function GET() {
             id: question.id,
             questionNo: question.question_no,
             occupationName: question.occupation_name,
-            levelLabel: question.level_code ? levelLabels[question.level_code] ?? question.level_code : "通用",
+            levelLabel: question.level_code ? levelLabels[question.level_code] ?? question.level_code : question.occupation_id ? "公共 · 五四三级" : "通用",
             assessmentMode: question.assessment_mode,
             questionType: question.question_type,
             stem: question.stem,

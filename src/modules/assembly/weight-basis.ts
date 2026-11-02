@@ -1,5 +1,6 @@
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { baseQuestionType, inventoryKey, rangeTargets, scaleRubric, type WeightRange } from "./weight-policy";
+import { formalQuestionSource } from "../authoring/common-question-policy";
 
 export const decode = <T,>(value: unknown): T => (typeof value === "string" ? JSON.parse(value) : value) as T;
 const normalize = (value: string) => value.normalize("NFKC").replace(/^\s*\d+(?:\.\d+)*[.、]?\s*/, "").replace(/\s+/g, "").trim();
@@ -84,6 +85,7 @@ export function mapPointRange(point: Record<string, unknown>, basis: WeightBasis
 }
 
 export type WeightedQuestion = {
+  commonReleaseId?: string;
   id: string; versionId: string; number: string; type: string; stem: string;
   content: unknown; answer: unknown; rubric: unknown; rangeKey: string; nodeIds: string[]; evaluationPoint: string;
 };
@@ -94,16 +96,17 @@ export async function loadWeightedQuestions(db: PoolConnection, context: {
   const [rows] = await db.execute<(RowDataPacket & {
     id: string; version_id: string; question_no: string; question_type: string; stem: string;
     content_json: unknown; answer_json: unknown; score_rubric_json: unknown; node_id: string | null; node_name: string; requirement_json: unknown;
+    common_release_id: string | null;
   })[]>(
     `SELECT q.id,q.current_version_id AS version_id,q.question_no,q.question_type,v.stem,v.content_json,v.answer_json,
-      v.score_rubric_json,IF(b.id IS NULL,NULL,n.id) AS node_id,n.name AS node_name,n.requirement_json
-     FROM questions q JOIN question_versions v ON v.id=q.current_version_id
-     LEFT JOIN question_assessment_points qp ON qp.question_version_id=v.id
-     LEFT JOIN blueprint_nodes n ON n.id=qp.blueprint_node_id AND n.node_kind='assessment_point'
+      v.score_rubric_json,IF(b.id IS NULL,NULL,n.id) AS node_id,n.name AS node_name,n.requirement_json,q.common_release_id
+     FROM ${formalQuestionSource} q JOIN question_versions v ON v.id=q.current_version_id
+     LEFT JOIN question_assessment_points qp ON qp.question_version_id=v.id AND q.common_group_id IS NULL
+     LEFT JOIN blueprint_nodes n ON n.id=COALESCE(q.blueprint_node_id,qp.blueprint_node_id) AND n.node_kind='assessment_point'
      LEFT JOIN blueprint_versions bv ON bv.id=n.blueprint_version_id
      LEFT JOIN blueprints b ON b.id=bv.blueprint_id AND b.project_id=q.project_id AND b.occupation_id=q.occupation_id
        AND b.level_code=q.level_code AND b.assessment_mode=q.assessment_mode
-     WHERE q.project_id=? AND q.occupation_id=? AND q.level_code=? AND q.assessment_mode=? AND q.current_status='stored'
+     WHERE q.project_id=? AND q.occupation_id=? AND q.level_code=? AND q.assessment_mode=? AND q.current_status='stored' AND q.archived_at IS NULL
      ORDER BY q.id,n.id FOR UPDATE`,
     [context.project_id, context.occupation_id, context.level_code, context.assessment_mode],
   );
@@ -122,6 +125,7 @@ export async function loadWeightedQuestions(db: PoolConnection, context: {
       id: first.id, versionId: first.version_id, number: first.question_no, type: baseQuestionType(first.question_type),
       stem: first.stem, content: decode(first.content_json), answer: decode(first.answer_json), rubric: decode(first.score_rubric_json),
       rangeKey: keys[0]!, nodeIds: group.map((row) => row.node_id!),
+      commonReleaseId: first.common_release_id ?? undefined,
       evaluationPoint: [...new Set(group.map((row) => row.node_name).filter(Boolean))].join("、"),
     });
   }

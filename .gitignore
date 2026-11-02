@@ -4,6 +4,7 @@ node_modules/
 out/
 docs/*
 !docs/业务数据清理工具.md
+!docs/基本要求公共题组.md
 .data/
 *.tsbuildinfo
 

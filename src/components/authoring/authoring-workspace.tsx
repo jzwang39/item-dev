@@ -7,6 +7,7 @@ import { SkillStructureEditor } from "./skill-structure-editor";
 import { SupplementButton } from "./supplement-button";
 import { ExecutionProgress } from "./execution-progress";
 import { ExpansionEvidence, type ExpansionDocumentPreview } from "./expansion-evidence";
+import { CommonPlanProgress } from "./common-plan-progress";
 import { ScoreRubric } from "@/components/questions/score-rubric";
 import { formatDirectionCode, type OccupationDirection } from "@/modules/authoring/occupations/directions";
 import type { TheoryWeightScope } from "@/modules/blueprints/theory-weights/standard";
@@ -4720,13 +4721,17 @@ type GeneratedPlan = {
   }>;
   minimumTotal: number;
   ruleHint: string;
+  commonReference?: { groupId: string; codes: string[] };
 };
 
 type HistoryPlan = {
+  common?: { ready: boolean; target: number; available: number; versionNo: number | null } | null;
   id: string;
   name: string;
   raw_requirement: string;
   scope_json: {
+    commonGroupId?: string;
+    commonReference?: { groupId: string; codes: string[] };
     occupation: string;
     levelCode: GeneratedPlan["levelCode"];
     assessmentMode: GeneratedPlan["assessmentMode"];
@@ -4870,6 +4875,7 @@ function AuthoringTaskPanel() {
     if (plan.generation_status === "stopped") return "已停止，保留成果";
     if (plan.generation_status === "queued" || plan.generation_status === "running") return "生成中";
     if (plan.generation_status === "partial") return "部分失败";
+    if (plan.common && !plan.common.ready) return "等待公共题组";
     if (plan.generation_status === "succeeded") return "已完成";
     if (plan.question_count > 0) return "已完成";
     return "待执行";
@@ -5460,6 +5466,7 @@ function AuthoringTaskPanel() {
       temporaryMinimums: quota.temporaryMinimums,
       qualityRequirements: quota.qualityRequirements,
       points: quota.points,
+      commonReference: scope.commonReference,
       minimumTotal: quota.minimumTotal,
       ruleHint: "历史计划快照",
     });
@@ -5658,6 +5665,7 @@ function AuthoringTaskPanel() {
       <h1 className="m-0 text-[30px] font-semibold tracking-[-0.02em] text-[#293242]">
         命题任务
       </h1>
+      <a className="mt-3 inline-block rounded-lg border border-[#d6e3ff] bg-white px-4 py-2 text-sm text-[#3567c9]" href="/workspace/common-questions">基本要求公共题组 · 五四三级统一生成、审核与发布</a>
       <p className="m-0 mt-3 text-[16px] text-[#7b879a]">
         自然语言提出需求，自动生成并执行命题计划，随后人工核查试题成果。
       </p>
@@ -5827,12 +5835,13 @@ function AuthoringTaskPanel() {
                 <tbody>
                   {generatedPlan.points.map((point) => (
                     <tr className="border-t border-[#e4eaf3]" key={point.code}>
-                      <td className="px-5 py-4 text-[#34445d]">{point.name}</td>
+                      <td className="px-5 py-4 text-[#34445d]">{point.name}{generatedPlan.commonReference?.codes.includes(point.code) ? "（公共引用）" : ""}</td>
                       {(generatedPlan.assessmentMode === "操作技能" ? ["practical"] as const : ["single", "multiple", "judgement"] as const).map(
                         (field) => (
                           <td className="px-5 py-3 text-center" key={field}>
                             <input
                               aria-label={`${point.name}${field}`}
+                              disabled={generatedPlan.commonReference?.codes.includes(point.code)}
                               className="h-9 w-16 rounded-md border border-[#cbdaf0] bg-white px-2 text-center text-[#34445d] outline-none focus:border-[#7691ee]"
                               min={0}
                               max={100}
@@ -5920,6 +5929,7 @@ function AuthoringTaskPanel() {
       ) : null}
       {confirmedPlanId || isViewingHistoryResult ? (
         <section className="mt-7 rounded-[22px] border border-[#d6e3ff] bg-white p-8 shadow-card">
+          {confirmedPlanId && <CommonPlanProgress planId={confirmedPlanId} />}
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <h2 className="m-0 text-[28px] font-semibold text-[#293242]">
@@ -5937,7 +5947,7 @@ function AuthoringTaskPanel() {
             <div className="mt-6 rounded-xl border border-[#d6e3ff] bg-[#f5f8ff] p-5">
               <div className="flex flex-wrap justify-between gap-3 text-[#385578]">
                 <span>
-                  {generationJob.status === "stopped" ? "生成已停止，保留试题可继续人工核查和专家审定" : generationJob.status === "cancelled" ? "任务已终止，不再生成试题" : generationJob.status === "succeeded" ? "全部试题已生成" : generationJob.status === "partial" ? "部分请求失败，已保留成功草稿"
+                  {generationJob.status === "stopped" ? "生成已停止，保留试题可继续人工核查和专家审定" : generationJob.status === "cancelled" ? "任务已终止，不再生成试题" : generationJob.status === "succeeded" ? "本生成任务已完成（公共部分请查看独立状态）" : generationJob.status === "partial" ? "部分请求失败，已保留成功草稿"
                     : generationJob.activity ? {
                       running: "正在执行请求（准备资料、调用模型或保存试题）",
                       queued: "等待后台领取（全局最多2路请求，较早任务优先）",
@@ -6215,6 +6225,7 @@ function AuthoringTaskPanel() {
               <option>待执行</option>
               <option>生成中</option>
               <option>部分失败</option>
+              <option>等待公共题组</option>
               <option>已暂停</option>
               <option>已停止，保留成果</option>
               <option>已终止</option>
@@ -6284,6 +6295,7 @@ function AuthoringTaskPanel() {
                     </td>
                     <td className="px-5 py-5 text-[#34445d]">
                       {getHistoryStage(row)}
+                      {row.common && !row.common.ready && <p className="text-xs text-amber-700">等待公共题组，整体尚未完成</p>}
                     </td>
                     <td className="px-5 py-5">
                       <ExecutionProgress
@@ -6291,6 +6303,7 @@ function AuthoringTaskPanel() {
                         target={row.generation_target ?? row.quota_json.minimumTotal}
                         started={Boolean(row.generation_status) || row.question_count > 0}
                       />
+                      {row.common && <p className="text-xs text-[#6980a4]">公共引用 {row.common.available}/{row.common.target} · {row.common.versionNo ? `V${row.common.versionNo}` : "未发布"}（不计重复生成）</p>}
                     </td>
                     <td className="px-5 py-5">
                       <button

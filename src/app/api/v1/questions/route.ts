@@ -8,6 +8,7 @@ import { createUlid } from "@/shared/database/ulid";
 import { query, withTransaction } from "@/shared/database/mysql";
 import { bulkStorageSchema } from "@/modules/authoring/question-storage-policy";
 import { storeQuestions } from "@/modules/authoring/question-storage";
+import { commonEditorialLevelFilter, formalQuestionSource } from "@/modules/authoring/common-question-policy";
 
 const levelCodes = [
   "level_5",
@@ -32,6 +33,7 @@ type QuestionRow = RowDataPacket & {
   question_no: string;
   occupation_name: string;
   occupation_code: string;
+  occupation_id: string | null;
   level_code: (typeof levelCodes)[number] | null;
   assessment_mode: (typeof assessmentModes)[number];
   question_type: string;
@@ -172,12 +174,12 @@ export async function GET(request: Request) {
           `SELECT q.question_no, q.question_type, qv.stem, qv.answer_json, qv.analysis_text,
                   GROUP_CONCAT(DISTINCT bn.node_code ORDER BY bn.node_code SEPARATOR '、') AS point_code,
                   GROUP_CONCAT(DISTINCT bn.name ORDER BY bn.ordinal SEPARATOR '、') AS point_name
-             FROM questions q
+             FROM ${formalQuestionSource} q
              INNER JOIN question_versions qv ON qv.id = q.current_version_id
-             LEFT JOIN question_assessment_points qap ON qap.question_version_id = qv.id
-             LEFT JOIN blueprint_nodes bn ON bn.id = qap.blueprint_node_id
+             LEFT JOIN question_assessment_points qap ON qap.question_version_id = qv.id AND q.common_group_id IS NULL
+             LEFT JOIN blueprint_nodes bn ON bn.id = COALESCE(q.blueprint_node_id,qap.blueprint_node_id)
             WHERE q.occupation_id = ? AND q.level_code = ? AND q.assessment_mode = ?
-              AND q.current_status IN ('approved', 'stored') AND q.archived_at IS NULL
+              AND q.current_status = 'stored' AND q.archived_at IS NULL
             GROUP BY q.id, q.question_no, q.question_type, qv.stem, qv.answer_json, qv.analysis_text
             ORDER BY q.question_no`,
           [occupationId, levelCode!, assessmentMode!],
@@ -305,10 +307,10 @@ export async function GET(request: Request) {
              ON pol.occupation_id = po.id
             AND pol.level_code = scope.level_code
             AND pol.assessment_mode = scope.assessment_mode
-           LEFT JOIN questions q ON q.occupation_id = po.id
+           LEFT JOIN ${formalQuestionSource} q ON q.occupation_id = po.id
                                AND q.level_code = scope.level_code
                                AND q.assessment_mode = scope.assessment_mode
-                               AND q.current_status IN ('approved', 'stored')
+                               AND q.current_status = 'stored'
                                AND q.archived_at IS NULL
           WHERE po.status = 'active'
             AND (
@@ -371,8 +373,8 @@ export async function GET(request: Request) {
     values.push(assessmentMode!);
   }
   if (levelCodes.includes(levelCode as (typeof levelCodes)[number])) {
-    conditions.push("q.level_code = ?");
-    values.push(levelCode!);
+    conditions.push(commonEditorialLevelFilter());
+    values.push(levelCode!, levelCode!);
   } else if (levelCode === "generic") {
     conditions.push("q.level_code IS NULL AND q.occupation_id IS NULL");
   }
@@ -420,7 +422,7 @@ export async function GET(request: Request) {
       return NextResponse.json({ data: candidates });
     }
     const rows = await query<QuestionRow[]>(
-      `SELECT q.id, q.question_no, COALESCE(po.name,'通用') AS occupation_name, COALESCE(po.code,'') AS occupation_code,
+      `SELECT q.id, q.question_no,q.occupation_id, COALESCE(po.name,'通用') AS occupation_name, COALESCE(po.code,'') AS occupation_code,
               q.level_code, q.assessment_mode, q.question_type, q.current_status, q.difficulty,
               q.created_at, q.current_version_id, qv.stem, qv.content_json, qv.answer_json, qv.analysis_text,
               EXISTS (SELECT 1 FROM question_review_confirmations qrc WHERE qrc.question_version_id=q.current_version_id) AS is_confirmed,
@@ -450,10 +452,12 @@ export async function GET(request: Request) {
         question_type: string;
       })[]
     >(
-      `SELECT DISTINCT q.level_code, q.assessment_mode, q.question_type
+      `SELECT DISTINCT COALESCE(cp.level_code,q.level_code) AS level_code, q.assessment_mode, q.question_type
          FROM questions q INNER JOIN projects p ON p.id = q.project_id
+         LEFT JOIN common_question_members cm ON cm.question_id=q.id
+         LEFT JOIN common_question_points cp ON cp.group_id=cm.group_id AND cp.point_key=cm.point_key
         WHERE p.status = 'active' AND q.archived_at IS NULL
-        ORDER BY q.assessment_mode, q.level_code, q.question_type`,
+        ORDER BY q.assessment_mode, level_code, q.question_type`,
     );
     return NextResponse.json({
       data: rows.map((row) => ({
@@ -462,7 +466,7 @@ export async function GET(request: Request) {
         occupationName: row.occupation_name,
         occupationCode: row.occupation_code,
         levelCode: row.level_code ?? "generic",
-        levelLabel: row.level_code ? levelLabels[row.level_code] : "通用",
+        levelLabel: row.level_code ? levelLabels[row.level_code] : row.occupation_id ? "公共 · 五四三级（维护版本）" : "通用",
         assessmentMode: row.assessment_mode,
         questionType: row.question_type,
         status: row.current_status,
@@ -663,6 +667,8 @@ export async function DELETE(request: Request) {
       const question = rows[0];
       if (!question || question.current_status !== "draft")
         throw new Error("仅草稿状态的试题可以删除。");
+      const [common] = await connection.execute<RowDataPacket[]>("SELECT question_id FROM common_question_members WHERE question_id=?", [question.id]);
+      if (common.length) throw new Error("公共试题请在公共题组统一停用，不能从等级题库删除。");
       await connection.execute(
         "UPDATE questions SET current_status = 'archived', archived_at = NOW(3), row_version = row_version + 1 WHERE id = ?",
         [question.id],

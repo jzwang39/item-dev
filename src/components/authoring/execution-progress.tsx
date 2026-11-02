@@ -1,7 +1,7 @@
 import React from "react";
 
-export function ExecutionProgress({ generated, target, started }: {
-  generated: number; target: number; started: boolean;
+export function ExecutionProgress({ generated, target, started, completedLabel = "已生成" }: {
+  generated: number; target: number; started: boolean; completedLabel?: string;
 }) {
   const total = Number.isFinite(target) ? Math.max(0, target) : 0;
   const completed = Number.isFinite(generated) ? Math.max(0, generated) : 0;
@@ -9,7 +9,7 @@ export function ExecutionProgress({ generated, target, started }: {
   const percent = Math.min(100, Math.floor(completed * 100 / total));
   return (
     <div className="min-w-[150px] text-sm">
-      <p className="m-0 whitespace-nowrap text-[#34445d]">{started ? "已生成" : "未开始"} {completed} / {total} 道</p>
+      <p className="m-0 whitespace-nowrap text-[#34445d]">{started ? completedLabel : "未开始"} {completed} / {total} 道</p>
       <div className="mt-2 flex items-center gap-2">
         <div
           role="progressbar" aria-label="执行进度" aria-valuemin={0} aria-valuemax={total} aria-valuenow={Math.min(completed, total)}

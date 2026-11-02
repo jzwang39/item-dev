@@ -29,6 +29,8 @@ const jobWhere = `business_id IN (${businessIds}) OR id IN (
 // Keep them, their source bindings, and all uploaded files.
 export const cleanupTargets: CleanupTarget[] = [
   ...[
+    "common_question_plan_links", "common_question_release_items", "common_question_releases",
+    "common_question_members", "common_question_points", "common_question_groups",
     "paper_item_points", "paper_items", "papers", "assembly_runs", "assembly_plan_slots",
     "assembly_plan_versions", "assembly_plans", "paper_structure_sections",
     "paper_structure_versions", "paper_structures", "question_revision_links",

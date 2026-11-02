@@ -141,6 +141,8 @@ export async function confirmWeightedAdjustment(db: PoolConnection, planId: stri
 }
 
 export async function executeWeightedAssembly(db: PoolConnection, planId: string, actorId: string) {
+  // Serialize publication/suspension against selecting immutable public versions.
+  await db.execute("SELECT id FROM authoring_generation_capacity WHERE id=1 FOR UPDATE");
   const context = await loadContext(db, planId);
   const presentation: PaperPresentation = {
     format: paperFormat(context.plan.assessment_mode), occupationName: context.plan.occupation_name,
@@ -204,6 +206,7 @@ export async function executeWeightedAssembly(db: PoolConnection, planId: string
         const range = context.basis.ranges.find((item) => item.key === cell.range)!;
         const content = {
           ...parseRecord(question.content),
+          commonReleaseId: question.commonReleaseId,
           assemblyWeightRange: { ...range, direction: context.basis.direction, weightVersionId: context.basis.versionId },
           assemblyPresentation: { evaluationPoint: question.evaluationPoint, skillExam: parseRecord(parseRecord(question.content).skillExam) },
         };
@@ -228,6 +231,7 @@ export async function executeWeightedAssembly(db: PoolConnection, planId: string
     }
     const summary = {
       policy: "strict_range_score_v1", basis: context.basis, structureVersionId: context.plan.paper_structure_version_id,
+      commonReleaseIds: [...new Set(context.questions.flatMap((question) => question.commonReleaseId ? [question.commonReleaseId] : []))],
       presentation, excluded: context.excluded, ranges: context.targets.map((range) => ({
         ...range, targetScore: range.targetCents / 100, actualScore: actual.get(range.key)! / 100,
       })),

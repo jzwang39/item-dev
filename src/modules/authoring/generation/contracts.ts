@@ -19,6 +19,8 @@ export const quotaPointSchema = z.object({
 });
 export type QuotaPoint = z.infer<typeof quotaPointSchema>;
 export type Scope = {
+  commonGroupId?: string;
+  commonReference?: { groupId: string; codes: string[] };
   occupationId: string; occupation: string;
   levelCode: "level_5" | "level_4" | "level_3" | "level_2" | "level_1";
   assessmentMode: "理论知识" | "操作技能";

@@ -38,15 +38,23 @@ export async function terminateGeneration(planId: string, actorId: string) {
       if (versions.length !== 1 || versions[0].id !== question.current_version_id || versions[0].version_no !== 1) continue;
       const source = typeof versions[0].source_snapshot_json === "string" ? JSON.parse(versions[0].source_snapshot_json) : versions[0].source_snapshot_json;
       if (source?.planId !== planId || source?.jobId !== job.id) continue;
+      const [common] = await db.execute<(RowDataPacket & { group_id: string; origin_json: unknown })[]>(
+        "SELECT group_id,origin_json FROM common_question_members WHERE question_id=?", [question.id]);
+      if (common.length) {
+        const origin = typeof common[0].origin_json === "string" ? JSON.parse(common[0].origin_json) : common[0].origin_json;
+        if (origin?.kind !== "generated" || origin?.planId !== planId) continue;
+      }
       const [references] = await db.execute<(RowDataPacket & { protected: number })[]>(
         `SELECT (
           EXISTS(SELECT 1 FROM review_assignments WHERE question_id=?) OR
           EXISTS(SELECT 1 FROM review_records WHERE question_version_id=?) OR
           EXISTS(SELECT 1 FROM question_review_confirmations WHERE question_version_id=?) OR
           EXISTS(SELECT 1 FROM paper_items WHERE question_id=?) OR
+          EXISTS(SELECT 1 FROM common_question_release_items WHERE question_id=?) OR
+          EXISTS(SELECT 1 FROM authoring_generation_slots WHERE question_id=? AND job_id<>?) OR
           EXISTS(SELECT 1 FROM question_revision_links WHERE from_question_version_id=? OR to_question_version_id=?)
         ) AS protected`,
-        [question.id, versions[0].id, versions[0].id, question.id, versions[0].id, versions[0].id],
+        [question.id, versions[0].id, versions[0].id, question.id, question.id, question.id, job.id, versions[0].id, versions[0].id],
       );
       if (references[0].protected) continue;
       // Keep the original draft snapshot in the audit trail, not in the active bank.
@@ -62,6 +70,7 @@ export async function terminateGeneration(planId: string, actorId: string) {
         await db.execute(`DELETE FROM ${table} WHERE question_version_id=?`, [versions[0].id]);
       }
       await db.execute("DELETE FROM question_versions WHERE id=?", [versions[0].id]);
+      await db.execute("DELETE FROM common_question_members WHERE question_id=?", [question.id]);
       await db.execute("DELETE FROM questions WHERE id=?", [question.id]);
       deletedQuestions++;
     }

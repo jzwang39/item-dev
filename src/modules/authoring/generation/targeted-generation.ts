@@ -121,7 +121,7 @@ export async function generateTargeted(input: {
           break;
         }
         const analysisPrompt = anglePlanningPrompt(code, snapshot.nodes.find((node) => node.code === code)!.name, slot.type,
-          previous, page, state, { 职业: snapshot.scope.occupation, 等级: snapshot.scope.levelCode }, {
+          previous, page, state, { 职业: snapshot.scope.occupation, 等级: snapshot.scope.commonGroupId ? "五级、四级、三级共用基本要求" : snapshot.scope.levelCode }, {
             kind, content: snapshot.qualityStandard,
             requirements: snapshot.qualityRequirements,
           });
@@ -228,7 +228,7 @@ export async function generateTargeted(input: {
       const corrected = await call("repair", {
         instruction: "你是职业技能试题修订助手。修复给定候选及具体校验错误，不另找考评点、不降低完整质量标准。答案键和格式可修复，但答案对错、唯一解必须依据原文重新论证，不能猜答案或随意删除正确选项。无法保证正确性时返回questions=[]。只返回与原题相同结构的questions JSON数组。",
         prompt: JSON.stringify({
-          职业: snapshot.scope.occupation, 等级: snapshot.scope.levelCode,
+          职业: snapshot.scope.occupation, 等级: snapshot.scope.commonGroupId ? "五级、四级、三级共用基本要求" : snapshot.scope.levelCode,
           考评点: { code, name: snapshot.nodes.find((node) => node.code === code)!.name }, 指定题型: slot.type,
           冻结依据: snapshot.nodes.find((node) => node.code === code)!.theoryContext,
           考查任务: slot.angle, 原始候选响应: originalResponse, 具体错误: parsed.invalidReasons,
