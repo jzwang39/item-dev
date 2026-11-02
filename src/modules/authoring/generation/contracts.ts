@@ -35,7 +35,7 @@ export type Snapshot = {
   skillStructure?: unknown;
   model: { provider: string; baseUrl: string; model: string };
 };
-export type UnitSpec = { code: string; type: "mixed"; ordinals: number[]; slotTypes: QuestionType[] };
+export type UnitSpec = { code: string; type: QuestionType | "mixed"; ordinals: number[]; slotTypes: QuestionType[] };
 export type BatchSpec = { ordinal: number; target: number; units: UnitSpec[] };
 
 export function quotaTotal(point: QuotaPoint) {
@@ -58,7 +58,7 @@ export function validateQuota(points: QuotaPoint[], level: Scope["levelCode"], m
   if (!points.length) throw new Error("计划没有考评点。");
 }
 
-export function buildBatches(points: QuotaPoint[]): BatchSpec[] {
+export function buildBatches(points: QuotaPoint[], splitByQuestionType = false): BatchSpec[] {
   const batches: BatchSpec[] = [];
   let current: BatchSpec = { ordinal: 1, target: 0, units: [] };
   let ordinal = 0;
@@ -69,18 +69,23 @@ export function buildBatches(points: QuotaPoint[]): BatchSpec[] {
   for (const point of points) {
     const total = quotaTotal(point);
     if (current.target && current.target + total > BUSINESS_BATCH_LIMIT) flush();
-    const types = questionTypes.flatMap((type) => Array<QuestionType>(point[type] ?? 0).fill(type));
-    let offset = 0;
-    while (offset < types.length) {
-      if (current.target === BUSINESS_BATCH_LIMIT) flush();
-      const count = Math.min(types.length - offset, MODEL_REQUEST_LIMIT, BUSINESS_BATCH_LIMIT - current.target);
-      current.units.push({
-        code: point.code, type: "mixed",
-        ordinals: Array.from({ length: count }, () => ++ordinal),
-        slotTypes: types.slice(offset, offset + count),
-      });
-      current.target += count;
-      offset += count;
+    const typeGroups = splitByQuestionType
+      ? questionTypes.map((type) => Array<QuestionType>(point[type] ?? 0).fill(type)).filter((types) => types.length)
+      : [questionTypes.flatMap((type) => Array<QuestionType>(point[type] ?? 0).fill(type))];
+    for (const types of typeGroups) {
+      let offset = 0;
+      while (offset < types.length) {
+        if (current.target === BUSINESS_BATCH_LIMIT) flush();
+        const count = Math.min(types.length - offset, MODEL_REQUEST_LIMIT, BUSINESS_BATCH_LIMIT - current.target);
+        const slotTypes = types.slice(offset, offset + count);
+        current.units.push({
+          code: point.code, type: splitByQuestionType ? slotTypes[0] : "mixed",
+          ordinals: Array.from({ length: count }, () => ++ordinal),
+          slotTypes,
+        });
+        current.target += count;
+        offset += count;
+      }
     }
   }
   flush();

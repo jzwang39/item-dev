@@ -16,7 +16,7 @@ const snapshot: Snapshot = {
 
 function fixture() {
   const units: SupplementUnit[] = [{
-    id: "original", batch_id: "batch", ordinal: 1, point_code: "A", status: "stopped", attempts: 12,
+    id: "original", batch_id: "batch", ordinal: 1, point_code: "A", question_type: "mixed", status: "stopped", attempts: 12,
     retry_state_json: { targetedAttempts: 6, failures: [{ code: "duplicate", message: "题干重复" }] },
   }];
   const slots: SupplementSlot[] = ["single", "single", "single", "single", "judgement", "judgement"].map((type, index) => ({
@@ -34,6 +34,15 @@ test("按冻结逐点逐题型最低题量只补空槽，保留成功题的题�
   assert.equal(manifest.missingQuestions, 3);
   assert.deepEqual(manifest.groups[0].slots.map((slot) => slot.question_type), ["single", "judgement", "judgement"]);
   assert.deepEqual(manifest.groups[0].slots.map((slot) => slot.ordinal), [4, 5, 6]);
+});
+
+test("公共题组停止后仍按题型拆分缺额请求", () => {
+  const { units, slots } = fixture();
+  const common = { ...snapshot, scope: { ...snapshot.scope, commonGroupId: "group" } };
+  const manifest = supplementManifest(common, units, slots);
+  assert.deepEqual(manifest.groups.map((group) => group.slots.map((slot) => slot.question_type)), [
+    ["single"], ["judgement", "judgement"],
+  ]);
 });
 
 test("总数相同但题型或考评点配额错位也拒绝，不用其他题抵缺额", () => {
@@ -86,7 +95,8 @@ function fakeDatabase(status: string | null = "stopped", outlineConfirmed = true
     writes.push({ sql, params });
     if (sql.startsWith("INSERT INTO authoring_generation_units")) {
       data.units.push({ id: params[0] as string, batch_id: params[2] as string, ordinal: params[3] as number,
-        point_code: params[4] as string, status: "queued", attempts: 0, retry_state_json: JSON.parse(params[6] as string) });
+        point_code: params[4] as string, question_type: params[5] as SupplementUnit["question_type"],
+        status: "queued", attempts: 0, retry_state_json: JSON.parse(params[6] as string) });
     } else if (sql.startsWith("UPDATE authoring_generation_slots")) {
       for (const slot of data.slots) if (!slot.question_id && slot.unit_id === params[2] && params.slice(3).includes(slot.id)) slot.unit_id = params[0] as string;
     } else if (sql.startsWith("UPDATE authoring_generation_jobs")) job.status = "queued";

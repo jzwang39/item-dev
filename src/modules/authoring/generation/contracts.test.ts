@@ -57,6 +57,14 @@ test("200个考评点各1单选1判断，通过执行校验并拆为4批共400�
   assert.equal(new Set(ordinals).size, 400);
   assert.deepEqual(ordinals, Array.from({ length: 400 }, (_, index) => index + 1));
 });
+test("公共题组按题型拆分请求，判断题不会与单选共用mixed单元", () => {
+  const batches = buildBatches(points(1), true);
+  const units = batches.flatMap((batch) => batch.units);
+  assert.deepEqual(units.map((unit) => ({ type: unit.type, slots: unit.slotTypes })), [
+    { type: "single", slots: ["single", "single", "single", "single"] },
+    { type: "judgement", slots: ["judgement", "judgement"] },
+  ]);
+});
 test("部分无效响应保留有效条目", () => {
   const output = parseQuestions(JSON.stringify({ questions: [question(), question({ stem: "短" })] }), "A", "single");
   assert.equal(output.valid.length, 1);

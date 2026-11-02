@@ -9,7 +9,7 @@ test("操作技能内容结构表按Word格式输出已维护字段", async () =
     rows: [{ code: "A", name: "理念宣传", selection: "required", score: 100, minutes: 90, method: "实操" }],
   });
   const { value } = await extractRawText({ buffer: bytes });
-  for (const expected of ["操作技能考核内容结构表", "职业：劝募员", "理念宣传", "必考", "100", "实操"]) {
+  for (const expected of ["劝募员操作技能考评内容结构表", "技能考核路径：公益慈善宣讲", "理念宣传", "必考", "100", "实操"]) {
     assert.ok(value.includes(expected), expected);
   }
 });

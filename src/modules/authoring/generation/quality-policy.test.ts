@@ -29,6 +29,10 @@ test("理论按当前考点和题型缺额出题，首轮与补题均保留完�
     assert.match(data.质量执行策略.不可放宽底线, /单选唯一解/);
     assert.match(data.质量执行策略.多样性策略, targeted ? /同一知识、不同考查任务/ : /首轮/);
     assert.deepEqual(data.已有试题, [{ stem: "已有试题" }]);
+    if (targeted) {
+      assert.match(prompt.instruction, /"questionType":"judgement"/);
+      assert.match(prompt.instruction, /"options":\[\]/);
+    }
   }
 });
 

@@ -150,7 +150,10 @@ export async function startGeneration(planId: string, actorId: string, retryFail
       }),
       model: { provider: connection.provider, baseUrl: connection.baseUrl, model: connection.model },
     };
-    const batches = buildBatches(snapshot.points);
+    // Public basic questions never mix single-choice and judgement output in
+    // one model request. Their formats differ materially and share one review
+    // path poorly, especially during a retry.
+    const batches = buildBatches(snapshot.points, Boolean(scope.commonGroupId));
     const jobId = createUlid();
     await db.execute("INSERT INTO authoring_generation_jobs(id,plan_id,snapshot_json,target_count,created_by) VALUES(?,?,?,?,?)",
       [jobId, planId, JSON.stringify(snapshot), batches.reduce((sum, batch) => sum + batch.target, 0), actorId]);
@@ -513,7 +516,11 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
     "SELECT id,ordinal,question_type FROM authoring_generation_slots WHERE unit_id=? AND question_id IS NULL ORDER BY ordinal", [unit.id],
   );
   if (!missing.length) return { questions: [], failures: [], state };
-  const requested = state.targeted ? missing.slice(0, 1) : missing;
+  // Public basic questions are generated from their frozen public blueprint.
+  // Do not redirect a retry into the no-textbook expansion workflow: it is
+  // designed for ordinary plans whose frozen point has no usable basis text.
+  const useTargetedFlow = state.targeted && !snapshot.scope.commonGroupId;
+  const requested = useTargetedFlow ? missing.slice(0, 1) : missing;
   const node = snapshot.nodes.find((item) => item.code === unit.point_code)!;
   const [metadata] = await query<(RowDataPacket & { name: string; requirement_json: unknown; source_ref_json: unknown })[]>(
     "SELECT name,requirement_json,source_ref_json FROM blueprint_nodes WHERE id=?", [node.id],
@@ -564,7 +571,7 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
       });
   });
   unit.retry_state_json = state;
-  if (state.targeted || (kind === "theory" && (!node.chapterIds.length || snapshot.scope.commonGroupId))) {
+  if (useTargetedFlow || (kind === "theory" && !node.chapterIds.length && !snapshot.scope.commonGroupId)) {
     state.targeted = true;
     const context = snapshot.scope.assessmentMode === "操作技能" ? node.skillContext : node.theoryContext;
     const sources = buildEvidenceCatalog(context, evidenceChapters, node.name);
@@ -590,12 +597,12 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
     : theoryQuestionPrompt(snapshot, node.code, requested.map((slot) => slot.question_type), previous, excerpts, unit.attempts, state.targeted);
   const content = await callGenerationModel(snapshot, connection.apiKey, { instruction, prompt }, cancellation);
   let parsed: ReturnType<typeof parseQuestions>;
-  try { parsed = parseQuestions(content, node.code, snapshot.scope.assessmentMode === "操作技能" ? "practical" : state.targeted ? requested[0].question_type : unit.question_type,
+  try { parsed = parseQuestions(content, node.code, snapshot.scope.assessmentMode === "操作技能" ? "practical" : useTargetedFlow ? requested[0].question_type : unit.question_type,
     snapshot.scope.occupation, { judgement: kind === "theory" }); }
   catch (error) { throw new GenerationFailure("invalid_json", error instanceof Error ? error.message : "试题 JSON 无效。"); }
   const failures = parsed.invalidReasons.map(validationFailure);
   if (!parsed.valid.length && !failures.length) failures.push({ code: "invalid_content", message: "模型未返回试题，新增有效题为0。" });
-  return { questions: state.targeted ? parsed.valid.slice(0, 1) : parsed.valid, failures, state };
+  return { questions: useTargetedFlow ? parsed.valid.slice(0, 1) : parsed.valid, failures, state };
 }
 
 async function callGenerationModel(snapshot: Snapshot, apiKey: string, input: { instruction: string; prompt: string }, cancellation: AbortSignal) {

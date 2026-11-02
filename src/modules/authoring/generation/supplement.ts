@@ -9,7 +9,7 @@ import { assertCommonGeneration } from "../common-generation";
 const MAX_GAPS_PER_REQUEST = 6;
 
 export type SupplementSlot = { id: string; unit_id: string; ordinal: number; question_type: QuestionType; question_id: string | null };
-export type SupplementUnit = { id: string; batch_id: string; ordinal: number; point_code: string; status: string; attempts: number; retry_state_json: unknown };
+export type SupplementUnit = { id: string; batch_id: string; ordinal: number; point_code: string; question_type: QuestionType | "mixed"; status: string; attempts: number; retry_state_json: unknown };
 export type SupplementSummary = { roundId: string; target: number; preservedQuestions: number; missingQuestions: number; requests: number };
 
 export function supplementManifest(snapshot: Snapshot, units: SupplementUnit[], slots: SupplementSlot[]) {
@@ -38,12 +38,18 @@ export function supplementManifest(snapshot: Snapshot, units: SupplementUnit[], 
     throw new Error("逐考评点、逐题型槽位与冻结最低题量不一致，不能补题。");
   }
   const groups = [...missing.values()].flatMap((group) => {
-    const sorted = group.slots.sort((a, b) => a.ordinal - b.ordinal);
-    // Bound each request's gap size; generation/repair budgets are per slot,
-    // not a shared six-attempt allowance for the entire group.
-    return Array.from({ length: Math.ceil(sorted.length / MAX_GAPS_PER_REQUEST) }, (_, index) => ({
-      unit: group.unit, slots: sorted.slice(index * MAX_GAPS_PER_REQUEST, (index + 1) * MAX_GAPS_PER_REQUEST),
-    }));
+    const typeGroups = group.unit.question_type === "mixed" && snapshot.scope.commonGroupId
+      ? [...new Map(questionTypes.map((type) => [type, group.slots.filter((slot) => slot.question_type === type)]))
+        .values()].filter((items) => items.length)
+      : [group.slots];
+    return typeGroups.flatMap((items) => {
+      const sorted = items.sort((a, b) => a.ordinal - b.ordinal);
+      // Bound each request's gap size; generation/repair budgets are per slot,
+      // not a shared six-attempt allowance for the entire group.
+      return Array.from({ length: Math.ceil(sorted.length / MAX_GAPS_PER_REQUEST) }, (_, index) => ({
+        unit: group.unit, slots: sorted.slice(index * MAX_GAPS_PER_REQUEST, (index + 1) * MAX_GAPS_PER_REQUEST),
+      }));
+    });
   });
   const missingQuestions = groups.reduce((sum, group) => sum + group.slots.length, 0);
   if (!missingQuestions) throw new Error("已满足计划最低题量，无需补题。");
@@ -78,7 +84,7 @@ export async function queueSupplementRound(db: PoolConnection, planId: string, a
   await assertFrozenPlanBasis(db, plan.project_id, snapshot.scope);
   await assertOutlineConfirmed(db, snapshot.scope.blueprintVersions.outline.id);
   const [units] = await db.execute<(RowDataPacket & SupplementUnit)[]>(
-    "SELECT id,batch_id,ordinal,point_code,status,attempts,retry_state_json FROM authoring_generation_units WHERE job_id=? FOR UPDATE", [job.id],
+    "SELECT id,batch_id,ordinal,point_code,question_type,status,attempts,retry_state_json FROM authoring_generation_units WHERE job_id=? FOR UPDATE", [job.id],
   );
   if (units.some((unit) => ["queued", "running", "failed"].includes(unit.status))) {
     throw new Error("停止任务仍有未关闭请求，不能重复发起补题。");

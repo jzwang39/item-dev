@@ -9,6 +9,7 @@ import {
   TableLayoutType,
   TableRow,
   TextRun,
+  VerticalAlignTable,
   WidthType,
 } from "docx";
 
@@ -43,30 +44,27 @@ function text(value: unknown, fallback = "待核对") {
   return value === null || value === undefined || value === "" ? fallback : String(value);
 }
 
-function cell(value: string, bold = false, shade?: string) {
+function cell(value: string, options: {
+  bold?: boolean;
+  shade?: string;
+  columnSpan?: number;
+  rowSpan?: number;
+  fontSize?: number;
+} = {}) {
   return new TableCell({
-    shading: shade ? { fill: shade } : undefined,
+    verticalAlign: VerticalAlignTable.CENTER,
+    shading: options.shade ? { fill: options.shade } : undefined,
+    columnSpan: options.columnSpan,
+    rowSpan: options.rowSpan,
     borders: { top: border, bottom: border, left: border, right: border },
     children: [new Paragraph({
       alignment: AlignmentType.CENTER,
-      children: [new TextRun({ text: value, bold, font: "宋体", size: 21 })],
+      children: [new TextRun({ text: value, bold: options.bold, font: "宋体", size: options.fontSize ?? 21 })],
     })],
   });
 }
 
-function table(headers: string[], rows: string[][], widths: number[]) {
-  return new Table({
-    width: { size: 100, type: WidthType.PERCENTAGE },
-    layout: TableLayoutType.FIXED,
-    rows: [
-      new TableRow({ tableHeader: true, children: headers.map((item) => cell(item, true, "D9E1F2")) }),
-      ...rows.map((row) => new TableRow({ children: row.map((item) => cell(item)) })),
-    ],
-    columnWidths: widths,
-  });
-}
-
-function document(title: string, subtitle: string, children: Array<Paragraph | Table>) {
+function document(title: string, subtitle: string, children: Array<Paragraph | Table>, landscape = false) {
   return new Document({
     title,
     styles: { default: { document: {
@@ -74,7 +72,10 @@ function document(title: string, subtitle: string, children: Array<Paragraph | T
       paragraph: { spacing: { after: 140, line: 300 } },
     } } },
     sections: [{
-      properties: { page: { margin: { top: 1100, bottom: 1100, left: 1000, right: 1000 } } },
+      properties: { page: {
+        size: landscape ? { width: 16840, height: 11906, orientation: "landscape" } : undefined,
+        margin: { top: 760, bottom: 760, left: 720, right: 720 },
+      } },
       children: [
         new Paragraph({
           alignment: AlignmentType.CENTER,
@@ -99,19 +100,48 @@ export async function createSkillStructureWord(input: {
   totalMinutes: number | null;
   rows: StructureRow[];
 }) {
-  const rows = input.rows.map((row) => [
-    row.code,
-    row.name,
-    row.selection === "required" ? "必考" : row.selection === "optional" ? "选考" : text(row.selection),
-    row.score === null ? "待核对" : String(row.score),
-    row.minutes === null ? "待核对" : String(row.minutes),
-    text(row.method),
-  ]);
-  rows.push(["合计", input.pathway || "待核对", "—", "100", input.totalMinutes === null ? "待核对" : String(input.totalMinutes), "—"]);
+  const value = (row: StructureRow, key: "selection" | "score" | "minutes" | "method") => {
+    const raw = row[key];
+    if (key === "selection") return raw === "required" ? "必考" : raw === "optional" ? "选考" : text(raw);
+    return raw === null ? "待核对" : String(raw);
+  };
+  const total = input.totalMinutes === null ? "待核对" : `${input.totalMinutes}min`;
+  const matrix = new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    layout: TableLayoutType.FIXED,
+    rows: [
+      new TableRow({ tableHeader: true, children: [
+        cell("考评范围", { bold: true, shade: "D9E1F2" }),
+        ...input.rows.map((row) => cell(row.name, { bold: true, shade: "D9E1F2" })),
+        cell("合计", { bold: true, shade: "D9E1F2" }),
+      ] }),
+      new TableRow({ children: [
+        cell("选考方式", { bold: true }),
+        ...input.rows.map((row) => cell(value(row, "selection"))),
+        cell("—"),
+      ] }),
+      new TableRow({ children: [
+        cell("考核权重（%）", { bold: true }),
+        ...input.rows.map((row) => cell(value(row, "score"))),
+        cell("100"),
+      ] }),
+      new TableRow({ children: [
+        cell("考核时间（min）", { bold: true }),
+        ...input.rows.map((row) => cell(value(row, "minutes"))),
+        cell(total),
+      ] }),
+      new TableRow({ children: [
+        cell("考核形式", { bold: true }),
+        ...input.rows.map((row) => cell(value(row, "method"), { fontSize: 19 })),
+        cell("—"),
+      ] }),
+    ],
+    columnWidths: [1800, ...input.rows.map(() => Math.max(1800, Math.floor(12500 / Math.max(1, input.rows.length)))), 1200],
+  });
   return Packer.toBuffer(document(
-    "操作技能考核内容结构表",
-    `职业：${input.occupationName}    等级：${input.levelLabel}`,
-    [table(["考评要求", "考评范围", "选考方式", "鉴定比重(%)", "考试时间(min)", "考核方式"], rows, [1300, 3000, 1400, 1500, 1600, 2200])],
+    `${input.occupationName}操作技能考评内容结构表（${input.levelLabel}）`,
+    `技能考核路径：${input.pathway || "待核对"}`,
+    [matrix], true,
   ));
 }
 
@@ -120,29 +150,70 @@ export async function createSkillOutlineWord(input: {
   levelLabel: string;
   rows: OutlineRow[];
 }) {
-  const rows = input.rows.map((item) => {
+  const items = input.rows.map((item) => {
     const requirement = record(item.requirement);
-    return [
-      text(requirement.primaryNo ?? requirement.level1Code),
-      text(requirement.primaryName ?? requirement.level1Name),
-      text(requirement.primaryWeight ?? requirement.level1Weight),
-      text(requirement.secondaryNo ?? requirement.level2Code),
-      text(requirement.secondaryName ?? requirement.level2Name),
-      text(requirement.secondaryWeight ?? requirement.level2Weight),
-      requirement.selection === "required" ? "必考" : requirement.selection === "optional" ? "选考" : text(requirement.selection),
-      item.code.match(/(?:^|-)(\d+)$/)?.[1] ?? item.code,
-      item.name,
-      text(requirement.importanceCode ?? item.importance),
-      item.questionCount ? String(item.questionCount) : "待核对",
-    ];
+    return {
+      primary: text(requirement.primaryName ?? requirement.level1Name),
+      primaryWeight: text(requirement.primaryWeight ?? requirement.level1Weight),
+      secondary: text(requirement.secondaryName ?? requirement.level2Name),
+      secondaryWeight: text(requirement.secondaryWeight ?? requirement.level2Weight),
+      selection: requirement.selection === "required" ? "必考" : requirement.selection === "optional" ? "选考" : text(requirement.selection),
+      code: item.code.match(/(?:^|-)(\d+)$/)?.[1] ?? item.code,
+      name: item.name,
+      importance: text(requirement.importanceCode ?? item.importance),
+      questionCount: item.questionCount ? String(item.questionCount) : "待核对",
+    };
+  });
+  const span = (index: number, key: "primary" | "secondary") => {
+    const value = items[index][key];
+    let count = 1;
+    for (let cursor = index + 1; cursor < items.length; cursor += 1) {
+      if (items[cursor][key] !== value || (key === "secondary" && items[cursor].primary !== items[index].primary)) break;
+      count += 1;
+    }
+    return count;
+  };
+  const rows = items.map((item, index) => {
+    const startPrimary = index === 0 || items[index - 1].primary !== item.primary;
+    const startSecondary = startPrimary || items[index - 1].secondary !== item.secondary;
+    const cells: TableCell[] = [];
+    if (startPrimary) {
+      cells.push(cell(item.primary, { rowSpan: span(index, "primary") }));
+      cells.push(cell(item.primaryWeight, { rowSpan: span(index, "primary") }));
+    }
+    if (startSecondary) {
+      cells.push(cell(item.secondary, { rowSpan: span(index, "secondary") }));
+      cells.push(cell(item.secondaryWeight, { rowSpan: span(index, "secondary") }));
+    }
+    if (startPrimary) cells.push(cell(item.selection, { rowSpan: span(index, "primary") }));
+    cells.push(cell(item.code), cell(item.name, { fontSize: 19 }), cell(item.importance), cell(item.questionCount));
+    return new TableRow({ children: cells });
+  });
+  const outline = new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    layout: TableLayoutType.FIXED,
+    rows: [
+      new TableRow({ tableHeader: true, children: [
+        cell("鉴定范围", { bold: true, shade: "D9E1F2", columnSpan: 5 }),
+        cell("序号", { bold: true, shade: "D9E1F2", rowSpan: 2 }),
+        cell("评 价 点", { bold: true, shade: "D9E1F2", rowSpan: 2 }),
+        cell("重要程度", { bold: true, shade: "D9E1F2", rowSpan: 2 }),
+        cell("题量", { bold: true, shade: "D9E1F2", rowSpan: 2 }),
+      ] }),
+      new TableRow({ tableHeader: true, children: [
+        cell("一级名称", { bold: true, shade: "D9E1F2" }),
+        cell("鉴定比重", { bold: true, shade: "D9E1F2" }),
+        cell("二级名称", { bold: true, shade: "D9E1F2" }),
+        cell("鉴定比重", { bold: true, shade: "D9E1F2" }),
+        cell("选考方式", { bold: true, shade: "D9E1F2" }),
+      ] }),
+      ...rows,
+    ],
+    columnWidths: [1700, 900, 1700, 900, 1100, 750, 3400, 1000, 800],
   });
   return Packer.toBuffer(document(
     "操作技能鉴定要素细目表",
     `职业：${input.occupationName}    等级：${input.levelLabel}    鉴定方式：技能操作`,
-    [table(
-      ["一级", "名称", "鉴定比重", "二级", "名称", "鉴定比重", "选考方式", "序号", "评价点", "重要程度", "题量"],
-      rows,
-      [650, 1300, 900, 650, 1500, 900, 1100, 650, 3000, 900, 700],
-    )],
+    [outline], true,
   ));
 }
