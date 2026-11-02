@@ -48,20 +48,24 @@ function structureName(value: string) {
   return value.replace(/\s*[A-Z]$/, "").trim();
 }
 
-function cell(value: string, options: {
+function cell(value: string | Paragraph[], options: {
   bold?: boolean;
   shade?: string;
   columnSpan?: number;
   rowSpan?: number;
   fontSize?: number;
+  diagonalDown?: boolean;
 } = {}) {
+  const borders: any = { top: border, bottom: border, left: border, right: border };
+  if (options.diagonalDown) borders.diagonalDown = border;
+  
   return new TableCell({
     verticalAlign: VerticalAlignTable.CENTER,
     shading: options.shade ? { fill: options.shade } : undefined,
     columnSpan: options.columnSpan,
     rowSpan: options.rowSpan,
-    borders: { top: border, bottom: border, left: border, right: border },
-    children: [new Paragraph({
+    borders,
+    children: Array.isArray(value) ? value : [new Paragraph({
       alignment: AlignmentType.CENTER,
       children: [new TextRun({ text: value, bold: options.bold, font: "宋体", size: options.fontSize ?? 21 })],
     })],
@@ -131,7 +135,11 @@ export async function createSkillStructureWord(input: {
     layout: TableLayoutType.FIXED,
     rows: [
       new TableRow({ tableHeader: true, children: [
-        cell(`考评范围\n考评要求\n${input.levelLabel.split("/")[0]}`, { bold: true, shade: "D9E1F2", columnSpan: 2, rowSpan: 2 }),
+        cell([
+          new Paragraph({ alignment: AlignmentType.RIGHT, children: [new TextRun({ text: "考评范围", bold: true, font: "宋体", size: 21 })] }),
+          new Paragraph({ alignment: AlignmentType.LEFT, children: [new TextRun({ text: "考评要求", bold: true, font: "宋体", size: 21 })] }),
+          new Paragraph({ alignment: AlignmentType.LEFT, children: [new TextRun({ text: input.levelLabel.split("/")[0], bold: true, font: "宋体", size: 21 })] }),
+        ], { shade: "D9E1F2", columnSpan: 2, rowSpan: 2, diagonalDown: true }),
         ...groups.map((group) => cell(group.name, { bold: true, shade: "D9E1F2", columnSpan: group.children.length })),
         cell("合计", { bold: true, shade: "D9E1F2", rowSpan: 2 }),
       ] }),
@@ -218,7 +226,8 @@ export async function createSkillOutlineWord(input: {
     layout: TableLayoutType.FIXED,
     rows: [
       new TableRow({ tableHeader: true, children: [
-        cell("鉴定范围", { bold: true, shade: "D9E1F2", columnSpan: 5 }),
+        cell("鉴定范围", { bold: true, shade: "D9E1F2", columnSpan: 4 }),
+        cell("选考方式", { bold: true, shade: "D9E1F2", rowSpan: 2 }),
         cell("序号", { bold: true, shade: "D9E1F2", rowSpan: 2 }),
         cell("评 价 点", { bold: true, shade: "D9E1F2", rowSpan: 2 }),
         cell("重要程度", { bold: true, shade: "D9E1F2", rowSpan: 2 }),
@@ -229,7 +238,6 @@ export async function createSkillOutlineWord(input: {
         cell("鉴定比重", { bold: true, shade: "D9E1F2" }),
         cell("二级名称", { bold: true, shade: "D9E1F2" }),
         cell("鉴定比重", { bold: true, shade: "D9E1F2" }),
-        cell("选考方式", { bold: true, shade: "D9E1F2" }),
       ] }),
       ...rows,
     ],
