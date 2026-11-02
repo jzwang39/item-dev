@@ -1,5 +1,5 @@
 import { parseQuestions, stemHash, type GeneratedQuestion, type Snapshot } from "./contracts";
-import { anglePlanningPrompt, failureOf, GenerationFailure, parseAnglePlan, type AngleSource, type RequestOutput, type RetryFailure, type RetryState } from "./retry-policy";
+import { anglePlanningPrompt, failureOf, GenerationFailure, parseAnglePlan, recordQualityRelaxation, type AngleSource, type RequestOutput, type RetryFailure, type RetryState } from "./retry-policy";
 import { theoryGenerationLimit, MAX_SLOT_REPAIRS, MAX_SLOT_TRANSPORT_FAILURES, nextTargetedSlot, recordTargetedPhase, type SlotBudget, type TargetedPhase } from "./targeted-budget";
 import { factualTheorySources, nextEvidencePage } from "./evidence-catalog";
 import { candidateReviewPrompt, parseCandidateReview } from "./candidate-review";
@@ -64,7 +64,9 @@ export async function generateTargeted(input: {
     }
     if (!node.chapterIds.length) {
       sources = factualTheorySources(sources);
-      if (!sources.length || budget.theoryExpansion?.basisRevision) {
+      // Public basic questions must never trigger external retrieval; they are
+      // grounded only in their frozen public blueprint and linked chapters.
+      if ((!sources.length || budget.theoryExpansion?.basisRevision) && !snapshot.scope.commonGroupId) {
         sources = await acquireTheoryExpansion({ snapshot, code, state }, {
           call, persist: dependencies.persist, signal: dependencies.signal, fetchDocument: dependencies.fetchDocument,
         });
@@ -320,6 +322,9 @@ export async function generateTargeted(input: {
           }
         }
         recordTargetedPhase(state, `通过完整标准核验，仅保存一个缺额；其他合格候选作为重复冲突备选。${review.failures.map((failure) => failure.message).join("；")}`);
+        // A relaxed candidate must stay traceable: the standard's independence
+        // rule was loosened, so record why and flag the question for review.
+        if (slot.angle?.reusesKnowledge) recordQualityRelaxation(state, slot.angle, slot.type);
         return { questions: review.questions.map((question) => ({ ...question, targetSlotId: slotId, candidateRepairs: repairs })),
           failures: [], state };
       }

@@ -76,27 +76,22 @@ export async function startGeneration(planId: string, actorId: string, retryFail
           const state = retryState(unit.retry_state_json);
           const missing = missingSlots.filter((slot) => slot.unit_id === unit.id);
           if (!missing.length) continue;
-          if (old.scope.commonGroupId) {
-            if (state.targeted) state.targeted = false;
-            if (state.budget) delete state.budget;
-          } else {
-            if (!state.budget) {
-              ensureTargetedBudget(state, missing, Number(unit.attempts), unit.error_message);
-              upgraded.push(unit.id);
-              // A one-time strategy upgrade keeps all legacy cumulative counters
-              // and failures in origin; it is not an unlimited counter reset.
-              state.failures = [];
-            }
+          if (!state.budget) {
             ensureTargetedBudget(state, missing, Number(unit.attempts), unit.error_message);
-            if (recoverTheoryBasisRevision(state, old, unit.point_code)) upgraded.push(unit.id);
-            if (recoverExpansionReviewProtocol(state, old, unit.point_code)) upgraded.push(unit.id);
-            if (recoverCuratedTheoryBasis(state, old, unit.point_code)) upgraded.push(unit.id);
-            if (recoverNoTextbookTheory(state, old, unit.point_code)) upgraded.push(unit.id);
-            if (scope.assessmentMode === "操作技能" && recoverSkillDesignProtocol(state)) upgraded.push(unit.id);
-            if (scope.assessmentMode !== "操作技能" && recoverTheoryDuplicate(state)) upgraded.push(unit.id);
-            if (recoverTheoryEcho(state, old, unit.point_code)) upgraded.push(unit.id);
-            if (scope.assessmentMode === "操作技能" && skillRecoveryAuthorized && grantSkillRecovery(state, Number(unit.attempts))) upgraded.push(unit.id);
+            upgraded.push(unit.id);
+            // A one-time strategy upgrade keeps all legacy cumulative counters
+            // and failures in origin; it is not an unlimited counter reset.
+            state.failures = [];
           }
+          ensureTargetedBudget(state, missing, Number(unit.attempts), unit.error_message);
+          if (recoverTheoryBasisRevision(state, old, unit.point_code)) upgraded.push(unit.id);
+          if (recoverExpansionReviewProtocol(state, old, unit.point_code)) upgraded.push(unit.id);
+          if (recoverCuratedTheoryBasis(state, old, unit.point_code)) upgraded.push(unit.id);
+          if (recoverNoTextbookTheory(state, old, unit.point_code)) upgraded.push(unit.id);
+          if (scope.assessmentMode === "操作技能" && recoverSkillDesignProtocol(state)) upgraded.push(unit.id);
+          if (scope.assessmentMode !== "操作技能" && recoverTheoryDuplicate(state)) upgraded.push(unit.id);
+          if (recoverTheoryEcho(state, old, unit.point_code)) upgraded.push(unit.id);
+          if (scope.assessmentMode === "操作技能" && skillRecoveryAuthorized && grantSkillRecovery(state, Number(unit.attempts))) upgraded.push(unit.id);
           if (recoverPrematureBlocks(state)) upgraded.push(unit.id);
           if (retryBlocked(state, Number(unit.attempts), true)) continue;
           const next = prepareManualRetry(state, Number(unit.attempts), unit.error_message);
@@ -339,10 +334,6 @@ async function claimUnit(): Promise<Unit | null> {
     if (!unit) throw new Error("领取的命题请求或关联任务不存在。");
     const snapshot = json<Snapshot>(unit.snapshot_json);
     const state = retryState(unit.retry_state_json);
-    if (snapshot.scope.commonGroupId) {
-      if (state.targeted) state.targeted = false;
-      if (state.budget) delete state.budget;
-    }
     if (state.supplement) unit.created_by = state.supplement.actorId;
     if (!unit.retry_state_json && Number(unit.attempts) > 0 && unit.error_message) {
       state.targeted = true;
@@ -443,7 +434,7 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
         targetedSlotId: question.targetSlotId, targetedHistory: output.state.budget?.history,
         appliedQualityStandard: unit.appliedQualityStandard,
         appliedSkillQualityStandard: skill ? unit.appliedQualityStandard : undefined,
-        qualityRelaxations: !output.state.budget && output.state.selectedAngle?.reusesKnowledge
+        qualityRelaxations: output.state.selectedAngle?.reusesKnowledge
           ? output.state.qualityRelaxations?.filter((entry) => entry.knowledge === output.state.selectedAngle?.angle
             && entry.task === output.state.selectedAngle?.task && entry.questionType === question.questionType) : [],
       };
@@ -526,10 +517,11 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
     "SELECT id,ordinal,question_type FROM authoring_generation_slots WHERE unit_id=? AND question_id IS NULL ORDER BY ordinal", [unit.id],
   );
   if (!missing.length) return { questions: [], failures: [], state };
-  // Public basic questions are generated from their frozen public blueprint.
-  // Do not redirect a retry into the no-textbook expansion workflow: it is
-  // designed for ordinary plans whose frozen point has no usable basis text.
-  const useTargetedFlow = state.targeted && !snapshot.scope.commonGroupId;
+  // Public basic questions share their frozen public blueprint, but thinning
+  // source text still makes a full batch collide on stems. Retries therefore
+  // reuse the same angle analysis as ordinary plans; external expansion stays
+  // disabled for them in the targeted workflow itself.
+  const useTargetedFlow = state.targeted;
   const requested = useTargetedFlow ? missing.slice(0, 1) : missing;
   const node = snapshot.nodes.find((item) => item.code === unit.point_code)!;
   const [metadata] = await query<(RowDataPacket & { name: string; requirement_json: unknown; source_ref_json: unknown })[]>(
@@ -581,6 +573,8 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
       });
   });
   unit.retry_state_json = state;
+  // Automatic expansion is reserved for ordinary chapterless points; public
+  // basic questions reach the targeted flow only through an explicit retry.
   if (useTargetedFlow || (kind === "theory" && !node.chapterIds.length && !snapshot.scope.commonGroupId)) {
     state.targeted = true;
     const context = snapshot.scope.assessmentMode === "操作技能" ? node.skillContext : node.theoryContext;
