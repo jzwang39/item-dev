@@ -271,4 +271,4 @@ export function keepSelectedAngle(state: RetryState) {
     "network_timeout", "network_error", "rate_limited", "lease_expired",
   ].includes(failure.code));
 }
-export type RequestOutput = { questions: GeneratedQuestion[]; failures: RetryFailure[]; state: RetryState; preparationFailure?: boolean };
+export type RequestOutput = { questions: GeneratedQuestion[]; failures: RetryFailure[]; state: RetryState; preparationFailure?: boolean; targetedFlow?: boolean };

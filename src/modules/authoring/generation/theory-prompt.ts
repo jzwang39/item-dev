@@ -21,11 +21,12 @@ ${example}。
 严格按照本次题型配额生成缺额；mixed仅表示请求含多题型，绝不能作为questionType。
 每条questionType只能是single、multiple或judgement，禁止中文题型值。
 单选恰好4个不同选项和1个答案；多选选项数量遵循试题质量标准且至少4个不同选项、至少2个答案；答案键对应选项。
-判断options必须为[]，answers必须为["正确"]或["错误"]，不能写true/false、对/错或A/B。答案、解析必须明确且符合知识依据。输出前自查质量标准，不符合时修正；无法保证正确性和真实依据时不得凑题。`,
+判断options必须为[]，answers必须为["正确"]或["错误"]，不能写true/false、对/错或A/B。答案、解析必须明确且符合知识依据。输出前自查质量标准，不符合时修正；无法保证正确性和真实依据时不得凑题。
+确保JSON格式完全正确，特别是字符串内的双引号必须转义为\\"。必须包含题干(stem)、选项(options)、答案(answers)和解析(analysis)等完整字段。`,
     prompt: JSON.stringify({
       用户需求: snapshot.requirement, 职业: snapshot.scope.occupation, 等级: snapshot.scope.commonGroupId ? "五级、四级、三级共用基本要求" : snapshot.scope.levelCode,
       考评点: { code: node.code, name: node.name },
-      指定题型: targeted ? requested[0] : "mixed", 本次必须生成数: requested.length,
+      指定题型: requested.every((item) => item === requested[0]) ? requested[0] : "mixed", 本次必须生成数: requested.length,
       本次题型配额: Object.fromEntries(questionTypes.map((type) => [type, requested.filter((item) => item === type).length])),
       质量要求: snapshot.qualityRequirements, 试题质量标准: snapshot.qualityStandard,
       质量执行策略: generationQualityPolicy("theory", targeted),

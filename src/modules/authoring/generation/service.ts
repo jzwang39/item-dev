@@ -76,22 +76,27 @@ export async function startGeneration(planId: string, actorId: string, retryFail
           const state = retryState(unit.retry_state_json);
           const missing = missingSlots.filter((slot) => slot.unit_id === unit.id);
           if (!missing.length) continue;
-          if (!state.budget) {
+          if (old.scope.commonGroupId) {
+            state.targeted = false;
+            delete state.budget;
+          } else {
+            if (!state.budget) {
+              ensureTargetedBudget(state, missing, Number(unit.attempts), unit.error_message);
+              upgraded.push(unit.id);
+              // A one-time strategy upgrade keeps all legacy cumulative counters
+              // and failures in origin; it is not an unlimited counter reset.
+              state.failures = [];
+            }
             ensureTargetedBudget(state, missing, Number(unit.attempts), unit.error_message);
-            upgraded.push(unit.id);
-            // A one-time strategy upgrade keeps all legacy cumulative counters
-            // and failures in origin; it is not an unlimited counter reset.
-            state.failures = [];
+            if (recoverTheoryBasisRevision(state, old, unit.point_code)) upgraded.push(unit.id);
+            if (recoverExpansionReviewProtocol(state, old, unit.point_code)) upgraded.push(unit.id);
+            if (recoverCuratedTheoryBasis(state, old, unit.point_code)) upgraded.push(unit.id);
+            if (recoverNoTextbookTheory(state, old, unit.point_code)) upgraded.push(unit.id);
+            if (scope.assessmentMode === "操作技能" && recoverSkillDesignProtocol(state)) upgraded.push(unit.id);
+            if (scope.assessmentMode !== "操作技能" && recoverTheoryDuplicate(state)) upgraded.push(unit.id);
+            if (recoverTheoryEcho(state, old, unit.point_code)) upgraded.push(unit.id);
+            if (scope.assessmentMode === "操作技能" && skillRecoveryAuthorized && grantSkillRecovery(state, Number(unit.attempts))) upgraded.push(unit.id);
           }
-          ensureTargetedBudget(state, missing, Number(unit.attempts), unit.error_message);
-          if (recoverTheoryBasisRevision(state, json<Snapshot>(existing[0].snapshot_json), unit.point_code)) upgraded.push(unit.id);
-          if (recoverExpansionReviewProtocol(state, json<Snapshot>(existing[0].snapshot_json), unit.point_code)) upgraded.push(unit.id);
-          if (recoverCuratedTheoryBasis(state, json<Snapshot>(existing[0].snapshot_json), unit.point_code)) upgraded.push(unit.id);
-          if (recoverNoTextbookTheory(state, json<Snapshot>(existing[0].snapshot_json), unit.point_code)) upgraded.push(unit.id);
-          if (scope.assessmentMode === "操作技能" && recoverSkillDesignProtocol(state)) upgraded.push(unit.id);
-          if (scope.assessmentMode !== "操作技能" && recoverTheoryDuplicate(state)) upgraded.push(unit.id);
-          if (recoverTheoryEcho(state, json<Snapshot>(existing[0].snapshot_json), unit.point_code)) upgraded.push(unit.id);
-          if (scope.assessmentMode === "操作技能" && skillRecoveryAuthorized && grantSkillRecovery(state, Number(unit.attempts))) upgraded.push(unit.id);
           if (recoverPrematureBlocks(state)) upgraded.push(unit.id);
           if (retryBlocked(state, Number(unit.attempts), true)) continue;
           const next = prepareManualRetry(state, Number(unit.attempts), unit.error_message);
@@ -332,7 +337,12 @@ async function claimUnit(): Promise<Unit | null> {
     );
     const unit = units[0];
     if (!unit) throw new Error("领取的命题请求或关联任务不存在。");
+    const snapshot = json<Snapshot>(unit.snapshot_json);
     const state = retryState(unit.retry_state_json);
+    if (snapshot.scope.commonGroupId) {
+      state.targeted = false;
+      delete state.budget;
+    }
     if (state.supplement) unit.created_by = state.supplement.actorId;
     if (!unit.retry_state_json && Number(unit.attempts) > 0 && unit.error_message) {
       state.targeted = true;
@@ -391,7 +401,7 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
     let saved = 0;
     for (const question of questions) {
       if (!slots.length) break;
-      if (output.state.budget && !question.standardReview) {
+      if (output.targetedFlow && !question.standardReview) {
         failures.push({ code: "quality_rejected", message: "补题候选未经完整质量标准核验，不计入成果。" });
         continue;
       }
@@ -576,7 +586,7 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
     const context = snapshot.scope.assessmentMode === "操作技能" ? node.skillContext : node.theoryContext;
     const sources = buildEvidenceCatalog(context, evidenceChapters, node.name);
     ensureTargetedBudget(state, missing, unit.attempts - 1);
-    return generateTargeted({ snapshot, code: node.code, previous, sources, state }, {
+    const result = await generateTargeted({ snapshot, code: node.code, previous, sources, state }, {
       signal: cancellation,
       call: (input) => callGenerationModel(snapshot, connection.apiKey, input, cancellation),
       persist: async () => {
@@ -591,6 +601,7 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
           [JSON.stringify(state), unit.id, unit.lease_token]);
       },
     });
+    return { ...result, targetedFlow: true };
   }
   const { instruction, prompt } = kind === "skill"
     ? skillQuestionPrompt(snapshot, node.code, requested.length, previous.map((item) => item.stem))

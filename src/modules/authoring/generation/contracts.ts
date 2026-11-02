@@ -162,7 +162,7 @@ export function parseQuestions(content: string, code: string, requestedType: Que
       invalidCandidates.push({ candidate: value, reasons: [reason] });
     };
     const item = value && typeof value === "object" ? value as Record<string, unknown> : {};
-    const answer = item.answers ?? item.answer ?? item["答案"];
+    const answer = item.answers ?? item.answer ?? item["答案"] ?? item["参考答案"];
     const answerList = Array.isArray(answer) ? answer : [answer];
     const normalizedAnswer = normalization.judgement && item.questionType === "judgement" && answerList.length === 1
       ? judgementAnswer(answerList[0]) : undefined;
@@ -179,7 +179,7 @@ export function parseQuestions(content: string, code: string, requestedType: Que
       options: redundantOptions ? [] : item.options,
       stem: item.questionType === "practical" && originalStem !== undefined ? cleanSkillStem(originalStem, occupation) : item.stem,
       answers: normalizedAnswer ? [normalizedAnswer] : typeof answer === "string" ? [answer] : answer,
-      analysis: item.analysis ?? item.explanation ?? item["解析"],
+      analysis: item.analysis ?? item.explanation ?? item["解析"] ?? item["答案解析"] ?? item["依据"],
     });
     if (!parsed.success) {
       reject(parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; "));
