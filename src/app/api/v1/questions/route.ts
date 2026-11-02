@@ -169,6 +169,24 @@ export async function GET(request: Request) {
         const structure = parseJson(rows[0].snapshot_json) as {
           pathway?: string; totalMinutes?: number; rows?: Array<{ code?: string; name?: string; selection?: string; score?: number; minutes?: number; method?: string }>;
         };
+        const outlineRows = await query<(RowDataPacket & { requirement_json: unknown })[]>(
+          `SELECT bn.requirement_json
+             FROM blueprints b INNER JOIN blueprint_nodes bn ON bn.blueprint_version_id=b.current_version_id
+            WHERE b.occupation_id=? AND b.level_code=? AND b.assessment_mode='skill'
+              AND b.blueprint_kind='skill_outline' AND bn.node_kind='assessment_point'
+            ORDER BY bn.ordinal,bn.id`,
+          [occupationId, levelCode],
+        );
+        const groups = new Map<string, string[]>();
+        for (const outline of outlineRows) {
+          const requirement = parseJson(outline.requirement_json) as Record<string, unknown>;
+          const primary = String(requirement.primaryName ?? requirement.level1Name ?? "").replace(/\s*[A-Z]$/, "").trim();
+          const secondary = String(requirement.secondaryName ?? requirement.level2Name ?? "").trim();
+          if (!primary || !secondary) continue;
+          const children = groups.get(primary) ?? [];
+          if (!children.includes(secondary)) children.push(secondary);
+          groups.set(primary, children);
+        }
         const bytes = await createSkillStructureWord({
           occupationName: scope.occupation_name,
           levelLabel,
@@ -179,6 +197,7 @@ export async function GET(request: Request) {
             score: typeof row.score === "number" ? row.score : null,
             minutes: typeof row.minutes === "number" ? row.minutes : null, method: row.method ?? null,
           })),
+          headerGroups: [...groups.entries()].map(([name, children]) => ({ name, children })),
         });
         const filename = `${scope.occupation_name}-${levelLabel}-操作技能考核内容结构表.docx`;
         return new NextResponse(new Uint8Array(bytes), { headers: {

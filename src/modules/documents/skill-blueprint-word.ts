@@ -44,6 +44,10 @@ function text(value: unknown, fallback = "待核对") {
   return value === null || value === undefined || value === "" ? fallback : String(value);
 }
 
+function structureName(value: string) {
+  return value.replace(/\s*[A-Z]$/, "").trim();
+}
+
 function cell(value: string, options: {
   bold?: boolean;
   shade?: string;
@@ -99,44 +103,64 @@ export async function createSkillStructureWord(input: {
   pathway: string | null;
   totalMinutes: number | null;
   rows: StructureRow[];
+  headerGroups: Array<{ name: string; children: string[] }>;
 }) {
   const value = (row: StructureRow, key: "selection" | "score" | "minutes" | "method") => {
     const raw = row[key];
     if (key === "selection") return raw === "required" ? "必考" : raw === "optional" ? "选考" : text(raw);
     return raw === null ? "待核对" : String(raw);
   };
+  const groups = input.headerGroups.length
+    ? input.headerGroups
+    : input.rows.map((row) => ({ name: row.name, children: [row.name] }));
+  const childCount = groups.reduce((sum, group) => sum + group.children.length, 0);
+  const childWidths = groups.flatMap((group) =>
+    group.children.map(() => Math.max(1100, Math.floor(12500 / Math.max(1, childCount)))),
+  );
+  const structureByName = new Map(input.rows.map((row) => [structureName(row.name), row]));
   const total = input.totalMinutes === null ? "待核对" : `${input.totalMinutes}min`;
+  const valueCells = (key: "selection" | "score" | "minutes" | "method") => groups.map((group) => {
+    const row = structureByName.get(structureName(group.name));
+    return cell(row ? value(row, key) : "待核对", {
+      columnSpan: group.children.length,
+      fontSize: key === "method" ? 19 : undefined,
+    });
+  });
   const matrix = new Table({
     width: { size: 100, type: WidthType.PERCENTAGE },
     layout: TableLayoutType.FIXED,
     rows: [
       new TableRow({ tableHeader: true, children: [
-        cell("考评范围", { bold: true, shade: "D9E1F2" }),
-        ...input.rows.map((row) => cell(row.name, { bold: true, shade: "D9E1F2" })),
-        cell("合计", { bold: true, shade: "D9E1F2" }),
+        cell(`考评范围\n考评要求\n${input.levelLabel.split("/")[0]}`, { bold: true, shade: "D9E1F2", columnSpan: 2, rowSpan: 2 }),
+        ...groups.map((group) => cell(group.name, { bold: true, shade: "D9E1F2", columnSpan: group.children.length })),
+        cell("合计", { bold: true, shade: "D9E1F2", rowSpan: 2 }),
+      ] }),
+      new TableRow({ tableHeader: true, children: [
+        ...groups.flatMap((group) => group.children.map((child) => cell(child, { bold: true, shade: "D9E1F2", fontSize: 19 }))),
       ] }),
       new TableRow({ children: [
+        cell(input.levelLabel.split("/")[0], { bold: true, rowSpan: 4 }),
         cell("选考方式", { bold: true }),
-        ...input.rows.map((row) => cell(value(row, "selection"))),
+        ...valueCells("selection"),
         cell("—"),
       ] }),
       new TableRow({ children: [
         cell("考核权重（%）", { bold: true }),
-        ...input.rows.map((row) => cell(value(row, "score"))),
+        ...valueCells("score"),
         cell("100"),
       ] }),
       new TableRow({ children: [
         cell("考核时间（min）", { bold: true }),
-        ...input.rows.map((row) => cell(value(row, "minutes"))),
+        ...valueCells("minutes"),
         cell(total),
       ] }),
       new TableRow({ children: [
         cell("考核形式", { bold: true }),
-        ...input.rows.map((row) => cell(value(row, "method"), { fontSize: 19 })),
+        ...valueCells("method"),
         cell("—"),
       ] }),
     ],
-    columnWidths: [1800, ...input.rows.map(() => Math.max(1800, Math.floor(12500 / Math.max(1, input.rows.length)))), 1200],
+    columnWidths: [700, 1100, ...childWidths, 1100],
   });
   return Packer.toBuffer(document(
     `${input.occupationName}操作技能考评内容结构表（${input.levelLabel}）`,
