@@ -111,6 +111,7 @@ export async function createSkillStructureWord(input: {
 }) {
   const value = (row: StructureRow, key: "selection" | "score" | "minutes" | "method") => {
     const raw = row[key];
+    if (key === "score" && typeof raw === "number") return raw + "%";
     if (key === "selection") return raw === "required" ? "必考" : raw === "optional" ? "选考" : text(raw);
     return raw === null ? "待核对" : String(raw);
   };
