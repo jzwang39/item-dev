@@ -67,16 +67,33 @@ export function mapPointRange(point: Record<string, unknown>, basis: WeightBasis
   const standard = point.sourceStandardRequirement as { functionName?: string; direction?: string; levelCode?: string } | undefined;
   const theoryStandard = point.standardSource as { functionName?: string; directionName?: string } | undefined;
   const basic = point.standardBasicSource as { category?: string; parentName?: string } | undefined;
+  const primaryName = String(point.primaryName ?? "");
+  const normalizedPrimary = normalize(primaryName);
+  const inferredSection = point.sectionKind === "basic" || normalizedPrimary === normalize("基本要求")
+    || normalizedPrimary.startsWith(`${normalize("基本要求")}·`)
+    || normalizedPrimary.startsWith(`${normalize("基本要求")}:`)
+    || normalizedPrimary.startsWith(`${normalize("基本要求")}：`)
+    ? "basic"
+    : point.sectionKind === "related_knowledge" || normalizedPrimary === normalize("相关知识要求")
+      || normalizedPrimary.startsWith(`${normalize("相关知识要求")}·`)
+      || normalizedPrimary.startsWith(`${normalize("相关知识要求")}:`)
+      || normalizedPrimary.startsWith(`${normalize("相关知识要求")}：`)
+      ? "related_knowledge"
+      : null;
+  const trimmedPrimary = primaryName.replace(/^(?:相关知识要求|基本要求)\s*[·:：]\s*/, "").trim();
   const direction = String(point.direction ?? point.directionName ?? standard?.direction ?? theoryStandard?.directionName ?? "通用");
   if (normalize(direction) !== normalize(basis.direction) && normalize(basis.direction) !== "通用" &&
-    !(mode === "theory" && point.sectionKind === "basic")) return null;
+    !(mode === "theory" && inferredSection === "basic")) return null;
   if (normalize(basis.direction) === "通用" && normalize(direction) !== "通用") return null;
   const names = mode === "skill"
     ? [standard?.functionName, point.level2Name]
-    : [theoryStandard?.functionName, String(point.primaryName ?? "").replace(/^相关知识要求\s*[·:：]\s*/, ""),
-      point.secondaryName, basic?.category, basic?.parentName];
-  const categories = mode === "skill" ? ["技能要求"] : point.sectionKind === "basic"
-    ? ["基本要求"] : point.sectionKind === "related_knowledge" ? ["相关知识要求"] : [];
+    : inferredSection === "related_knowledge"
+      ? [point.secondaryName, theoryStandard?.functionName, trimmedPrimary]
+      : inferredSection === "basic"
+        ? [point.secondaryName, basic?.category, basic?.parentName, trimmedPrimary]
+        : [theoryStandard?.functionName, trimmedPrimary, point.secondaryName, basic?.category, basic?.parentName];
+  const categories = mode === "skill" ? ["技能要求"] : inferredSection === "basic"
+    ? ["基本要求"] : inferredSection === "related_knowledge" ? ["相关知识要求"] : [];
   const matches = basis.ranges.filter((range) =>
     (!categories.length || categories.some((category) => normalize(category) === normalize(range.category))) &&
     names.some((name) => typeof name === "string" && normalize(name) === normalize(range.name)));
@@ -84,7 +101,7 @@ export function mapPointRange(point: Record<string, unknown>, basis: WeightBasis
   // Related knowledge points in the standard are anchored by occupational
   // function first; different secondary content names under the same function
   // still belong to the same weighted range.
-  if (mode === "theory" && point.sectionKind === "related_knowledge") {
+  if (mode === "theory" && inferredSection === "related_knowledge") {
     const functionName = typeof theoryStandard?.functionName === "string" ? normalize(theoryStandard.functionName) : "";
     const fallback = functionName ? basis.ranges.filter((range) =>
       normalize(range.category) === normalize("相关知识要求") && normalize(range.name) === functionName) : [];

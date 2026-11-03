@@ -106,12 +106,15 @@ test("明确完整父级路径映射，不把多范围题重复算分", () => {
 
 test("理论相关知识映射职业功能，公共基本要求不会因同名误归类", () => {
   const theory = { versionId: "v", versionNo: 1, direction: "通用", ranges: [
+    { key: "G", category: "相关知识要求", name: "公益慈善宣讲", weight: 10 },
     { key: "K", category: "相关知识要求", name: "捐赠管理", weight: 80 },
-    { key: "F", category: "基本要求", name: "基础知识", weight: 20 },
+    { key: "F", category: "基本要求", name: "基础知识", weight: 10 },
   ] };
   assert.equal(mapPointRange({ sectionKind: "related_knowledge", standardSource: { functionName: "捐赠管理" } }, theory, "theory"), "K");
   assert.equal(mapPointRange({ sectionKind: "related_knowledge", primaryName: "相关知识要求 · 捐赠管理", secondaryName: "信息管理" }, theory, "theory"), "K");
+  assert.equal(mapPointRange({ primaryName: "相关知识要求", secondaryName: "公益慈善宣讲" }, theory, "theory"), "G");
   assert.equal(mapPointRange({ sectionKind: "basic", secondaryName: "基础知识" }, theory, "theory"), "F");
+  assert.equal(mapPointRange({ primaryName: "基本要求", secondaryName: "基础知识" }, theory, "theory"), "F");
   assert.equal(mapPointRange({ sectionKind: "basic", secondaryName: "捐赠管理" }, theory, "theory"), null);
 });
 
