@@ -119,13 +119,24 @@ test("判断题导出时清理没有问号但仍含疑问词的题干", async ()
       answer_snapshot_json: { answers: ["正确"] },
       score_rubric_snapshot_json: null,
       score: 1,
+    }, {
+      item_no: 90,
+      section_no: 2,
+      question_type: "判断题",
+      stem_snapshot: "公益项目资金使用透明度要求的法律和法规依据是《公益项目考察要点》中的哪一部分。",
+      content_snapshot_json: {},
+      answer_snapshot_json: { answers: ["错误"] },
+      score_rubric_snapshot_json: null,
+      score: 1,
     }],
   };
   const { value } = await extractRawText({ buffer: await createPaperWord(contaminated, "paper") });
   assert.match(value, /92．（　　）在募捐风险识别的效果评估指标体系构建过程中，忽视对捐赠者期望的评估可能导致风险。/);
   assert.match(value, /93．（　　）要在劝募活动复盘中记录关键异议及处理结果。/);
+  assert.match(value, /90．（　　）公益项目资金使用透明度要求的法律和法规依据是《公益项目考察要点》中的部分。/);
   assert.doesNotMatch(value, /哪些风险/);
   assert.doesNotMatch(value, /为什么要/);
+  assert.doesNotMatch(value, /哪一部分/);
 });
 test("理论答案卷按样例样式输出客观题答案键，并保留主观题评分标准", async () => {
   const { value } = await extractRawText({ buffer: await createPaperWord(paper, "answers") });
