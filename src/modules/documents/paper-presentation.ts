@@ -8,7 +8,7 @@ export type PaperPresentation = {
 };
 export type SkillExam = {
   title?: string; venuePreparation?: string; candidatePreparation?: string;
-  minutes?: number; method?: string; requirements?: string; veto?: string;
+  minutes?: number; estimatedMinutes?: number; method?: string; requirements?: string; veto?: string;
 };
 export type SkillDisplay = {
   title: string; evaluationPoint: string; venuePreparation: string; candidatePreparation: string;
@@ -36,7 +36,45 @@ export function parseRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 const savedText = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : undefined;
-const savedMinutes = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+const savedMinutes = (value: unknown) => {
+  const number = typeof value === "number" ? value
+    : typeof value === "string" && value.trim() && /^-?\d+(?:\.\d+)?$/.test(value.trim()) ? Number(value.trim())
+    : NaN;
+  return Number.isFinite(number) && number > 0 ? number : undefined;
+};
+export function estimateSkillMinutesByItem(
+  items: Array<{ item_no: number; section_no: number }>,
+  sections: Array<{ section_no: number; item_count: number | string; section_score: number | string }>,
+  totalMinutes: number,
+) {
+  if (!Number.isFinite(totalMinutes) || totalMinutes <= 0 || !items.length || !sections.length) return {};
+  const sectionMap = new Map(sections.map((section) => [section.section_no, {
+    itemCount: Number(section.item_count),
+    sectionScore: Number(section.section_score),
+  }]));
+  const weighted = items.map((item, index) => {
+    const section = sectionMap.get(item.section_no);
+    const weight = section && Number.isFinite(section.sectionScore) && section.sectionScore > 0 &&
+      Number.isFinite(section.itemCount) && section.itemCount > 0 ? section.sectionScore / section.itemCount : 0;
+    return { itemNo: item.item_no, index, weight };
+  }).filter((item) => item.weight > 0);
+  if (!weighted.length) return {};
+  const totalWeight = weighted.reduce((sum, item) => sum + item.weight, 0);
+  if (!Number.isFinite(totalWeight) || totalWeight <= 0) return {};
+  const raw = weighted.map((item) => {
+    const exact = totalMinutes * item.weight / totalWeight;
+    const floor = Math.floor(exact);
+    return { ...item, floor, remainder: exact - floor };
+  });
+  let remaining = totalMinutes - raw.reduce((sum, item) => sum + item.floor, 0);
+  raw.sort((a, b) => b.remainder - a.remainder || a.index - b.index);
+  for (const item of raw) {
+    if (remaining <= 0) break;
+    item.floor += 1;
+    remaining -= 1;
+  }
+  return Object.fromEntries(raw.map((item) => [item.itemNo, item.floor]));
+}
 function deriveSkillExamFromSource(value: unknown) {
   const source = parseRecord(value);
   const structure = parseRecord(source.skillStructure);
@@ -67,7 +105,10 @@ function deriveSkillExamFromSource(value: unknown) {
   }).filter((row) => Boolean(row)) as Array<{ minutes?: number; method?: string }> : [];
   return flatRows[0] ?? {};
 }
-export function paperItemContent(item: { content_snapshot_json: unknown; assessment_point_names?: unknown; source_snapshot_json?: unknown }) {
+export function paperItemContent(
+  item: { content_snapshot_json: unknown; assessment_point_names?: unknown; source_snapshot_json?: unknown },
+  fallback?: { estimatedMinutes?: number },
+) {
   const content = parseRecord(item.content_snapshot_json);
   let names = item.assessment_point_names;
   if (typeof names === "string") {
@@ -76,7 +117,10 @@ export function paperItemContent(item: { content_snapshot_json: unknown; assessm
   const evaluationPoint = Array.isArray(names) ? [...new Set(names.filter((value) => typeof value === "string"))].join("、") : undefined;
   const presentation = parseRecord(content.assemblyPresentation);
   const derivedSkillExam = deriveSkillExamFromSource(item.source_snapshot_json);
-  const skillExam = { ...derivedSkillExam, ...parseRecord(presentation.skillExam ?? content.skillExam) };
+  const skillExam: SkillExam = { ...derivedSkillExam, ...parseRecord(presentation.skillExam ?? content.skillExam) };
+  if (!savedMinutes(skillExam.minutes) && savedMinutes(fallback?.estimatedMinutes)) {
+    skillExam.estimatedMinutes = savedMinutes(fallback?.estimatedMinutes);
+  }
   return {
     ...content,
     assemblyPresentation: {
@@ -91,12 +135,15 @@ export function skillDisplay(item: { item_no: number; stem_snapshot: string; con
   const frozen = parseRecord(content.assemblyPresentation);
   const details = parseRecord(frozen.skillExam ?? content.skillExam);
   const evaluationPoint = savedText(frozen.evaluationPoint) ?? "待核对（未保存评价点名称）";
-  const minutes = typeof details.minutes === "number" && Number.isFinite(details.minutes) && details.minutes > 0 ? details.minutes : null;
+  const exactMinutes = savedMinutes(details.minutes);
+  const estimatedMinutes = exactMinutes ? undefined : savedMinutes(details.estimatedMinutes);
   return {
     title: savedText(details.title) ?? (savedText(frozen.evaluationPoint) ? evaluationPoint : `操作技能试题${item.item_no}`),
     evaluationPoint, venuePreparation: savedText(details.venuePreparation) ?? "待核对（题库未保存考场及设备设施准备要求）",
     candidatePreparation: savedText(details.candidatePreparation) ?? "待核对（题库未保存工具及其他准备要求）",
-    time: minutes ? `${minutes}分钟` : "待核对（未保存单题考核时间，不按总时间或分值推算）",
+    time: exactMinutes ? `${exactMinutes}分钟`
+      : estimatedMinutes ? `${estimatedMinutes}分钟（按试卷结构折算）`
+        : "待核对（未保存单题考核时间，不按总时间或分值推算）",
     method: savedText(details.method) ?? "待核对（未保存具体考核形式）",
     requirements: savedText(details.requirements) ?? item.stem_snapshot,
     veto: savedText(details.veto) ?? "待核对（题库未保存否定项，不擅自设定零分规则）",

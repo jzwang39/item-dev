@@ -9,7 +9,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { PaperSamplePreview } from "@/components/assembly/paper-sample-preview";
 import { createPaperWord, type PaperWord } from "./paper-word";
-import { paperFormat, paperItemContent, sectionInstruction, skillDisplay } from "./paper-presentation";
+import { estimateSkillMinutesByItem, paperFormat, paperItemContent, sectionInstruction, skillDisplay } from "./paper-presentation";
 
 const theory: PaperWord = {
   title: "理论知识排版验证（非正式考试试卷）", paper_no: "FORMAT-THEORY-1", occupation_name: "劝募员",
@@ -139,6 +139,26 @@ test("历史技能题可从冻结内容结构回填考核时间和考核方式",
   assert.equal(display.title, "新媒体宣传公益慈善理念");
   assert.equal(display.time, "25分钟");
   assert.equal(display.method, "现场操作");
+});
+test("缺少单题时间时可按冻结试卷结构折算回填", () => {
+  const estimated = estimateSkillMinutesByItem(
+    [
+      { item_no: 1, section_no: 1 },
+      { item_no: 2, section_no: 2 },
+      { item_no: 3, section_no: 3 },
+      { item_no: 4, section_no: 3 },
+    ],
+    [
+      { section_no: 1, item_count: 1, section_score: 25 },
+      { section_no: 2, item_count: 1, section_score: 35 },
+      { section_no: 3, item_count: 2, section_score: 40 },
+    ],
+    90,
+  );
+  assert.deepEqual(estimated, { 1: 23, 2: 31, 3: 18, 4: 18 });
+  const content = paperItemContent({ content_snapshot_json: {}, assessment_point_names: '["公益慈善宣讲"]' }, { estimatedMinutes: estimated[1] });
+  const display = skillDisplay({ item_no: 1, stem_snapshot: "完整任务", content_snapshot_json: content });
+  assert.equal(display.time, "23分钟（按试卷结构折算）");
 });
 test("历史技能评分与配分不一致时阻止评分表输出，不伪造合计或改写历史", async () => {
   const mismatch = { ...skill, items: [{ ...skill.items[0], score: 25 }] };

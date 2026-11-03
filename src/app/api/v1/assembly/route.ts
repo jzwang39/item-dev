@@ -7,7 +7,7 @@ import { createUlid } from "@/shared/database/ulid";
 import { query, withTransaction } from "@/shared/database/mysql";
 import { confirmWeightedAdjustment, executeWeightedAssembly, previewWeightedAssembly } from "@/modules/assembly/weighted-service";
 import { scoreCents } from "@/modules/assembly/weight-policy";
-import { paperItemContent, parseRecord, type PaperPresentation } from "@/modules/documents/paper-presentation";
+import { estimateSkillMinutesByItem, paperItemContent, parseRecord, type PaperPresentation } from "@/modules/documents/paper-presentation";
 
 const levels = ["level_5", "level_4", "level_3", "level_2", "level_1"] as const;
 const modes = ["theory", "skill"] as const;
@@ -108,10 +108,12 @@ export async function GET(request: Request) {
           occupation_name: string;
           level_code: string;
           assessment_mode: string;
+          paper_structure_version_id: string;
         })[]
       >(
         `SELECT p.id, p.paper_no, p.title, p.generated_at, ap.name AS plan_name,
-          po.name AS occupation_name, ap.level_code, ap.assessment_mode, ar.selection_summary_json,psv.duration_minutes
+          po.name AS occupation_name, ap.level_code, ap.assessment_mode, ar.selection_summary_json,psv.duration_minutes,
+          p.paper_structure_version_id
          FROM papers p
          INNER JOIN assembly_runs ar ON ar.id=p.assembly_run_id
          INNER JOIN assembly_plan_versions apv ON apv.id = p.assembly_plan_version_id
@@ -124,6 +126,7 @@ export async function GET(request: Request) {
       query<
         (RowDataPacket & {
           item_no: number;
+          section_no: number;
           question_no_snapshot: string;
           question_type: string;
           stem_snapshot: string;
@@ -151,6 +154,14 @@ export async function GET(request: Request) {
         { status: 404 },
       );
     const presentation = parseRecord(paperRows[0].selection_summary_json).presentation as PaperPresentation | undefined;
+    const sectionRows = paperRows[0].assessment_mode === "skill"
+      ? await query<(RowDataPacket & { section_no: number; item_count: number; section_score: number })[]>(
+        `SELECT section_no,item_count,section_score FROM paper_structure_sections
+         WHERE paper_structure_version_id=? AND item_count>0 ORDER BY section_no`,
+        [paperRows[0].paper_structure_version_id],
+      )
+      : [];
+    const estimatedMinutes = estimateSkillMinutesByItem(items, sectionRows, Number(presentation?.durationMinutes ?? paperRows[0].duration_minutes));
     return NextResponse.json({
       data: {
         ...paperRows[0],
@@ -161,7 +172,7 @@ export async function GET(request: Request) {
           ? JSON.parse(paperRows[0].selection_summary_json) : paperRows[0].selection_summary_json,
         items: items.map((item) => ({
           ...item,
-          content_snapshot_json: paperItemContent(item),
+          content_snapshot_json: paperItemContent(item, { estimatedMinutes: estimatedMinutes[item.item_no] }),
           answer_snapshot_json:
             typeof item.answer_snapshot_json === "string"
               ? JSON.parse(item.answer_snapshot_json)
