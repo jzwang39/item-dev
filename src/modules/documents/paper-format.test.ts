@@ -86,6 +86,22 @@ test("技能评分文件完整七列表格、重复表头、合计、否定项�
   assert.equal((result.xml.match(/<w:tblGrid>/g) ?? []).length, 2);
   assert.match(result.xml, /gridSpan w:val="5"/);
 });
+test("技能考生卷标题去掉“实操鉴定”，答案卷保留原始标题", async () => {
+  const titled: PaperWord = {
+    ...skill,
+    items: [{
+      ...skill.items[0],
+      content_snapshot_json: { assemblyPresentation: { evaluationPoint: "新媒体宣传公益慈善理念实操鉴定", skillExam: {} } },
+    }],
+  };
+  const paperResult = await inspect(titled, "paper");
+  assert.ok(paperResult.text.includes("试题1.新媒体宣传公益慈善理念"));
+  assert.ok(paperResult.text.includes("①试题名称：新媒体宣传公益慈善理念"));
+  assert.ok(!paperResult.text.includes("试题1.新媒体宣传公益慈善理念实操鉴定"));
+  const answersResult = await inspect(titled, "answers");
+  assert.ok(answersResult.text.includes("评价点：新媒体宣传公益慈善理念实操鉴定"));
+  assert.ok(answersResult.text.includes("试题1.新媒体宣传公益慈善理念实操鉴定"));
+});
 test("冻结样式与元数据优先于可修改计划；未知或串用模板拒绝", async () => {
   const result = await inspect({ ...theory, items: [skill.items[0]], presentation: {
     format: paperFormat("skill"), occupationName: "冻结职业", levelCode: "level_4", assessmentMode: "skill", durationMinutes: 90,

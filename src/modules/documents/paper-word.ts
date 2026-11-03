@@ -80,6 +80,9 @@ function paperQuestionLine(item: PaperWordItem, stemText: string) {
   if (/选/.test(item.question_type)) return `${item.item_no}．${stemText}（　　）`;
   return `${item.item_no}．${stemText}（${Number(item.score)}分）`;
 }
+function skillPaperTitle(title: string, kind: "paper" | "answers") {
+  return kind === "paper" ? title.replace(/\s*实操鉴定\s*$/u, "").trim() : title;
+}
 export function answerText(value: unknown) {
   const parsed = decode(value), data = record(value);
   return lines(data.answers ?? data.answer ?? parsed).join("、");
@@ -224,16 +227,17 @@ function skillPaper(paper: PaperWord, kind: "paper" | "answers"): Block[] {
   if (kind === "paper") children.push(paragraph("姓名：________________　准考证号：________________"));
   for (const [index, item] of paper.items.entries()) {
     const display = skillDisplay(item);
+    const title = skillPaperTitle(display.title, kind);
     children.push(...(kind === "paper" ? [
-      paragraph(`试题${item.item_no}.${display.title}`, true, { size: 28, pageBreakBefore: index > 0, keepNext: true }),
+      paragraph(`试题${item.item_no}.${title}`, true, { size: 28, pageBreakBefore: index > 0, keepNext: true }),
       paragraph("1.准备要求", false, { keepNext: true }),
     ] : [
       paragraph(`评价点：${display.evaluationPoint}`, true, { size: 28, pageBreakBefore: index > 0, keepNext: true }),
-      paragraph(`试题${item.item_no}.${display.title}`, true, { size: 28, keepNext: true }),
+      paragraph(`试题${item.item_no}.${title}`, true, { size: 28, keepNext: true }),
       paragraph("1.准备要求", false, { keepNext: true }),
     ]));
     for (const [label, preparation] of [["（1）考场准备：", display.venuePreparation], ["（2）考生准备：", display.candidatePreparation]]) {
-      children.push(paragraph(label, false, { keepNext: true }), paragraph(`①试题名称：${display.title}`),
+      children.push(paragraph(label, false, { keepNext: true }), paragraph(`①试题名称：${title}`),
         paragraph(`②本题分值：${Number(item.score)}分`), paragraph(`③考核时间：${display.time}`),
         paragraph(`④考核形式：${display.method}`), paragraph(`⑤${label.includes("考场") ? "设备设施准备" : "工具及其他准备"}：${preparation}`));
     }
