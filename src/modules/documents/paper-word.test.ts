@@ -98,9 +98,14 @@ test("判断题导出时将是否问句改写为陈述句", async () => {
   assert.doesNotMatch(value, /是否由公益项目本身完全负责/);
   assert.doesNotMatch(value, /是否是应该优先考虑/);
 });
-test("答案卷包含参考答案和冻结的评分标准", async () => {
+test("理论答案卷按样例样式输出客观题答案键，并保留主观题评分标准", async () => {
   const { value } = await extractRawText({ buffer: await createPaperWord(paper, "answers") });
-  for (const text of ["答案及评分标准", "参考答案：A", "核验并登记", "核验资料得3分", "错答、漏答不得分"]) assert.ok(value.includes(text));
+  for (const text of ["职业技能等级认定", "劝募员四级/中级工理论知识试卷答案", "一、单项选择题", "1. A", "二、简答题", "核验并登记", "核验资料得3分"]) {
+    assert.ok(value.includes(text), text);
+  }
+  assert.ok(!value.includes("冻结试卷 · 答案及评分标准"));
+  assert.ok(!value.includes("考试时间：120 分钟"));
+  assert.ok(!value.includes("参考答案：A"));
   assert.ok(!value.includes("随意销毁"));
 });
 test("缺少主观题评分标准时明确提示，不能编造", () => {

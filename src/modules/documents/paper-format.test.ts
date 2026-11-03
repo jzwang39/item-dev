@@ -68,6 +68,15 @@ test("理论样例动态题号、配分、注意事项、得分表、密封栏�
   assert.match(footer, /试卷编码/);
   assert.match(footer, /NUMPAGES/);
 });
+test("理论答案卷按五级答案样例输出分组答案键，不展开客观题逐题说明", async () => {
+  const result = await inspect(theory, "answers");
+  for (const text of ["职业技能等级认定", "劝募员五级/初级工理论知识试卷答案", "一、单项选择题", "1. A", "80. A", "二、判断题", "81. √", "100. √"]) {
+    assert.ok(result.text.includes(text), text);
+  }
+  assert.ok(!result.text.includes("考试时间：120 分钟"));
+  assert.ok(!result.text.includes("理论知识排版验证（非正式考试试卷） · 答案及评分标准"));
+  assert.ok(!result.text.includes("参考答案：A"));
+});
 test("技能考生卷按准备要求和考核试题输出，不泄漏参考步骤或评分表", async () => {
   const result = await inspect(skill, "paper");
   for (const text of ["试题1.核对并整理捐赠资料", "1.准备要求", "考场准备",

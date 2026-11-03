@@ -104,6 +104,17 @@ export function scoringText(item: PaperWordItem): string[] {
   if (/选|判断/.test(item.question_type)) return [`答案完全正确得 ${item.score} 分，错答、漏答不得分。`];
   return ["本题未保存评分标准，请补充并审核评分标准后使用。"];
 }
+function isObjectiveQuestion(type: string) {
+  return /选|判断/.test(type);
+}
+function theoryAnswerValue(item: PaperWordItem) {
+  const answer = answerText(item.answer_snapshot_json).trim();
+  if (/判断/.test(item.question_type)) {
+    if (answer === "正确") return "√";
+    if (answer === "错误") return "×";
+  }
+  return answer || "未保存";
+}
 export async function createPaperWord(paper: PaperWord, kind: "paper" | "answers") {
   if (!paper.items.length) throw new Error("试卷没有题目，不能下载空白试卷。");
   const frozen = paper.presentation;
@@ -168,6 +179,11 @@ const table = (rows: TableRow[], widths: number[]) => new Table({
   margins: { top: 50, bottom: 50, left: 90, right: 90 },
   borders: Object.fromEntries(["top", "bottom", "left", "right", "insideHorizontal", "insideVertical"].map((key) => [key, { style: BorderStyle.SINGLE, size: 4, color: "000000" }])),
 });
+const plainTable = (rows: TableRow[], widths: number[]) => new Table({
+  rows, columnWidths: widths, layout: TableLayoutType.FIXED,
+  width: { size: widths.reduce((sum, value) => sum + value, 0), type: WidthType.DXA },
+  borders: Object.fromEntries(["top", "bottom", "left", "right", "insideHorizontal", "insideVertical"].map((key) => [key, { style: BorderStyle.NONE, size: 0, color: "FFFFFF" }])),
+});
 function paperFooter(code: string) {
   return new Footer({ children: [new Paragraph({
     alignment: AlignmentType.CENTER,
@@ -187,9 +203,33 @@ function summary(paper: PaperWord, kind: "paper" | "answers"): Block[] {
     paragraph(`考试时间：${paper.duration_minutes} 分钟　共 ${paper.items.length} 题 / ${score} 分`),
   ];
 }
+function theoryAnswerSummary(paper: PaperWord): Block[] {
+  return [
+    paragraph("", false, { center: true, size: 20 }),
+    paragraph("职业技能等级认定", false, { center: true, size: 30 }),
+    paragraph("", false, { center: true, size: 20 }),
+    paragraph(`${paper.occupation_name}${paperLevels[paper.level_code] ?? paper.level_code}理论知识试卷答案`, true, { center: true, size: 36 }),
+    paragraph("", false, { center: true, size: 20 }),
+  ];
+}
+function theoryAnswerGrid(items: PaperWordItem[]) {
+  const columns = 6;
+  const widths = Array(columns).fill(1450);
+  const rows: TableRow[] = [];
+  for (let index = 0; index < items.length; index += columns) {
+    const group = items.slice(index, index + columns);
+    rows.push(new TableRow({
+      children: Array.from({ length: columns }, (_, cellIndex) => {
+        const item = group[cellIndex];
+        return cell(item ? `${item.item_no}. ${theoryAnswerValue(item)}` : "", { center: false });
+      }),
+    }));
+  }
+  return plainTable(rows, widths);
+}
 function theoryPaper(paper: PaperWord, kind: "paper" | "answers"): Block[] {
   const sections = [...new Set(paper.items.map((item) => item.section_no))].map((section) => paper.items.filter((item) => item.section_no === section));
-  const children: Block[] = summary(paper, kind);
+  const children: Block[] = kind === "answers" ? theoryAnswerSummary(paper) : summary(paper, kind);
   if (kind === "paper") {
     children.push(paragraph("注   意   事   项", true, { center: true, size: 28 }),
       paragraph("1、本试卷由已入库试题组卷，依据资料及版本以组卷留痕记录为准。"),
@@ -213,11 +253,19 @@ function theoryPaper(paper: PaperWord, kind: "paper" | "answers"): Block[] {
         if (/选/.test(item.question_type) && options.length) {
           children.push(...options.map((option) => paragraph(`  ${option.key}、${option.text}`)));
         } else if (!/判断/.test(item.question_type)) children.push(paragraph("答：\n\n\n"));
-      } else {
-        children.push(paragraph(`第 ${item.item_no} 题 · ${item.question_type} · ${Number(item.score)} 分`, true),
-          paragraph(`参考答案：${answerText(item.answer_snapshot_json) || "未保存参考答案"}`), paragraph("评分标准："),
-          ...scoringText(item).map((text) => paragraph(text)));
       }
+    }
+    if (kind === "answers" && items.every((item) => isObjectiveQuestion(item.question_type))) {
+      children.push(theoryAnswerGrid(items));
+      return;
+    }
+    if (kind === "answers") for (const item of items) {
+      children.push(
+        paragraph(`第${item.item_no}题 · ${item.question_type} · ${Number(item.score)}分`, true),
+        paragraph(`参考答案：${answerText(item.answer_snapshot_json) || "未保存参考答案"}`),
+        paragraph("评分标准："),
+        ...scoringText(item).map((text) => paragraph(text)),
+      );
     }
   });
   return children;

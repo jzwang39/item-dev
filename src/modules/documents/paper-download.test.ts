@@ -40,7 +40,7 @@ test("Word下载接口验证登录、管理员权限、参数、缺失试卷、�
       assert.match(response.headers.get("Content-Disposition")!, /attachment.*filename\*=UTF-8''/);
       assert.match(response.headers.get("Cache-Control")!, /no-store/);
       const { value } = await extractRawText({ buffer: Buffer.from(await response.arrayBuffer()) });
-      assert.ok(value.includes(kind === "paper" ? "捐赠材料应规范留存" : "参考答案：正确"));
+      assert.ok(value.includes(kind === "paper" ? "捐赠材料应规范留存" : "1. √"));
       if (kind === "paper") assert.ok(!value.includes("参考答案"));
     }
     assert.equal(audits.length, 2);
