@@ -284,6 +284,7 @@ export async function GET(request: Request) {
           (RowDataPacket & {
             question_no: string;
             question_type: string;
+            current_status: string;
             stem: string;
             answer_json: unknown;
             analysis_text: string | null;
@@ -291,7 +292,7 @@ export async function GET(request: Request) {
             point_name: string | null;
           })[]
         >(
-          `SELECT q.question_no, q.question_type, qv.stem, qv.answer_json, qv.analysis_text,
+          `SELECT q.question_no, q.question_type, q.current_status, qv.stem, qv.answer_json, qv.analysis_text,
                   GROUP_CONCAT(DISTINCT bn.node_code ORDER BY bn.node_code SEPARATOR '、') AS point_code,
                   GROUP_CONCAT(DISTINCT bn.name ORDER BY bn.ordinal SEPARATOR '、') AS point_name
              FROM questions q
@@ -299,9 +300,9 @@ export async function GET(request: Request) {
              LEFT JOIN question_assessment_points qap ON qap.question_version_id = qv.id
              LEFT JOIN blueprint_nodes bn ON bn.id = qap.blueprint_node_id
             WHERE q.occupation_id = ? AND q.assessment_mode = ?
-              AND q.current_status = 'stored' AND q.archived_at IS NULL
+              AND q.archived_at IS NULL
               AND ${commonEditorialLevelFilter()}
-            GROUP BY q.id, q.question_no, q.question_type, qv.stem, qv.answer_json, qv.analysis_text
+            GROUP BY q.id, q.question_no, q.question_type, q.current_status, qv.stem, qv.answer_json, qv.analysis_text
             ORDER BY q.question_no`,
           [occupationId, assessmentMode!, levelCode!, levelCode!],
         );
@@ -310,7 +311,7 @@ export async function GET(request: Request) {
             {
               error: {
                 code: "NO_APPROVED_QUESTIONS",
-                message: "当前范围没有已入库试题，无法生成正式成果文件。",
+                message: "当前范围没有题库试题，无法生成成果文件。",
               },
             },
             { status: 422 },
@@ -318,6 +319,7 @@ export async function GET(request: Request) {
         sheet.columns = [
           { header: "试题编号", key: "questionNo", width: 20 },
           { header: "题型", key: "type", width: 20 },
+          { header: "状态", key: "status", width: 14 },
           { header: "题干", key: "stem", width: 58 },
           { header: "标准答案", key: "answer", width: 18 },
           { header: "答案解析", key: "analysis", width: 52 },
@@ -328,6 +330,7 @@ export async function GET(request: Request) {
           sheet.addRow({
             questionNo: row.question_no,
             type: row.question_type,
+            status: row.current_status,
             stem: row.stem,
             answer: JSON.stringify(parseJson(row.answer_json)),
             analysis: row.analysis_text ?? "",
@@ -427,7 +430,6 @@ export async function GET(request: Request) {
            ) scope
            LEFT JOIN questions q ON q.occupation_id = po.id
                                AND q.assessment_mode = scope.assessment_mode
-                               AND q.current_status = 'stored'
                                AND q.archived_at IS NULL
                                AND (q.level_code = scope.level_code
                                  OR (q.level_code IS NULL AND q.assessment_mode='theory'
