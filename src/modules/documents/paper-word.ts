@@ -61,10 +61,19 @@ function cleanJudgementStem(stem: string) {
   const cleaned = stem.replace(/\r\n/g, "\n").trim();
   const parts = cleaned.split(/[?？]/);
   const suffix = parts.at(-1)?.trim() ?? "";
-  if (parts.length > 1 && suffix.length >= 4 && /[\u4e00-\u9fff]/.test(suffix)) {
-    return suffix.replace(/^[（(]?[A-DＡ-Ｄ][)）.、．：:]?\s*/, "").trim();
+  let normalized = parts.length > 1 && suffix.length >= 4 && /[\u4e00-\u9fff]/.test(suffix)
+    ? suffix.replace(/^[（(]?[A-DＡ-Ｄ][)）.、．：:]?\s*/, "").trim()
+    : cleaned;
+  if (/[?？]/.test(normalized)) {
+    normalized = normalized
+      .replace(/[?？]+/g, "")
+      .replace(/是否是(?=(?:应|应该|由|需|需要|必须|可以|会|能|要|属于|作为|采用|优先|按照|通过|承担|负责|具备|存在))/g, "")
+      .replace(/是不是(?=(?:应|应该|由|需|需要|必须|可以|会|能|要|属于|作为|采用|优先|按照|通过|承担|负责|具备|存在))/g, "")
+      .replace(/是否/g, "")
+      .replace(/是不是/g, "")
+      .trim();
   }
-  return cleaned;
+  return /[。！？]$/.test(normalized) ? normalized : `${normalized}。`;
 }
 function paperQuestionLine(item: PaperWordItem, stemText: string) {
   if (/判断/.test(item.question_type)) return `${item.item_no}．（　　）${stemText}`;

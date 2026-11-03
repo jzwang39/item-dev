@@ -69,6 +69,35 @@ test("判断题导出时剥离误混入的选择题问法，仅保留判断陈�
   assert.match(value, /92．（　　）按照捐赠者姓名分类。/);
   assert.doesNotMatch(value, /以下哪种方法最有利于资料的长期保存/);
 });
+test("判断题导出时将是否问句改写为陈述句", async () => {
+  const contaminated: PaperWord = {
+    ...paper,
+    items: [{
+      item_no: 81,
+      section_no: 2,
+      question_type: "判断题",
+      stem_snapshot: "公益项目资金使用透明度要求的执行和监督机制是否由公益项目本身完全负责？",
+      content_snapshot_json: {},
+      answer_snapshot_json: { answers: ["错误"] },
+      score_rubric_snapshot_json: null,
+      score: 1,
+    }, {
+      item_no: 87,
+      section_no: 2,
+      question_type: "判断题",
+      stem_snapshot: "在募捐工作中，资料分类的伦理考量是否是应该优先考虑捐赠者的隐私保护？",
+      content_snapshot_json: {},
+      answer_snapshot_json: { answers: ["正确"] },
+      score_rubric_snapshot_json: null,
+      score: 1,
+    }],
+  };
+  const { value } = await extractRawText({ buffer: await createPaperWord(contaminated, "paper") });
+  assert.match(value, /81．（　　）公益项目资金使用透明度要求的执行和监督机制由公益项目本身完全负责。/);
+  assert.match(value, /87．（　　）在募捐工作中，资料分类的伦理考量应该优先考虑捐赠者的隐私保护。/);
+  assert.doesNotMatch(value, /是否由公益项目本身完全负责/);
+  assert.doesNotMatch(value, /是否是应该优先考虑/);
+});
 test("答案卷包含参考答案和冻结的评分标准", async () => {
   const { value } = await extractRawText({ buffer: await createPaperWord(paper, "answers") });
   for (const text of ["答案及评分标准", "参考答案：A", "核验并登记", "核验资料得3分", "错答、漏答不得分"]) assert.ok(value.includes(text));
