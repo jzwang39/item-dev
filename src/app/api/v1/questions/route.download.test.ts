@@ -70,7 +70,7 @@ test("理论知识题库下载查询不生成非法逗号，并返回模板化 E
     await workbook.xlsx.load(bytes);
     const sheet = workbook.worksheets[0];
     assert.equal(sheet.getCell("A1").value, "编号");
-    assert.equal(sheet.getCell("A2").value, "AI-001");
+    assert.equal(sheet.getCell("A2").value, "A-A-A-001");
     assert.equal(sheet.getCell("J2").value, "B");
   } finally {
     if (previousAuth) require.cache[authPath] = previousAuth; else delete require.cache[authPath];

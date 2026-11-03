@@ -325,7 +325,7 @@ export async function GET(request: Request) {
           );
         if (assessmentMode === "theory") {
           const theoryWorkbook = buildTheoryQuestionBankWorkbook(rows.map((row) => ({
-            questionNo: row.question_no,
+            pointCode: row.point_code,
             questionType: row.question_type,
             difficulty: row.difficulty,
             alignment: row.alignment,
