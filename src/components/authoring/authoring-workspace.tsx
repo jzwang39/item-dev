@@ -5974,7 +5974,7 @@ function AuthoringTaskPanel() {
                 <p className="mb-0 mt-3 text-sm text-[#6980a4]">已清理 {generationJob.terminationSummary.deletedQuestions} 道草稿；保留 {generationJob.terminationSummary.preservedQuestions} 道受保护试题。终止记录已留存。</p>
               ) : null}
               {generationJob.status === "stopped" && generationJob.stopSummary ? (
-                <p className="mb-0 mt-3 text-sm text-[#6980a4]">原计划 {generationJob.stopSummary.target} 道，保留 {generationJob.stopSummary.preservedQuestions} 道，未生成 {generationJob.stopSummary.missingQuestions} 道。缺口及失败记录已留存。</p>
+                <p className="mb-0 mt-3 text-sm text-[#6980a4]">当前配额 {generationJob.target} 道，保留 {generationJob.stopSummary.preservedQuestions} 道，未生成 {Math.max(0, generationJob.target - generationJob.stopSummary.preservedQuestions)} 道。缺口及失败记录已留存。</p>
               ) : null}
               {(generationActive || generationJob.status === "partial" || generationJob.status === "stopped") && confirmedPlanId ? (
                 <div className="mt-3 flex flex-wrap gap-3">

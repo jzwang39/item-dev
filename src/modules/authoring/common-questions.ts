@@ -120,15 +120,18 @@ export async function commonPlanQuota(db: PoolConnection, scope: Scope, nodes: C
 
 export async function commonPlanProgress(planId: string) {
   const rows = await query<(RowDataPacket & { group_id: string; current_release_id: string | null; release_at_confirmation: string | null;
-    snapshot_json: unknown; version_no: number | null })[]>(`SELECT l.*,g.current_release_id,r.version_no
+    snapshot_json: unknown; version_no: number | null; quota_json: unknown })[]>(`SELECT l.*,g.current_release_id,g.quota_json,r.version_no
     FROM common_question_plan_links l JOIN common_question_groups g ON g.id=l.group_id
     LEFT JOIN common_question_releases r ON r.id=g.current_release_id WHERE l.plan_id=?`, [planId]);
   if (rows[0]) {
-    const row = rows[0], snapshot = decodeCommon<{ shared: QuotaPoint[]; quota: CommonQuota }>(row.snapshot_json);
-    const available = await query<(RowDataPacket & { point_key: string; question_type: string })[]>(`SELECT i.point_key,q.question_type
-      FROM common_question_release_items i JOIN questions q ON q.id=i.question_id AND q.archived_at IS NULL
-      JOIN common_question_members m ON m.question_id=q.id AND m.suspended=0 WHERE i.release_id=?`, [row.current_release_id]);
-    const coverage = commonCoverage(snapshot.quota, available);
+    const row = rows[0];
+    const quota = decodeCommon<CommonQuota>(row.quota_json);
+    const available = await query<(RowDataPacket & { point_key: string; question_type: string })[]>(`
+      SELECT m.point_key,q.question_type
+      FROM common_question_members m
+      JOIN questions q ON q.id=m.question_id AND q.archived_at IS NULL
+      WHERE m.group_id=? AND m.suspended=0`, [row.group_id]);
+    const coverage = commonCoverage(quota, available);
     return { groupId: row.group_id, releaseId: row.current_release_id, versionNo: row.version_no,
       releaseAtConfirmation: row.release_at_confirmation,
       target: coverage.reduce((sum, item) => sum + item.target, 0),
