@@ -300,7 +300,7 @@ export async function GET(request: Request) {
                     WHERE rr.question_version_id = q.current_version_id
                     ORDER BY rr.submitted_at DESC, rr.id DESC LIMIT 1) AS alignment,
                   qv.stem, qv.content_json, qv.answer_json, qv.score_rubric_json, qv.analysis_text,
-                  GROUP_CONCAT(DISTINCT bn.node_code ORDER BY bn.node_code SEPARATOR '、') AS point_code,
+                  GROUP_CONCAT(DISTINCT bn.node_code ORDER BY bn.node_code SEPARATOR '、') AS point_code
              FROM questions q
              INNER JOIN question_versions qv ON qv.id = q.current_version_id
              LEFT JOIN question_assessment_points qap ON qap.question_version_id = qv.id
