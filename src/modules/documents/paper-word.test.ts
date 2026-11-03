@@ -98,6 +98,35 @@ test("判断题导出时将是否问句改写为陈述句", async () => {
   assert.doesNotMatch(value, /是否由公益项目本身完全负责/);
   assert.doesNotMatch(value, /是否是应该优先考虑/);
 });
+test("判断题导出时清理没有问号但仍含疑问词的题干", async () => {
+  const contaminated: PaperWord = {
+    ...paper,
+    items: [{
+      item_no: 92,
+      section_no: 2,
+      question_type: "判断题",
+      stem_snapshot: "在募捐风险识别的效果评估指标体系构建过程中，忽视对捐赠者期望的评估可能导致哪些风险。",
+      content_snapshot_json: {},
+      answer_snapshot_json: { answers: ["错误"] },
+      score_rubric_snapshot_json: null,
+      score: 1,
+    }, {
+      item_no: 93,
+      section_no: 2,
+      question_type: "判断题",
+      stem_snapshot: "为什么要在劝募活动复盘中记录关键异议及处理结果。",
+      content_snapshot_json: {},
+      answer_snapshot_json: { answers: ["正确"] },
+      score_rubric_snapshot_json: null,
+      score: 1,
+    }],
+  };
+  const { value } = await extractRawText({ buffer: await createPaperWord(contaminated, "paper") });
+  assert.match(value, /92．（　　）在募捐风险识别的效果评估指标体系构建过程中，忽视对捐赠者期望的评估可能导致风险。/);
+  assert.match(value, /93．（　　）要在劝募活动复盘中记录关键异议及处理结果。/);
+  assert.doesNotMatch(value, /哪些风险/);
+  assert.doesNotMatch(value, /为什么要/);
+});
 test("理论答案卷按样例样式输出客观题答案键，并保留主观题评分标准", async () => {
   const { value } = await extractRawText({ buffer: await createPaperWord(paper, "answers") });
   for (const text of ["职业技能等级认定", "劝募员四级/中级工理论知识试卷答案", "一、单项选择题", "1. A", "二、简答题", "核验并登记", "核验资料得3分"]) {

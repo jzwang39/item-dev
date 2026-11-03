@@ -73,6 +73,16 @@ function cleanJudgementStem(stem: string) {
       .replace(/是不是/g, "")
       .trim();
   }
+  normalized = normalized
+    .replace(/(?:以下|下列)(?=(?:哪|何|为什么|为何|如何|怎样|怎么))/g, "")
+    .replace(/哪一种|哪一项|哪一个|哪一类|哪一方面|哪一环节/g, "")
+    .replace(/哪种|哪项|哪个|哪类|哪方面|哪环节|哪些/g, "")
+    .replace(/何种|何项|何人|何处|何时|何故|何因/g, "")
+    .replace(/为什么|为何|如何|怎样|怎么/g, "")
+    .replace(/[吗么]$/g, "")
+    .replace(/[，,:：；;]\s*$/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
   return /[。！？]$/.test(normalized) ? normalized : `${normalized}。`;
 }
 function paperQuestionLine(item: PaperWordItem, stemText: string) {
