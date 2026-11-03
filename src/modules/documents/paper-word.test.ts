@@ -20,6 +20,8 @@ test("试卷生成真实DOCX，包含题干选项但不泄漏答案或评分标�
   assert.equal(bytes.subarray(0, 2).toString(), "PK");
   const { value } = await extractRawText({ buffer: bytes });
   for (const text of ["冻结试卷", "四级/中级工", "120 分钟", "2 题 / 7 分", "按规范存档", "随意销毁"]) assert.ok(value.includes(text));
+  assert.match(value, /1．捐赠凭证应如何管理？（　　）/);
+  assert.doesNotMatch(value, /1．捐赠凭证应如何管理？（2分）/);
   for (const text of ["参考答案", "核验并登记", "核验资料得3分"]) assert.ok(!value.includes(text));
 });
 test("选择题导出时剥离误混入题干的选项，并按行输出选项", async () => {
@@ -42,12 +44,30 @@ test("选择题导出时剥离误混入题干的选项，并按行输出选项",
     }],
   };
   const { value } = await extractRawText({ buffer: await createPaperWord(contaminated, "paper") });
-  assert.match(value, /3．根据职业守则内容，以下哪项不属于对公益热爱的表现？（1分）/);
+  assert.match(value, /3．根据职业守则内容，以下哪项不属于对公益热爱的表现？（　　）/);
   assert.equal((value.match(/热爱公益/g) ?? []).length, 1);
   assert.equal((value.match(/诚信守法/g) ?? []).length, 1);
   assert.equal((value.match(/尊重伦理/g) ?? []).length, 1);
   assert.equal((value.match(/敬业奉献/g) ?? []).length, 1);
   assert.match(value, /A、热爱公益\s+B、诚信守法\s+C、尊重伦理\s+D、敬业奉献/);
+});
+test("判断题导出时剥离误混入的选择题问法，仅保留判断陈述", async () => {
+  const contaminated: PaperWord = {
+    ...paper,
+    items: [{
+      item_no: 92,
+      section_no: 2,
+      question_type: "判断题",
+      stem_snapshot: "在募捐工作中，以下哪种方法最有利于资料的长期保存？按照捐赠者姓名分类。",
+      content_snapshot_json: {},
+      answer_snapshot_json: { answers: ["错误"] },
+      score_rubric_snapshot_json: null,
+      score: 1,
+    }],
+  };
+  const { value } = await extractRawText({ buffer: await createPaperWord(contaminated, "paper") });
+  assert.match(value, /92．（　　）按照捐赠者姓名分类。/);
+  assert.doesNotMatch(value, /以下哪种方法最有利于资料的长期保存/);
 });
 test("答案卷包含参考答案和冻结的评分标准", async () => {
   const { value } = await extractRawText({ buffer: await createPaperWord(paper, "answers") });

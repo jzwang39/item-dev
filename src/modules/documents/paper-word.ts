@@ -57,6 +57,20 @@ function cleanChoiceStem(stem: string, options: Array<{ key: string; text: strin
   cleaned = cleaned.replace(/\s+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim();
   return cleaned;
 }
+function cleanJudgementStem(stem: string) {
+  const cleaned = stem.replace(/\r\n/g, "\n").trim();
+  const parts = cleaned.split(/[?？]/);
+  const suffix = parts.at(-1)?.trim() ?? "";
+  if (parts.length > 1 && suffix.length >= 4 && /[\u4e00-\u9fff]/.test(suffix)) {
+    return suffix.replace(/^[（(]?[A-DＡ-Ｄ][)）.、．：:]?\s*/, "").trim();
+  }
+  return cleaned;
+}
+function paperQuestionLine(item: PaperWordItem, stemText: string) {
+  if (/判断/.test(item.question_type)) return `${item.item_no}．（　　）${stemText}`;
+  if (/选/.test(item.question_type)) return `${item.item_no}．${stemText}（　　）`;
+  return `${item.item_no}．${stemText}（${Number(item.score)}分）`;
+}
 export function answerText(value: unknown) {
   const parsed = decode(value), data = record(value);
   return lines(data.answers ?? data.answer ?? parsed).join("、");
@@ -181,9 +195,9 @@ function theoryPaper(paper: PaperWord, kind: "paper" | "answers"): Block[] {
     for (const item of items) {
       if (kind === "paper") {
         const options = optionEntries(item.content_snapshot_json);
-        const stemText = /选/.test(item.question_type) ? cleanChoiceStem(item.stem_snapshot, options) : item.stem_snapshot;
-        const stem = /判断/.test(item.question_type) ? `${item.item_no}．（　　）${stemText}` : `${item.item_no}．${stemText}`;
-        children.push(paragraph(`${stem}（${Number(item.score)}分）`));
+        const stemText = /选/.test(item.question_type) ? cleanChoiceStem(item.stem_snapshot, options)
+          : /判断/.test(item.question_type) ? cleanJudgementStem(item.stem_snapshot) : item.stem_snapshot;
+        children.push(paragraph(paperQuestionLine(item, stemText)));
         if (/选/.test(item.question_type) && options.length) {
           children.push(...options.map((option) => paragraph(`  ${option.key}、${option.text}`)));
         } else if (!/判断/.test(item.question_type)) children.push(paragraph("答：\n\n\n"));
