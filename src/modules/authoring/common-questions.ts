@@ -123,17 +123,40 @@ export async function commonPlanProgress(planId: string) {
     snapshot_json: unknown; version_no: number | null })[]>(`SELECT l.*,g.current_release_id,r.version_no
     FROM common_question_plan_links l JOIN common_question_groups g ON g.id=l.group_id
     LEFT JOIN common_question_releases r ON r.id=g.current_release_id WHERE l.plan_id=?`, [planId]);
-  if (!rows[0]) return null;
-  const row = rows[0], snapshot = decodeCommon<{ shared: QuotaPoint[]; quota: CommonQuota }>(row.snapshot_json);
-  const available = await query<(RowDataPacket & { point_key: string; question_type: string })[]>(`SELECT i.point_key,q.question_type
-    FROM common_question_release_items i JOIN questions q ON q.id=i.question_id AND q.archived_at IS NULL
-    JOIN common_question_members m ON m.question_id=q.id AND m.suspended=0 WHERE i.release_id=?`, [row.current_release_id]);
-  const coverage = commonCoverage(snapshot.quota, available);
-  return { groupId: row.group_id, releaseId: row.current_release_id, versionNo: row.version_no,
-    releaseAtConfirmation: row.release_at_confirmation,
+  if (rows[0]) {
+    const row = rows[0], snapshot = decodeCommon<{ shared: QuotaPoint[]; quota: CommonQuota }>(row.snapshot_json);
+    const available = await query<(RowDataPacket & { point_key: string; question_type: string })[]>(`SELECT i.point_key,q.question_type
+      FROM common_question_release_items i JOIN questions q ON q.id=i.question_id AND q.archived_at IS NULL
+      JOIN common_question_members m ON m.question_id=q.id AND m.suspended=0 WHERE i.release_id=?`, [row.current_release_id]);
+    const coverage = commonCoverage(snapshot.quota, available);
+    return { groupId: row.group_id, releaseId: row.current_release_id, versionNo: row.version_no,
+      releaseAtConfirmation: row.release_at_confirmation,
+      target: coverage.reduce((sum, item) => sum + item.target, 0),
+      available: coverage.reduce((sum, item) => sum + Math.min(item.target, item.count), 0),
+      ready: coverage.every((item) => item.count >= item.target) && Boolean(row.current_release_id) };
+  }
+  const [plans] = await query<(RowDataPacket & { scope_json: unknown })[]>("SELECT scope_json FROM authoring_plans WHERE id=?", [planId]);
+  const scope = plans[0]?.scope_json ? decodeCommon<Scope & { commonGroupId?: string }>(plans[0].scope_json) : null;
+  if (!scope?.commonGroupId) return null;
+  const [groups] = await query<(RowDataPacket & { id: string; current_release_id: string | null; quota_json: unknown; version_no: number | null })[]>(
+    `SELECT g.id,g.current_release_id,g.quota_json,r.version_no
+      FROM common_question_groups g LEFT JOIN common_question_releases r ON r.id=g.current_release_id WHERE g.id=?`,
+    [scope.commonGroupId],
+  );
+  if (!groups[0]) return null;
+  const quota = decodeCommon<CommonQuota>(groups[0].quota_json);
+  const available = await query<(RowDataPacket & { point_key: string; question_type: string })[]>(
+    `SELECT m.point_key,q.question_type
+      FROM common_question_members m JOIN questions q ON q.id=m.question_id AND q.archived_at IS NULL
+      WHERE m.group_id=? AND m.suspended=0`,
+    [scope.commonGroupId],
+  );
+  const coverage = commonCoverage(quota, available);
+  return { groupId: groups[0].id, releaseId: groups[0].current_release_id, versionNo: groups[0].version_no,
+    releaseAtConfirmation: groups[0].current_release_id,
     target: coverage.reduce((sum, item) => sum + item.target, 0),
     available: coverage.reduce((sum, item) => sum + Math.min(item.target, item.count), 0),
-    ready: coverage.every((item) => item.count >= item.target) && Boolean(row.current_release_id) };
+    ready: coverage.every((item) => item.count >= item.target) && Boolean(groups[0].current_release_id) };
 }
 
 export async function configureCommonGroup(id: string, quota: unknown, expectedVersion: number, actor: string) {

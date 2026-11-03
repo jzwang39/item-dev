@@ -148,6 +148,7 @@ export function CommonQuestionsWorkspace() {
   const active = ["queued", "running"].includes(detail?.generation?.job?.status ?? "");
   const recentErrors = detail?.generation?.job?.activity?.recentErrors ?? [];
   const failedUnits = detail?.generation?.job?.failedUnits ?? [];
+  const coverageComplete = detail?.coverage.every((item) => item.count >= item.target) ?? false;
   return <section className="space-y-5">
     <div className="flex items-center justify-between"><h1 className="text-2xl font-semibold">基本要求公共题组</h1><Link href="/workspace/authoring">返回智能命题</Link></div>
     <p className="text-sm text-slate-500">五四三级共用一套题和发布版本，统一审核修改；各等级仍按自己的权重与试卷结构抽题。</p>
@@ -178,7 +179,9 @@ export function CommonQuestionsWorkspace() {
           <button className={button} disabled={busy} onClick={() => { setQuota(detail.quota.map((point) => ({
             ...point, multiple: 0, judgement: point.multiple > 0 && point.judgement === 0 ? 2 : point.judgement,
           }))); setConfigOpen(!configOpen); }}>统一配额</button>
-          <button className={button} disabled={busy || active} onClick={() => void act({ action: "generate", retry: detail.generation?.job?.status === "partial" })}>{busy ? "处理中..." : "生成 / 补齐公共题"}</button>
+          <button className={button} disabled={busy || active || coverageComplete} onClick={() => void act({ action: "generate", retry: detail.generation?.job?.status === "partial" })}>
+            {coverageComplete ? "已满足配额" : busy ? "处理中..." : "生成 / 补齐公共题"}
+          </button>
           <button className={button} disabled={busy || !detail.generationPlanId || detail.generation?.job?.status === "stopped"} onClick={() => void act({ action: "stop", confirmed: true }, "确认停止公共生成并保留全部成果？不会停止各等级其他知识要求的生成。")}>停止生成，保留成果</button>
           <button className={button} disabled={busy || !detail.generationPlanId} onClick={() => void act({ action: "terminate", confirmed: true }, "确认终止公共任务？只清理本次新生成且未经审核的草稿，选用旧题及已审核、已发布题保留。")}>终止公共任务</button>
           <button className={button} disabled={busy || active} onClick={() => void act({ action: "publish", rowVersion: detail.rowVersion, confirmed: true }, "确认统一发布？所有题目必须已审核、确认入库；五四三级的新组卷统一采用本版，历史试卷不变。")}>统一发布</button>

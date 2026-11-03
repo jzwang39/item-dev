@@ -85,10 +85,10 @@ export async function GET() {
         LIMIT 100`
     );
     return NextResponse.json({ data: await Promise.all(rows.map(async (row) => {
-      const scope = typeof row.scope_json === "string" ? JSON.parse(row.scope_json) : row.scope_json as { commonReference?: unknown };
+      const scope = typeof row.scope_json === "string" ? JSON.parse(row.scope_json) : row.scope_json as { commonReference?: unknown; commonGroupId?: string };
       return {
       ...row,
-      common: scope?.commonReference ? await commonPlanProgress(row.id) : null,
+      common: scope?.commonReference || scope?.commonGroupId ? await commonPlanProgress(row.id) : null,
       question_count: Number(row.question_count),
       generation_target: row.generation_target == null ? null : Number(row.generation_target),
       generation_generated: row.generation_generated == null ? null : Number(row.generation_generated),

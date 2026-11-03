@@ -6295,15 +6295,33 @@ function AuthoringTaskPanel() {
                     </td>
                     <td className="px-5 py-5 text-[#34445d]">
                       {getHistoryStage(row)}
-                      {row.common && !row.common.ready && <p className="text-xs text-amber-700">等待公共题组，整体尚未完成</p>}
+                      {row.scope_json.commonReference && row.common && !row.common.ready && <p className="text-xs text-amber-700">等待公共题组，整体尚未完成</p>}
                     </td>
                     <td className="px-5 py-5">
+                      {(() => {
+                        const progressGenerated = row.common ? row.common.available : (row.generation_generated ?? row.question_count);
+                        const progressTarget = row.common ? row.common.target : (row.generation_target ?? row.quota_json.minimumTotal);
+                        const progressStarted = row.common ? progressGenerated > 0 || Boolean(row.generation_status) : Boolean(row.generation_status) || row.question_count > 0;
+                        const canSupplement = row.generation_status === "stopped"
+                          && progressGenerated < progressTarget
+                          && !stoppingPlanId && !terminatingPlanId && !supplementingPlanId && !isLoadingHistoryResult && !isSavingHandoff;
+                        return <>
                       <ExecutionProgress
-                        generated={row.generation_generated ?? row.question_count}
-                        target={row.generation_target ?? row.quota_json.minimumTotal}
-                        started={Boolean(row.generation_status) || row.question_count > 0}
+                        generated={progressGenerated}
+                        target={progressTarget}
+                        started={progressStarted}
                       />
-                      {row.common && <p className="text-xs text-[#6980a4]">公共引用 {row.common.available}/{row.common.target} · {row.common.versionNo ? `V${row.common.versionNo}` : "未发布"}（不计重复生成）</p>}
+                      {row.common && <p className="text-xs text-[#6980a4]">
+                        {row.scope_json.commonGroupId ? "公共题组" : "公共引用"} {row.common.available}/{row.common.target} · {row.common.versionNo ? `V${row.common.versionNo}` : "未发布"}
+                        {row.scope_json.commonReference ? "（不计重复生成）" : ""}
+                      </p>}
+                      <SupplementButton
+                        enabled={canSupplement}
+                        busy={supplementingPlanId === row.id}
+                        onClick={() => void supplementGeneration(row.id)}
+                      />
+                        </>;
+                      })()}
                     </td>
                     <td className="px-5 py-5">
                       <button
@@ -6329,11 +6347,6 @@ function AuthoringTaskPanel() {
                       >
                         {stoppingPlanId === row.id ? "停止生成中..." : row.generation_status === "stopped" ? "已停止，保留成果" : "停止生成，保留成果"}
                       </button>
-                      <SupplementButton
-                        enabled={row.generation_status === "stopped" && (row.generation_generated ?? row.question_count) < (row.generation_target ?? row.quota_json.minimumTotal) && !stoppingPlanId && !terminatingPlanId && !supplementingPlanId && !isLoadingHistoryResult && !isSavingHandoff}
-                        busy={supplementingPlanId === row.id}
-                        onClick={() => void supplementGeneration(row.id)}
-                      />
                       <button
                         className="ml-3 rounded-xl border border-[#f0c8ce] bg-white px-4 py-2.5 text-sm font-medium text-[#cf4d58]"
                         disabled={Boolean(terminatingPlanId || stoppingPlanId || supplementingPlanId) || !["queued", "running", "partial"].includes(row.generation_status ?? "")}
