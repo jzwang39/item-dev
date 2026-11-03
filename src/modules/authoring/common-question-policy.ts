@@ -98,6 +98,23 @@ export const formalQuestionSource = `(SELECT q.id,q.project_id,q.question_no,q.o
   JOIN questions q ON q.id=i.question_id AND q.archived_at IS NULL
   JOIN common_question_points p ON p.group_id=g.id AND p.point_key=i.point_key)`;
 
+// Result downloads should reflect the currently maintained public basic
+// question set, even before a new public release is published.
+export const resultQuestionSource = `(SELECT q.id,q.project_id,q.question_no,q.occupation_id,q.level_code,q.assessment_mode,
+  q.question_type,q.current_version_id,q.current_status,q.difficulty,q.archived_at,q.row_version,q.created_at,q.updated_at,
+  NULL AS common_group_id,NULL AS common_release_id,NULL AS blueprint_node_id
+  FROM questions q WHERE NOT EXISTS(SELECT 1 FROM common_question_members cm WHERE cm.question_id=q.id)
+    AND ${legacyBasicExclusion("q")}
+  UNION ALL
+  SELECT q.id,q.project_id,q.question_no,q.occupation_id,p.level_code,q.assessment_mode,
+    q.question_type,q.current_version_id,q.current_status,
+    q.difficulty,q.archived_at,q.row_version,q.created_at,q.updated_at,
+    g.id AS common_group_id,g.current_release_id AS common_release_id,p.blueprint_node_id
+  FROM common_question_groups g
+  JOIN common_question_members m ON m.group_id=g.id AND m.suspended=0
+  JOIN questions q ON q.id=m.question_id AND q.archived_at IS NULL
+  JOIN common_question_points p ON p.group_id=g.id AND p.point_key=m.point_key)`;
+
 export function commonEditorialLevelFilter(alias = "q") {
   return `(${alias}.level_code=? OR (${alias}.level_code IS NULL AND ${alias}.assessment_mode='theory'
     AND EXISTS(SELECT 1 FROM common_question_members cm JOIN common_question_points cp ON cp.group_id=cm.group_id

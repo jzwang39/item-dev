@@ -8,7 +8,7 @@ import { createUlid } from "@/shared/database/ulid";
 import { query, withTransaction } from "@/shared/database/mysql";
 import { bulkStorageSchema } from "@/modules/authoring/question-storage-policy";
 import { storeQuestions } from "@/modules/authoring/question-storage";
-import { commonEditorialLevelFilter, formalQuestionSource } from "@/modules/authoring/common-question-policy";
+import { commonEditorialLevelFilter, resultQuestionSource } from "@/modules/authoring/common-question-policy";
 import { buildOutlineWorkbook, type ExportPoint } from "@/modules/blueprints/outline-export";
 import { createSkillOutlineWord, createSkillStructureWord } from "@/modules/documents/skill-blueprint-word";
 
@@ -294,7 +294,7 @@ export async function GET(request: Request) {
           `SELECT q.question_no, q.question_type, qv.stem, qv.answer_json, qv.analysis_text,
                   GROUP_CONCAT(DISTINCT bn.node_code ORDER BY bn.node_code SEPARATOR '、') AS point_code,
                   GROUP_CONCAT(DISTINCT bn.name ORDER BY bn.ordinal SEPARATOR '、') AS point_name
-             FROM ${formalQuestionSource} q
+             FROM ${resultQuestionSource} q
              INNER JOIN question_versions qv ON qv.id = q.current_version_id
              LEFT JOIN question_assessment_points qap ON qap.question_version_id = qv.id AND q.common_group_id IS NULL
              LEFT JOIN blueprint_nodes bn ON bn.id = COALESCE(q.blueprint_node_id,qap.blueprint_node_id)
@@ -424,7 +424,7 @@ export async function GET(request: Request) {
              UNION ALL SELECT 'level_3', 'theory'
              UNION ALL SELECT 'level_3', 'skill'
            ) scope
-           LEFT JOIN ${formalQuestionSource} q ON q.occupation_id = po.id
+           LEFT JOIN ${resultQuestionSource} q ON q.occupation_id = po.id
                                AND q.level_code = scope.level_code
                                AND q.assessment_mode = scope.assessment_mode
                                AND q.current_status = 'stored'
