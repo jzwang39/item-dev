@@ -80,7 +80,17 @@ export function mapPointRange(point: Record<string, unknown>, basis: WeightBasis
   const matches = basis.ranges.filter((range) =>
     (!categories.length || categories.some((category) => normalize(category) === normalize(range.category))) &&
     names.some((name) => typeof name === "string" && normalize(name) === normalize(range.name)));
-  return matches.length === 1 ? matches[0].key : null;
+  if (matches.length === 1) return matches[0].key;
+  // Related knowledge points in the standard are anchored by occupational
+  // function first; different secondary content names under the same function
+  // still belong to the same weighted range.
+  if (mode === "theory" && point.sectionKind === "related_knowledge") {
+    const functionName = typeof theoryStandard?.functionName === "string" ? normalize(theoryStandard.functionName) : "";
+    const fallback = functionName ? basis.ranges.filter((range) =>
+      normalize(range.category) === normalize("相关知识要求") && normalize(range.name) === functionName) : [];
+    if (fallback.length === 1) return fallback[0].key;
+  }
+  return null;
 }
 
 export type WeightedQuestion = {
@@ -120,8 +130,10 @@ export async function loadWeightedQuestions(db: PoolConnection, context: {
   let excluded = 0;
   for (const group of grouped.values()) {
     const first = group[0];
-    const keys = group.map((row) => row.node_id ? mapPointRange(decode<Record<string, unknown>>(row.requirement_json) ?? {}, basis, context.assessment_mode) : null);
-    if (keys.some((key) => !key) || new Set(keys).size !== 1) { excluded++; continue; }
+    const keys = [...new Set(group
+      .map((row) => row.node_id ? mapPointRange(decode<Record<string, unknown>>(row.requirement_json) ?? {}, basis, context.assessment_mode) : null)
+      .filter((key): key is string => Boolean(key)))];
+    if (!keys.length || keys.length !== 1) { excluded++; continue; }
     if (baseQuestionType(first.question_type) === "实操题") {
       try { scaleRubric(first.score_rubric_json, 100); } catch { excluded++; continue; }
     }

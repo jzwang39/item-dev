@@ -110,6 +110,7 @@ test("理论相关知识映射职业功能，公共基本要求不会因同名�
     { key: "F", category: "基本要求", name: "基础知识", weight: 20 },
   ] };
   assert.equal(mapPointRange({ sectionKind: "related_knowledge", standardSource: { functionName: "捐赠管理" } }, theory, "theory"), "K");
+  assert.equal(mapPointRange({ sectionKind: "related_knowledge", primaryName: "相关知识要求 · 捐赠管理", secondaryName: "信息管理" }, theory, "theory"), "K");
   assert.equal(mapPointRange({ sectionKind: "basic", secondaryName: "基础知识" }, theory, "theory"), "F");
   assert.equal(mapPointRange({ sectionKind: "basic", secondaryName: "捐赠管理" }, theory, "theory"), null);
 });
