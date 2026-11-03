@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ExecutionProgress } from "./execution-progress";
 import { selectCommonTask } from "./common-task-selection";
@@ -121,7 +120,13 @@ export function CommonQuestionsWorkspace() {
         setGroupId(payload.data.id); setDetail(null); setLoading(true); setPage(1); setConfigOpen(false);
       }
       setSelection([]);
-      setMessage(body.action === "suspend" ? `已统一停用。关联历史试卷${payload.data.affectedPapers?.length ?? 0}套，原试卷内容保留，影响范围已留痕。` : "操作已完成，记录已保留。");
+      setMessage(body.action === "suspend"
+        ? `已统一停用。关联历史试卷${payload.data.affectedPapers?.length ?? 0}套，原试卷内容保留，影响范围已留痕。`
+        : body.action === "review_all"
+          ? `已完成统一审核：提交审核 ${payload.data.submittedDrafts ?? 0} 题，审核通过 ${payload.data.approved ?? 0} 题。`
+          : body.action === "store_all"
+            ? `已完成统一确认入库：确认 ${payload.data.confirmedCount ?? 0} 题，入库 ${payload.data.storedCount ?? 0} 题。`
+            : "操作已完成，记录已保留。");
       if (body.action !== "create") await load();
     } catch (error) { setMessage(error instanceof Error ? error.message : "操作失败，请刷新核对结果。"); }
     finally { setBusy(false); }
@@ -150,11 +155,11 @@ export function CommonQuestionsWorkspace() {
   const failedUnits = detail?.generation?.job?.failedUnits ?? [];
   const coverageComplete = detail?.coverage.every((item) => item.count >= item.target) ?? false;
   return <section className="space-y-5">
-    <div className="flex items-center justify-between"><h1 className="text-2xl font-semibold">基本要求公共题组</h1><Link href="/workspace/authoring">返回智能命题</Link></div>
+    <div className="flex items-center justify-between"><h1 className="text-2xl font-semibold">基本要求公共题组</h1><a href="/workspace/authoring">返回智能命题</a></div>
     <p className="text-sm text-slate-500">五四三级共用一套题和发布版本，统一审核修改；各等级仍按自己的权重与试卷结构抽题。</p>
     {message && <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm">
       <p className="m-0 whitespace-pre-line">{message}</p>
-      {message.includes("细目表尚未全部审核") && <Link className="mt-2 inline-block underline" href="/workspace/review">前往细目表审核任务</Link>}
+      {message.includes("细目表尚未全部审核") && <a className="mt-2 inline-block underline" href="/workspace/review">前往细目表审核任务</a>}
     </div>}
     <div className="flex flex-wrap gap-3 rounded-xl border bg-white p-4">
       <select aria-label="选择公共题组" className={button} disabled={busy} value={groupId} onChange={(event) => {
@@ -270,7 +275,8 @@ export function CommonQuestionsWorkspace() {
           <button className={button} onClick={() => { setCandidates(true); setPage(1); setSelection([]); }}>选择历史基本要求题</button>
           {candidates && <button className={button} disabled={busy || !selection.length || active} onClick={() => void act({ action: "adopt", confirmed: true,
             selections: selection.map((item) => ({ questionId: item.question_id, versionId: item.current_version_id })) }, "确认将所选旧题纳入公共题组？复用原题ID和审核记录，不复制三份；未审核题仍须审核。")}>选用 {selection.length} 题</button>}
-          <Link className={button} href="/workspace/review">统一分配与审核</Link><Link className={button} href="/workspace/questions">确认后入库</Link>
+          <button className={button} disabled={busy || active || candidates} onClick={() => void act({ action: "review_all", confirmed: true }, "确认在当前公共题组内统一完成审核？会将草稿先提交审核，再将待审核/已退回题统一审定为通过。")}>统一分配与审核</button>
+          <button className={button} disabled={busy || active || candidates} onClick={() => void act({ action: "store_all", confirmed: true }, "确认在当前公共题组内统一完成确认并入库？会先确认未确认的已审定题，再批量入库。")}>确认后入库</button>
         </div>
         <p className="text-sm text-slate-500">{candidates ? "仅列出与冻结细目表对应的历史基本要求题；选用前核对内容及适用性。" : "这里显示正在维护的版本；新版本发布前，组卷仍使用上一发布版。"} 共{detail.total}题，每页20题。</p>
         {detail.questions.map((item) => <article key={item.question_id} className="my-3 rounded-lg border p-4">

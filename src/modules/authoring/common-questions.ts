@@ -8,6 +8,8 @@ import { isLegalPoint } from "./legal-topics";
 import { stemHash, type Scope, type QuotaPoint } from "./generation/contracts";
 import { basicIdentity, commonCoverage, commonLevels, commonQuotaPoints, decodeCommon, matchCommonPoints,
   validateCommonQuota, type CommonNode, type CommonPoint, type CommonQuota } from "./common-question-policy";
+import { confirmQuestionBatch } from "./bulk-question-confirmation";
+import { storeQuestions } from "./question-storage";
 
 export type CommonBasis = { points: CommonPoint[]; scopes: Record<string, Scope> };
 export type CommonPointLookup = {
@@ -306,6 +308,90 @@ export async function publishCommonGroup(id: string, expectedVersion: number, ac
     await db.execute("UPDATE common_question_groups SET current_release_id=?,row_version=row_version+1 WHERE id=?", [releaseId, id]);
     await commonAudit(db, group, actor, "publish", { releaseId, versionNo, previousReleaseId: group.current_release_id, count: rows.length });
     return { releaseId, versionNo };
+  });
+}
+
+export async function reviewCommonGroup(id: string, actor: string, opinion: string) {
+  return withTransaction(async (db) => {
+    const group = await lockGroup(db, id);
+    await assertIdle(db, group);
+    const rows = (await members(db, id)).filter((item) => !item.suspended);
+    if (!rows.length) throw new Error("公共题组暂无可审核题目。");
+    const [assignments] = await db.execute<(RowDataPacket & {
+      question_id: string; question_version_id: string; assignment_id: string | null; expert_id: string | null; reviewer_role: string | null;
+    })[]>(`SELECT q.id AS question_id,q.current_version_id AS question_version_id,ra.id AS assignment_id,ra.expert_id,reviewer.role AS reviewer_role
+      FROM questions q
+      LEFT JOIN review_assignments ra ON ra.id=(SELECT latest.id FROM review_assignments latest
+        WHERE latest.question_id=q.id AND latest.question_version_id=q.current_version_id
+        ORDER BY (latest.status='assigned') DESC,latest.assigned_at DESC,latest.id DESC LIMIT 1)
+      LEFT JOIN accounts reviewer ON reviewer.id=ra.expert_id
+      WHERE q.id IN (${rows.map(() => "?").join(",")}) FOR UPDATE`, rows.map((row) => row.question_id));
+    let submittedDrafts = 0, approved = 0, skipped = 0;
+    for (const row of rows) {
+      if (row.current_status === "stored" || row.current_status === "approved") { skipped++; continue; }
+      const assignment = assignments.find((item) => item.question_id === row.question_id && item.question_version_id === row.current_version_id);
+      if (assignment?.reviewer_role === "expert") throw new Error("公共题组中存在已分配给专家的题目，请先在专家审定中处理后再统一审核。");
+      let fromStatus = row.current_status;
+      if (row.current_status === "draft") {
+        await db.execute("UPDATE questions SET current_status='pending_review',row_version=row_version+1 WHERE id=?", [row.question_id]);
+        await db.execute("INSERT INTO question_status_events(id,question_id,question_version_id,from_status,to_status,reason,actor_id) VALUES(?,?,?,?,'pending_review',?,?)",
+          [createUlid(), row.question_id, row.current_version_id, row.current_status, "公共题组统一提交审核", actor]);
+        await db.execute(`INSERT INTO audit_logs(id,project_id,actor_id,action,object_type,object_id,before_json,after_json,result)
+          VALUES(?,?,?,'question.submit_review','question',?,?,?,'success')`,
+          [createUlid(), group.project_id, actor, row.question_id, JSON.stringify({ status: row.current_status }),
+            JSON.stringify({ status: "pending_review", questionVersionId: row.current_version_id, groupId: id })]);
+        submittedDrafts++;
+        fromStatus = "pending_review";
+      } else if (!["pending_review", "returned"].includes(row.current_status)) {
+        skipped++;
+        continue;
+      }
+      const assignmentId = assignment?.assignment_id ?? createUlid();
+      if (!assignment?.assignment_id) await db.execute(
+        "INSERT INTO review_assignments(id,project_id,question_id,question_version_id,expert_id,assigned_by,status,active_token) VALUES(?,?,?,?,?,?,?,NULL)",
+        [assignmentId, group.project_id, row.question_id, row.current_version_id, actor, actor, "submitted"],
+      );
+      else await db.execute("UPDATE review_assignments SET status='submitted',active_token=NULL,row_version=row_version+1 WHERE id=?", [assignmentId]);
+      await db.execute(`INSERT INTO review_records(id,assignment_id,question_version_id,expert_id,stage,decision,comment,alignment,idempotency_key,submitted_by,acting_role)
+        VALUES(?,?,?,?,?,'approved',?,'aligned',?,?,?)`,
+        [createUlid(), assignmentId, row.current_version_id, actor, "admin_proxy", opinion, `${assignmentId}:admin_proxy`, actor, "admin"]);
+      await db.execute("UPDATE questions SET current_status='approved',row_version=row_version+1 WHERE id=?", [row.question_id]);
+      await db.execute("INSERT INTO question_status_events(id,question_id,question_version_id,from_status,to_status,reason,actor_id) VALUES(?,?,?,?,'approved',?,?)",
+        [createUlid(), row.question_id, row.current_version_id, fromStatus, opinion, actor]);
+      await db.execute(`INSERT INTO audit_logs(id,project_id,actor_id,action,object_type,object_id,before_json,after_json,result)
+        VALUES(?,?,?,'review.admin_action','question',?,?,?,'success')`,
+        [createUlid(), group.project_id, actor, row.question_id, JSON.stringify({ versionId: row.current_version_id, status: fromStatus }),
+          JSON.stringify({ action: "review", decision: "approved", batch: true, actingRole: "admin", versionId: row.current_version_id, status: "approved", opinion })]);
+      approved++;
+    }
+    await commonAudit(db, group, actor, "review_all", { submittedDrafts, approved, skipped, opinion });
+    return { submittedDrafts, approved, skipped };
+  });
+}
+
+export async function confirmAndStoreCommonGroup(id: string, actor: string, opinion: string) {
+  return withTransaction(async (db) => {
+    const group = await lockGroup(db, id);
+    await assertIdle(db, group);
+    const [rows] = await db.execute<(RowDataPacket & {
+      question_id: string; current_version_id: string; current_status: string; suspended: number; confirmed_at: string | null;
+    })[]>(`SELECT m.question_id,q.current_version_id,q.current_status,m.suspended,qrc.confirmed_at
+      FROM common_question_members m
+      JOIN questions q ON q.id=m.question_id AND q.archived_at IS NULL
+      LEFT JOIN question_review_confirmations qrc ON qrc.question_version_id=q.current_version_id
+      WHERE m.group_id=? FOR UPDATE`, [id]);
+    const activeRows = rows.filter((row) => !row.suspended);
+    if (!activeRows.length) throw new Error("公共题组暂无可入库题目。");
+    const blocking = activeRows.filter((row) => !["approved", "stored"].includes(row.current_status));
+    if (blocking.length) throw new Error(`仍有 ${blocking.length} 道题尚未完成统一审核，请先执行“统一分配与审核”。`);
+    const toConfirm = activeRows.filter((row) => row.current_status === "approved" && !row.confirmed_at)
+      .map((row) => ({ questionId: row.question_id, versionId: row.current_version_id }));
+    if (toConfirm.length) await confirmQuestionBatch(db, toConfirm, actor, opinion);
+    const toStore = activeRows.filter((row) => row.current_status === "approved")
+      .map((row) => ({ questionId: row.question_id, versionId: row.current_version_id }));
+    const stored = toStore.length ? await storeQuestions(db, toStore, actor, opinion) : { stored: true, storedCount: 0 };
+    await commonAudit(db, group, actor, "store_all", { confirmedCount: toConfirm.length, storedCount: stored.storedCount, opinion });
+    return { confirmedCount: toConfirm.length, storedCount: stored.storedCount };
   });
 }
 

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getVerifiedSession } from "@/auth";
 import { adoptCommonQuestions, commonQuestionAction, configureCommonGroup, createCommonGroup, getCommonGroup,
-  listCommonGroups, lookupCommonPointCode, prepareCommonGeneration, publishCommonGroup, syncCommonBasis } from "@/modules/authoring/common-questions";
+  listCommonGroups, lookupCommonPointCode, prepareCommonGeneration, publishCommonGroup, reviewCommonGroup, confirmAndStoreCommonGroup, syncCommonBasis } from "@/modules/authoring/common-questions";
 import { getGenerationState, startGeneration } from "@/modules/authoring/generation/service";
 import { commonQuotaSchema } from "@/modules/authoring/common-question-policy";
 import { stopGenerationKeepResults } from "@/modules/authoring/generation/stop";
@@ -17,6 +17,8 @@ const schema = z.discriminatedUnion("action", [
     selections: z.array(z.object({ questionId: id, versionId: id })).min(1).max(100) }),
   z.object({ action: z.literal("generate"), groupId: id, retry: z.boolean().default(false) }),
   z.object({ action: z.literal("publish"), groupId: id, rowVersion: z.number().int().positive(), confirmed: z.literal(true) }),
+  z.object({ action: z.literal("review_all"), groupId: id, confirmed: z.literal(true) }),
+  z.object({ action: z.literal("store_all"), groupId: id, confirmed: z.literal(true) }),
   z.object({ action: z.literal("sync_basis"), groupId: id, confirmed: z.literal(true) }),
   z.object({ action: z.literal("stop"), groupId: id, confirmed: z.literal(true) }),
   z.object({ action: z.literal("terminate"), groupId: id, confirmed: z.literal(true) }),
@@ -54,6 +56,8 @@ export async function POST(request: Request) {
       case "configure": data = await configureCommonGroup(input.groupId, input.quota, input.rowVersion, actor); break;
       case "adopt": data = await adoptCommonQuestions(input.groupId, input.selections, actor); break;
       case "publish": data = await publishCommonGroup(input.groupId, input.rowVersion, actor); break;
+      case "review_all": data = await reviewCommonGroup(input.groupId, actor, "公共题组统一审核通过"); break;
+      case "store_all": data = await confirmAndStoreCommonGroup(input.groupId, actor, "公共题组统一确认并入库"); break;
       case "sync_basis": data = await syncCommonBasis(input.groupId, actor); break;
       case "generate": {
         const planId = await prepareCommonGeneration(input.groupId, actor);
