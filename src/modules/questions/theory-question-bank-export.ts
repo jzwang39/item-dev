@@ -2,7 +2,7 @@ import ExcelJS from "exceljs";
 
 type QuestionOption = { key?: string; content?: string; text?: string };
 type TheoryQuestionExportRow = {
-  pointCode: string | null;
+  questionNo: string;
   questionType: string;
   difficulty: "easy" | "medium" | "hard" | null;
   alignment: "aligned" | "partially_aligned" | "not_aligned" | null;
@@ -125,7 +125,7 @@ export function buildTheoryQuestionBankWorkbook(rows: TheoryQuestionExportRow[])
   rows.forEach((row) => {
     const options = parseOptions(row.contentJson);
     const line = sheet.addRow({
-      code: row.pointCode ?? "",
+      code: row.questionNo,
       difficulty: difficultyScore(row.difficulty),
       alignment: alignmentScore(row.alignment),
       type: normalizeType(row.questionType),

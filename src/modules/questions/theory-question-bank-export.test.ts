@@ -6,7 +6,7 @@ import { buildTheoryQuestionBankWorkbook } from "./theory-question-bank-export";
 test("理论知识题库导出按导入模板输出列结构、题型和样式", async () => {
   const workbook = buildTheoryQuestionBankWorkbook([
     {
-      pointCode: "A-A-A-001",
+      questionNo: "T-0001",
       questionType: "单项选择题",
       difficulty: null,
       alignment: null,
@@ -22,7 +22,7 @@ test("理论知识题库导出按导入模板输出列结构、题型和样式",
       scoreRubricJson: null,
     },
     {
-      pointCode: "A-A-A-004",
+      questionNo: "T-0002",
       questionType: "判断题",
       difficulty: "hard",
       alignment: "partially_aligned",
@@ -45,7 +45,7 @@ test("理论知识题库导出按导入模板输出列结构、题型和样式",
   assert.equal(sheet.getColumn(5).width, 46.78);
   assert.equal(sheet.getColumn(11).width, 14.66);
 
-  assert.equal(sheet.getCell("A2").value, "A-A-A-001");
+  assert.equal(sheet.getCell("A2").value, "T-0001");
   assert.equal(sheet.getCell("B2").value, "3");
   assert.equal(sheet.getCell("C2").value, "5");
   assert.equal(sheet.getCell("D2").value, "单项选择");
@@ -54,7 +54,7 @@ test("理论知识题库导出按导入模板输出列结构、题型和样式",
   assert.equal(sheet.getCell("J2").value, "B");
   assert.equal(sheet.getCell("K2").value, "依据职业道德定义判断。");
 
-  assert.equal(sheet.getCell("A3").value, "A-A-A-004");
+  assert.equal(sheet.getCell("A3").value, "T-0002");
   assert.equal(sheet.getCell("B3").value, "4");
   assert.equal(sheet.getCell("C3").value, "3");
   assert.equal(sheet.getCell("D3").value, "判断题");
@@ -72,7 +72,7 @@ test("理论知识题库导出按导入模板输出列结构、题型和样式",
 
 test("理论知识题库导出优先写评分标准，没有评分标准时回退解析", async () => {
   const workbook = buildTheoryQuestionBankWorkbook([{
-    pointCode: "B-D-A-006",
+    questionNo: "T-0100",
     questionType: "多项选择题",
     difficulty: "easy",
     alignment: "aligned",
