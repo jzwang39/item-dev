@@ -30,6 +30,33 @@ function lines(value: unknown): string[] {
   if (typeof value === "object") return Object.entries(value).flatMap(([key, item]) => lines(item).map((text) => `${key}：${text}`));
   return [String(value)];
 }
+function optionEntries(value: unknown) {
+  const content = record(value);
+  const options = Array.isArray(content.options) ? content.options : [];
+  return options.map((option: unknown) => {
+    const data = record(option);
+    return {
+      key: String(data.key ?? "").trim(),
+      text: String(data.text ?? data.content ?? "").trim(),
+    };
+  }).filter((option) => option.key && option.text);
+}
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function cleanChoiceStem(stem: string, options: Array<{ key: string; text: string }>) {
+  let cleaned = stem.replace(/\r\n/g, "\n").trim();
+  for (const option of options) {
+    const key = escapeRegExp(option.key);
+    const text = escapeRegExp(option.text);
+    const inline = new RegExp(`(?:\\s|^)[(（]?\s*${key}\s*[)）.、．：:]?\\s*${text}(?=\\s|$)`, "g");
+    cleaned = cleaned.replace(inline, " ");
+    const trailing = new RegExp(`(?:\\n|\\r|\\s)*${key}\\s*[、.．：:]\\s*${text}(?=\\s|$)`, "g");
+    cleaned = cleaned.replace(trailing, " ");
+  }
+  cleaned = cleaned.replace(/\s+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim();
+  return cleaned;
+}
 export function answerText(value: unknown) {
   const parsed = decode(value), data = record(value);
   return lines(data.answers ?? data.answer ?? parsed).join("、");
@@ -153,16 +180,12 @@ function theoryPaper(paper: PaperWord, kind: "paper" | "answers"): Block[] {
     children.push(paragraph(sectionInstruction(items, index + 1), true, { keepNext: true }));
     for (const item of items) {
       if (kind === "paper") {
-        const stem = /判断/.test(item.question_type) ? `${item.item_no}．（　　）${item.stem_snapshot}` : `${item.item_no}．${item.stem_snapshot}`;
+        const options = optionEntries(item.content_snapshot_json);
+        const stemText = /选/.test(item.question_type) ? cleanChoiceStem(item.stem_snapshot, options) : item.stem_snapshot;
+        const stem = /判断/.test(item.question_type) ? `${item.item_no}．（　　）${stemText}` : `${item.item_no}．${stemText}`;
         children.push(paragraph(`${stem}（${Number(item.score)}分）`));
-        const options = parseRecord(item.content_snapshot_json).options;
-        if (/选/.test(item.question_type) && Array.isArray(options)) {
-          const text = options.map((option) => {
-            const data = parseRecord(option);
-            return `${data.key ?? ""}、${data.text ?? data.content ?? ""}`;
-          });
-          if (text.every((value) => value.length <= 16)) children.push(paragraph(`  ${text.join("    ")}`));
-          else children.push(...text.map((value) => paragraph(`  ${value}`)));
+        if (/选/.test(item.question_type) && options.length) {
+          children.push(...options.map((option) => paragraph(`  ${option.key}、${option.text}`)));
         } else if (!/判断/.test(item.question_type)) children.push(paragraph("答：\n\n\n"));
       } else {
         children.push(paragraph(`第 ${item.item_no} 题 · ${item.question_type} · ${Number(item.score)} 分`, true),

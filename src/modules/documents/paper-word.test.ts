@@ -22,6 +22,33 @@ test("试卷生成真实DOCX，包含题干选项但不泄漏答案或评分标�
   for (const text of ["冻结试卷", "四级/中级工", "120 分钟", "2 题 / 7 分", "按规范存档", "随意销毁"]) assert.ok(value.includes(text));
   for (const text of ["参考答案", "核验并登记", "核验资料得3分"]) assert.ok(!value.includes(text));
 });
+test("选择题导出时剥离误混入题干的选项，并按行输出选项", async () => {
+  const contaminated: PaperWord = {
+    ...paper,
+    items: [{
+      item_no: 3,
+      section_no: 1,
+      question_type: "单项选择题",
+      stem_snapshot: "根据职业守则内容，以下哪项不属于对公益热爱的表现？\n(A) 热爱公益\n(B) 诚信守法\n(C) 尊重伦理\n(D) 敬业奉献",
+      content_snapshot_json: { options: [
+        { key: "A", content: "热爱公益" },
+        { key: "B", content: "诚信守法" },
+        { key: "C", content: "尊重伦理" },
+        { key: "D", content: "敬业奉献" },
+      ] },
+      answer_snapshot_json: { answers: ["D"] },
+      score_rubric_snapshot_json: null,
+      score: 1,
+    }],
+  };
+  const { value } = await extractRawText({ buffer: await createPaperWord(contaminated, "paper") });
+  assert.match(value, /3．根据职业守则内容，以下哪项不属于对公益热爱的表现？（1分）/);
+  assert.equal((value.match(/热爱公益/g) ?? []).length, 1);
+  assert.equal((value.match(/诚信守法/g) ?? []).length, 1);
+  assert.equal((value.match(/尊重伦理/g) ?? []).length, 1);
+  assert.equal((value.match(/敬业奉献/g) ?? []).length, 1);
+  assert.match(value, /A、热爱公益\s+B、诚信守法\s+C、尊重伦理\s+D、敬业奉献/);
+});
 test("答案卷包含参考答案和冻结的评分标准", async () => {
   const { value } = await extractRawText({ buffer: await createPaperWord(paper, "answers") });
   for (const text of ["答案及评分标准", "参考答案：A", "核验并登记", "核验资料得3分", "错答、漏答不得分"]) assert.ok(value.includes(text));
