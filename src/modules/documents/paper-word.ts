@@ -58,33 +58,12 @@ function cleanChoiceStem(stem: string, options: Array<{ key: string; text: strin
   return cleaned;
 }
 function cleanJudgementStem(stem: string) {
-  const cleaned = stem.replace(/\r\n/g, "\n").trim();
-  const parts = cleaned.split(/[?？]/);
-  const suffix = parts.at(-1)?.trim() ?? "";
-  let normalized = parts.length > 1 && suffix.length >= 4 && /[\u4e00-\u9fff]/.test(suffix)
-    ? suffix.replace(/^[（(]?[A-DＡ-Ｄ][)）.、．：:]?\s*/, "").trim()
-    : cleaned;
-  if (/[?？]/.test(normalized)) {
-    normalized = normalized
-      .replace(/[?？]+/g, "")
-      .replace(/是否是(?=(?:应|应该|由|需|需要|必须|可以|会|能|要|属于|作为|采用|优先|按照|通过|承担|负责|具备|存在))/g, "")
-      .replace(/是不是(?=(?:应|应该|由|需|需要|必须|可以|会|能|要|属于|作为|采用|优先|按照|通过|承担|负责|具备|存在))/g, "")
-      .replace(/是否/g, "")
-      .replace(/是不是/g, "")
-      .trim();
-  }
-  normalized = normalized
-    .replace(/(?:以下|下列)(?=(?:哪|何|为什么|为何|如何|怎样|怎么))/g, "")
-    .replace(/哪一(?=(?:部分|项|个|类|方面|环节|种|条|章节|内容))/g, "")
-    .replace(/哪一种|哪一项|哪一个|哪一类|哪一方面|哪一环节/g, "")
-    .replace(/哪种|哪项|哪个|哪类|哪方面|哪环节|哪些/g, "")
-    .replace(/何种|何项|何人|何处|何时|何故|何因/g, "")
-    .replace(/为什么|为何|如何|怎样|怎么/g, "")
-    .replace(/[吗么]$/g, "")
-    .replace(/[，,:：；;]\s*$/g, "")
-    .replace(/\s{2,}/g, " ")
+  return stem
+    .replace(/\r\n/g, "\n")
+    .replace(/\s+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
     .trim();
-  return /[。！？]$/.test(normalized) ? normalized : `${normalized}。`;
 }
 function paperQuestionLine(item: PaperWordItem, stemText: string) {
   if (/判断/.test(item.question_type)) return `${item.item_no}．（　　）${stemText}`;

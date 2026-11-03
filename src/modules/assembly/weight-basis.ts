@@ -3,6 +3,22 @@ import { baseQuestionType, inventoryKey, rangeTargets, scaleRubric, type WeightR
 
 export const decode = <T,>(value: unknown): T => (typeof value === "string" ? JSON.parse(value) : value) as T;
 const normalize = (value: string) => value.normalize("NFKC").replace(/^\s*\d+(?:\.\d+)*[.、]?\s*/, "").replace(/\s+/g, "").trim();
+const interrogativeJudgementPatterns = [
+  /[?？]/u,
+  /(?:以下|下列)哪/u,
+  /哪些/u,
+  /哪一/u,
+  /哪种/u,
+  /哪项/u,
+  /哪个/u,
+  /哪类/u,
+  /哪方面/u,
+  /哪环节/u,
+  /为什么|为何/u,
+  /如何|怎样|怎么/u,
+  /何种|何项|何人|何处|何时|何故|何因/u,
+  /是否|是不是/u,
+];
 type WeightItem = { category?: string; name: string; weights: Record<string, number | null>; columnWeights?: Record<string, number | null> };
 type WeightSnapshot = {
   items: WeightItem[];
@@ -116,6 +132,11 @@ export type WeightedQuestion = {
   content: unknown; answer: unknown; rubric: unknown; rangeKey: string; nodeIds: string[]; evaluationPoint: string;
 };
 
+export function isInterrogativeJudgementStem(stem: string) {
+  const normalized = stem.normalize("NFKC").replace(/\s+/g, "").trim();
+  return interrogativeJudgementPatterns.some((pattern) => pattern.test(normalized));
+}
+
 export async function loadWeightedQuestions(db: PoolConnection, context: {
   project_id: string; occupation_id: string; level_code: string; assessment_mode: string;
 }, basis: WeightBasis) {
@@ -147,6 +168,11 @@ export async function loadWeightedQuestions(db: PoolConnection, context: {
   let excluded = 0;
   for (const group of grouped.values()) {
     const first = group[0];
+    if (context.assessment_mode === "theory" && baseQuestionType(first.question_type) === "判断题" &&
+      isInterrogativeJudgementStem(first.stem)) {
+      excluded++;
+      continue;
+    }
     const keys = [...new Set(group
       .map((row) => row.node_id ? mapPointRange(decode<Record<string, unknown>>(row.requirement_json) ?? {}, basis, context.assessment_mode) : null)
       .filter((key): key is string => Boolean(key)))];

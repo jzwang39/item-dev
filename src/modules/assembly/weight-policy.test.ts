@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { allocateWeighted, inventoryKey, rangeTargets, scaleRubric, scoreCents, suggestWeightedSections, type WeightedSection } from "./weight-policy";
-import { mapPointRange, type WeightBasis } from "./weight-basis";
+import { isInterrogativeJudgementStem, mapPointRange, type WeightBasis } from "./weight-basis";
 import { scoringText } from "@/modules/documents/paper-word";
 
 const ranges = [
@@ -116,6 +116,13 @@ test("理论相关知识映射职业功能，公共基本要求不会因同名�
   assert.equal(mapPointRange({ sectionKind: "basic", secondaryName: "基础知识" }, theory, "theory"), "F");
   assert.equal(mapPointRange({ primaryName: "基本要求", secondaryName: "基础知识" }, theory, "theory"), "F");
   assert.equal(mapPointRange({ sectionKind: "basic", secondaryName: "捐赠管理" }, theory, "theory"), null);
+});
+
+test("理论判断题候选池过滤疑问式题干", () => {
+  assert.equal(isInterrogativeJudgementStem("在募捐风险识别的效果评估指标体系构建过程中，忽视对捐赠者期望的评估可能导致哪些风险。"), true);
+  assert.equal(isInterrogativeJudgementStem("公益项目资金使用透明度要求的法律和法规依据是《公益项目考察要点》中的哪一部分。"), true);
+  assert.equal(isInterrogativeJudgementStem("为什么要在劝募活动复盘中记录关键异议及处理结果。"), true);
+  assert.equal(isInterrogativeJudgementStem("公益项目资金使用透明度要求应当纳入项目执行监督机制。"), false);
 });
 
 test("实操评分同比换算仅写试卷快照，分值和准确，原题不变", () => {
