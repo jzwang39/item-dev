@@ -5989,8 +5989,8 @@ function AuthoringTaskPanel() {
                   onClick={() => void supplementGeneration(confirmedPlanId)}
                 />
                 <button type="button" className="rounded-lg border border-[#f0c8ce] px-4 py-2 text-[#cf4d58] disabled:opacity-50"
-                  disabled={Boolean(terminatingPlanId || stoppingPlanId || supplementingPlanId) || generationJob.status === "stopped"} onClick={() => void terminateTask(confirmedPlanId)}>
-                  {terminatingPlanId === confirmedPlanId ? "终止清理中..." : "终止任务"}
+                  disabled={Boolean(terminatingPlanId || stoppingPlanId || supplementingPlanId) || generationJob.status === "cancelled"} onClick={() => void terminateTask(confirmedPlanId)}>
+                  {terminatingPlanId === confirmedPlanId ? "终止清理中..." : generationJob.status === "cancelled" ? "已终止" : "终止任务"}
                 </button>
                 </div>
               ) : null}
@@ -6349,7 +6349,7 @@ function AuthoringTaskPanel() {
                       </button>
                       <button
                         className="ml-3 rounded-xl border border-[#f0c8ce] bg-white px-4 py-2.5 text-sm font-medium text-[#cf4d58]"
-                        disabled={Boolean(terminatingPlanId || stoppingPlanId || supplementingPlanId) || !["queued", "running", "partial"].includes(row.generation_status ?? "")}
+                        disabled={Boolean(terminatingPlanId || stoppingPlanId || supplementingPlanId) || !["queued", "running", "partial", "stopped"].includes(row.generation_status ?? "")}
                         onClick={() => void terminateTask(row.id)}
                         type="button"
                       >

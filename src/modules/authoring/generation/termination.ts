@@ -24,7 +24,7 @@ export async function terminateGeneration(planId: string, actorId: string) {
       summary: typeof job.termination_summary_json === "string" ? JSON.parse(job.termination_summary_json) as TerminationSummary
         : job.termination_summary_json ?? { deletedQuestions: 0, preservedQuestions: 0 },
     };
-    if (!["queued", "running", "partial"].includes(job.status)) throw new Error("已完成任务不能终止清理，请通过试题管理处理。");
+    if (!["queued", "running", "partial", "stopped"].includes(job.status)) throw new Error("已完成任务不能终止清理，请通过试题管理处理。");
     const [questions] = await db.execute<(RowDataPacket & { id: string; current_status: string; current_version_id: string })[]>(
       `SELECT q.id,q.current_status,q.current_version_id FROM questions q
        JOIN authoring_generation_slots s ON s.question_id=q.id WHERE s.job_id=? FOR UPDATE`, [job.id],

@@ -208,13 +208,16 @@ export async function getGenerationState(planId: string) {
        FROM authoring_generation_units u JOIN authoring_generation_slots s ON s.unit_id=u.id
       WHERE u.job_id=? AND u.status IN ('failed','stopped') AND s.question_id IS NULL GROUP BY u.id`, [job.id],
   );
-  const generated = batches.reduce((sum, batch) => sum + Number(batch.generated_count), 0);
+  const snapshotUsesCommonGroup = Boolean(snapshot.scope.commonGroupId);
+  const batchGenerated = batches.reduce((sum, batch) => sum + Number(batch.generated_count), 0);
   const pending = batches.reduce((sum, batch) => sum + Number(batch.pending), 0);
-  const status = ["cancelled", "stopped"].includes(job.status) ? job.status : generated === Number(job.target_count) ? "succeeded" : pending ? job.status === "queued" ? "queued" : "running" : "partial";
+  const target = snapshotUsesCommonGroup && common ? common.target : Number(job.target_count);
+  const generated = snapshotUsesCommonGroup && common ? common.available : batchGenerated;
+  const status = ["cancelled", "stopped"].includes(job.status) ? job.status : generated === target ? "succeeded" : pending ? job.status === "queued" ? "queued" : "running" : "partial";
   return {
     common,
     job: {
-      id: job.id, status, target: Number(job.target_count), generated,
+      id: job.id, status, target, generated,
       retryLimits: { strategy: "per_slot_v2", perSlotGenerations: MAX_SLOT_GENERATIONS, perSlotRepairs: MAX_SLOT_REPAIRS,
         modelCallsPerUnit: MAX_UNIT_MODEL_CALLS,
         legacy: { totalAttempts: MAX_TOTAL_ATTEMPTS, targetedAttempts: MAX_TARGETED_ATTEMPTS, consecutiveZeroOutputs: 2 } },
