@@ -11,6 +11,7 @@ import { storeQuestions } from "@/modules/authoring/question-storage";
 import { commonEditorialLevelFilter } from "@/modules/authoring/common-question-policy";
 import { buildOutlineWorkbook, type ExportPoint } from "@/modules/blueprints/outline-export";
 import { createSkillOutlineWord, createSkillStructureWord } from "@/modules/documents/skill-blueprint-word";
+import { buildTheoryQuestionBankWorkbook } from "@/modules/questions/theory-question-bank-export";
 
 const levelCodes = [
   "level_5",
@@ -284,17 +285,22 @@ export async function GET(request: Request) {
           (RowDataPacket & {
             question_no: string;
             question_type: string;
-            current_status: string;
+            difficulty: "easy" | "medium" | "hard" | null;
+            alignment: "aligned" | "partially_aligned" | "not_aligned" | null;
             stem: string;
+            content_json: unknown;
             answer_json: unknown;
+            score_rubric_json: unknown;
             analysis_text: string | null;
             point_code: string | null;
-            point_name: string | null;
           })[]
         >(
-          `SELECT q.question_no, q.question_type, q.current_status, qv.stem, qv.answer_json, qv.analysis_text,
+          `SELECT q.question_no, q.question_type, q.difficulty,
+                  (SELECT rr.alignment FROM review_records rr
+                    WHERE rr.question_version_id = q.current_version_id
+                    ORDER BY rr.submitted_at DESC, rr.id DESC LIMIT 1) AS alignment,
+                  qv.stem, qv.content_json, qv.answer_json, qv.score_rubric_json, qv.analysis_text,
                   GROUP_CONCAT(DISTINCT bn.node_code ORDER BY bn.node_code SEPARATOR '、') AS point_code,
-                  GROUP_CONCAT(DISTINCT bn.name ORDER BY bn.ordinal SEPARATOR '、') AS point_name
              FROM questions q
              INNER JOIN question_versions qv ON qv.id = q.current_version_id
              LEFT JOIN question_assessment_points qap ON qap.question_version_id = qv.id
@@ -302,8 +308,9 @@ export async function GET(request: Request) {
             WHERE q.occupation_id = ? AND q.assessment_mode = ?
               AND q.archived_at IS NULL
               AND ${commonEditorialLevelFilter()}
-            GROUP BY q.id, q.question_no, q.question_type, q.current_status, qv.stem, qv.answer_json, qv.analysis_text
-            ORDER BY q.question_no`,
+            GROUP BY q.id, q.question_no, q.question_type, q.difficulty, q.current_version_id,
+                     qv.stem, qv.content_json, qv.answer_json, qv.score_rubric_json, qv.analysis_text
+            ORDER BY point_code, q.question_no`,
           [occupationId, assessmentMode!, levelCode!, levelCode!],
         );
         if (!rows.length)
@@ -316,26 +323,44 @@ export async function GET(request: Request) {
             },
             { status: 422 },
           );
+        if (assessmentMode === "theory") {
+          const theoryWorkbook = buildTheoryQuestionBankWorkbook(rows.map((row) => ({
+            pointCode: row.point_code,
+            questionType: row.question_type,
+            difficulty: row.difficulty,
+            alignment: row.alignment,
+            stem: row.stem,
+            contentJson: row.content_json,
+            answerJson: row.answer_json,
+            analysisText: row.analysis_text,
+            scoreRubricJson: row.score_rubric_json,
+          })));
+          const filename = `${scope.occupation_name}-${levelLabels[levelCode as (typeof levelCodes)[number]]}-理论知识-题库.xlsx`;
+          const bytes = await theoryWorkbook.xlsx.writeBuffer();
+          return new NextResponse(bytes, {
+            headers: {
+              "Content-Type":
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+              "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+            },
+          });
+        }
         sheet.columns = [
           { header: "试题编号", key: "questionNo", width: 20 },
           { header: "题型", key: "type", width: 20 },
-          { header: "状态", key: "status", width: 14 },
           { header: "题干", key: "stem", width: 58 },
           { header: "标准答案", key: "answer", width: 18 },
           { header: "答案解析", key: "analysis", width: 52 },
           { header: "考评点代码", key: "pointCode", width: 28 },
-          { header: "考评点", key: "pointName", width: 30 },
         ];
         rows.forEach((row) =>
           sheet.addRow({
             questionNo: row.question_no,
             type: row.question_type,
-            status: row.current_status,
             stem: row.stem,
             answer: JSON.stringify(parseJson(row.answer_json)),
             analysis: row.analysis_text ?? "",
             pointCode: row.point_code ?? "",
-            pointName: row.point_name ?? "",
           }),
         );
       } else {
