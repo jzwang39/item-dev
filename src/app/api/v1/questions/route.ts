@@ -309,7 +309,7 @@ export async function GET(request: Request) {
             {
               error: {
                 code: "NO_APPROVED_QUESTIONS",
-                message: "当前范围没有已审定试题，无法生成正式成果文件。",
+                message: "当前范围没有已入库试题，无法生成正式成果文件。",
               },
             },
             { status: 422 },

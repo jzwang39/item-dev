@@ -691,7 +691,7 @@ function ResultDownloads({
       </section>
       {scopes.length ? (
         <p className="mt-7 text-[#8497b3]">
-          成果文件仅统计已审定试题；未审定、退回修订或草稿试题不会被作为正式考试成果导出。
+          成果文件仅统计已入库试题；未入库、退回修订或草稿试题不会被作为正式考试成果导出。
         </p>
       ) : null}
     </div>
@@ -806,7 +806,7 @@ function ResultModal({
           </table>
           {scope.questionCount === 0 ? (
             <p className="mb-0 mt-8 text-lg text-[#d26916]">
-              当前职业和等级暂无该考核方式的已审定试题，文件下载暂不可用。
+              当前职业和等级暂无该考核方式的已入库试题，文件下载暂不可用。
             </p>
           ) : (
             <p className="mb-0 mt-8 text-lg text-[#6680a5]">
