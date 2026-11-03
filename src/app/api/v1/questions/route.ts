@@ -12,6 +12,7 @@ import { commonEditorialLevelFilter } from "@/modules/authoring/common-question-
 import { buildOutlineWorkbook, type ExportPoint } from "@/modules/blueprints/outline-export";
 import { createSkillOutlineWord, createSkillStructureWord } from "@/modules/documents/skill-blueprint-word";
 import { buildTheoryQuestionBankWorkbook } from "@/modules/questions/theory-question-bank-export";
+import { limitTheoryQuestionBankRows } from "@/modules/questions/theory-question-bank-selection";
 
 const levelCodes = [
   "level_5",
@@ -293,6 +294,7 @@ export async function GET(request: Request) {
             score_rubric_json: unknown;
             analysis_text: string | null;
             point_code: string | null;
+            stored_at: Date | string | null;
           })[]
         >(
           `SELECT q.question_no, q.question_type, q.difficulty,
@@ -300,7 +302,13 @@ export async function GET(request: Request) {
                     WHERE rr.question_version_id = q.current_version_id
                     ORDER BY rr.submitted_at DESC, rr.id DESC LIMIT 1) AS alignment,
                   qv.stem, qv.content_json, qv.answer_json, qv.score_rubric_json, qv.analysis_text,
-                  GROUP_CONCAT(DISTINCT bn.node_code ORDER BY bn.node_code SEPARATOR '、') AS point_code
+                  GROUP_CONCAT(DISTINCT bn.node_code ORDER BY bn.node_code SEPARATOR '、') AS point_code,
+                  COALESCE(
+                    (SELECT MAX(qse.created_at) FROM question_status_events qse
+                      WHERE qse.question_id = q.id AND qse.to_status = 'stored'),
+                    q.updated_at,
+                    q.created_at
+                  ) AS stored_at
              FROM questions q
              INNER JOIN question_versions qv ON qv.id = q.current_version_id
              LEFT JOIN question_assessment_points qap ON qap.question_version_id = qv.id
@@ -324,9 +332,11 @@ export async function GET(request: Request) {
             { status: 422 },
           );
         if (assessmentMode === "theory") {
-          const theoryWorkbook = buildTheoryQuestionBankWorkbook(rows.map((row) => ({
+          const theoryRows = limitTheoryQuestionBankRows(rows.map((row) => ({
             pointCode: row.point_code,
             questionType: row.question_type,
+            questionNo: row.question_no,
+            storedAt: row.stored_at,
             difficulty: row.difficulty,
             alignment: row.alignment,
             stem: row.stem,
@@ -334,6 +344,17 @@ export async function GET(request: Request) {
             answerJson: row.answer_json,
             analysisText: row.analysis_text,
             scoreRubricJson: row.score_rubric_json,
+          })));
+          const theoryWorkbook = buildTheoryQuestionBankWorkbook(theoryRows.map((row) => ({
+            pointCode: row.pointCode,
+            questionType: row.questionType,
+            difficulty: row.difficulty,
+            alignment: row.alignment,
+            stem: row.stem,
+            contentJson: row.contentJson,
+            answerJson: row.answerJson,
+            analysisText: row.analysisText,
+            scoreRubricJson: row.scoreRubricJson,
           })));
           const filename = `${scope.occupation_name}-${levelLabels[levelCode as (typeof levelCodes)[number]]}-理论知识-题库.xlsx`;
           const bytes = await theoryWorkbook.xlsx.writeBuffer();
