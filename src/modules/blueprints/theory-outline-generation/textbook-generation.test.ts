@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
-  generateBasicChapter, generateStandardKnowledge, generateTextbookOutlines,
+  generateBasicChapter, generateStandardKnowledge, generateTextbookOutlines, isTableOfContentsTitle,
   validateTextbookInputs, type StandardKnowledge,
 } from "./textbook-generation";
 import type { GenerationChapter } from "./generation-context";
@@ -186,4 +186,19 @@ test("真实劝募员标准按各等级相关知识条目生成，并保留截�
   assert.equal(typo?.standardSource?.contentCode, "3.2");
   assert.equal(typo?.standardSource?.code, "3.1.3");
   assert.ok(typo?.sourceWarning?.includes("待核对"));
+});
+
+test("印刷目录行按页码识别，正文标题不误判", () => {
+  // Printed table-of-contents entries carry a tab (or wide gap) and a page number.
+  assert.equal(isTableOfContentsTitle("第一章 职业道德\t20"), true);
+  assert.equal(isTableOfContentsTitle("第一节 职业道德基本知识\t20"), true);
+  assert.equal(isTableOfContentsTitle("（四）劝募师职业道德   27"), true);
+  assert.equal(isTableOfContentsTitle("第十二章 慈善组织财务管理\t112"), true);
+  // Real body headings never end with a printed page number.
+  assert.equal(isTableOfContentsTitle("第一章 职业道德"), false);
+  assert.equal(isTableOfContentsTitle("第一节 职业道德基本知识"), false);
+  assert.equal(isTableOfContentsTitle("一、职业道德概述"), false);
+  // Chinese numerals inside a heading must not be read as a page number.
+  assert.equal(isTableOfContentsTitle("第三章 慈善组织信息公开"), false);
+  assert.equal(isTableOfContentsTitle("（一）三   个方面的要求"), false);
 });

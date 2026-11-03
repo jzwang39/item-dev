@@ -10,6 +10,11 @@ import { basicIdentity, commonCoverage, commonLevels, commonQuotaPoints, decodeC
   validateCommonQuota, type CommonNode, type CommonPoint, type CommonQuota } from "./common-question-policy";
 
 export type CommonBasis = { points: CommonPoint[]; scopes: Record<string, Scope> };
+export type CommonPointLookup = {
+  code: string;
+  current: Array<{ levelCode: string; pointName: string; nodeName: string }>;
+  history: Array<{ levelCode: string; versionNo: number; nodeName: string; publishedAt: string | null; blueprintVersionId: string }>;
+};
 type Group = RowDataPacket & { id: string; project_id: string; occupation_id: string; basis_json: unknown; quota_json: unknown;
   current_release_id: string | null; generation_plan_id: string | null; row_version: number };
 type Member = RowDataPacket & { question_id: string; current_version_id: string; current_status: string;
@@ -375,5 +380,33 @@ export async function getCommonGroup(id: string, page: number, candidates = fals
     return { id, rowVersion: group.row_version, basis, quota, releases, generationPlanId: effectiveGenerationPlanId,
       currentReleaseId: group.current_release_id, coverage: commonCoverage(quota, all.filter((item) => !item.suspended)), total,
       questions: result.map((row) => ({ ...row, content_json: decodeCommon(row.content_json), answer_json: decodeCommon(row.answer_json) })) };
+  });
+}
+
+export async function lookupCommonPointCode(groupId: string, rawCode: string): Promise<CommonPointLookup> {
+  const code = rawCode.trim().toUpperCase();
+  if (!/^[A-Z0-9-]{3,64}$/.test(code)) throw new Error("请输入正确的考评点编号，如 A-B-G-003。");
+  return withTransaction(async (db) => {
+    const group = await lockGroup(db, groupId);
+    const basis = decodeCommon<CommonBasis>(group.basis_json);
+    const current = commonLevels.flatMap((levelCode) => basis.points
+      .filter((point) => point.nodes[levelCode]?.code === code)
+      .map((point) => ({ levelCode, pointName: point.name, nodeName: point.name })));
+    const currentVersionIds = new Set(commonLevels.map((levelCode) => basis.scopes[levelCode].blueprintVersions.outline.id));
+    const [rows] = await db.execute<(RowDataPacket & {
+      blueprint_version_id: string; version_no: number; published_at: Date | string | null; level_code: string; name: string;
+    })[]>(`SELECT v.id AS blueprint_version_id,v.version_no,v.published_at,b.level_code,n.name
+      FROM blueprint_nodes n
+      JOIN blueprint_versions v ON v.id=n.blueprint_version_id
+      JOIN blueprints b ON b.id=v.blueprint_id
+      WHERE b.occupation_id=? AND b.blueprint_kind='theory_outline' AND b.assessment_mode='theory'
+        AND b.level_code IN ('level_5','level_4','level_3')
+        AND n.node_kind='assessment_point' AND n.node_code=?
+      ORDER BY v.version_no DESC, FIELD(b.level_code,'level_5','level_4','level_3')`, [group.occupation_id, code]);
+    const history = rows.filter((row) => !currentVersionIds.has(row.blueprint_version_id)).map((row) => ({
+      levelCode: row.level_code, versionNo: Number(row.version_no), nodeName: row.name,
+      publishedAt: row.published_at ? String(row.published_at) : null, blueprintVersionId: row.blueprint_version_id,
+    }));
+    return { code, current, history };
   });
 }

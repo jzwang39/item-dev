@@ -37,6 +37,15 @@ export type TextbookPoint = {
   quotaSource?: { weightId: string; blueprintVersionId: string; scopeName: string; targetCount: number; allocation: "content_length_largest_remainder" };
 };
 
+// Textbook extraction keeps the printed table of contents as its own block, so a
+// TOC entry looks like a chapter heading with the printed page number appended
+// ("第一节 职业道德基本知识\t20"). Real headings never carry that page number.
+const printedPageNumber = /(?:\t|\s{2,})\s*\d{1,4}$/u;
+
+export function isTableOfContentsTitle(title: string) {
+  return printedPageNumber.test(title.trim());
+}
+
 async function generatePair(basis: unknown, sourceKind: "chapter" | "standard", sourceLabel: string, callModel: ModelCaller, target = 2, excludedNames: string[] = []) {
   const points: Array<{ name: string; importance: "X" | "Y" | "Z" }> = [];
   let lastError = "返回数量不足或包含重复、占位名称";

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getVerifiedSession } from "@/auth";
 import { adoptCommonQuestions, commonQuestionAction, configureCommonGroup, createCommonGroup, getCommonGroup,
-  listCommonGroups, prepareCommonGeneration, publishCommonGroup, syncCommonBasis } from "@/modules/authoring/common-questions";
+  listCommonGroups, lookupCommonPointCode, prepareCommonGeneration, publishCommonGroup, syncCommonBasis } from "@/modules/authoring/common-questions";
 import { getGenerationState, startGeneration } from "@/modules/authoring/generation/service";
 import { commonQuotaSchema } from "@/modules/authoring/common-question-policy";
 import { stopGenerationKeepResults } from "@/modules/authoring/generation/stop";
@@ -34,6 +34,8 @@ export async function GET(request: Request) {
     const groupId = params.get("groupId");
     if (!groupId) return NextResponse.json({ data: await listCommonGroups() });
     id.parse(groupId);
+    const code = params.get("code")?.trim();
+    if (code) return NextResponse.json({ data: await lookupCommonPointCode(groupId, code) });
     const page = z.coerce.number().int().min(1).max(100000).parse(params.get("page") ?? 1);
     const data = await getCommonGroup(groupId, page, params.get("view") === "candidates");
     return NextResponse.json({ data: { ...data, generation: data.generationPlanId ? await getGenerationState(data.generationPlanId) : null } });

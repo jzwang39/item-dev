@@ -5,7 +5,7 @@ import { basename, extname, join } from "node:path";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { codeFor } from "./node-code";
 import { isTheoryOutlineGenerationLevel } from "./policy";
-import { generateTextbookOutlines, generateStandardOutlines, validateTextbookInputs, validateStandardInputs, type StandardKnowledge, type TextbookPoint } from "./textbook-generation";
+import { generateTextbookOutlines, generateStandardOutlines, isTableOfContentsTitle, validateTextbookInputs, validateStandardInputs, type StandardKnowledge, type TextbookPoint } from "./textbook-generation";
 import { parseStandardBasicItems, type StandardBasicSource } from "./standard-basic";
 import { planTextbookQuotas, planStandardQuotas, type TextbookWeight, type TextbookQuotaPlan } from "./textbook-quota";
 import { extractDocxText, extractPdfText } from "@/modules/documents/extraction/service";
@@ -416,7 +416,11 @@ async function loadChapters(sourceVersionId: string, connection?: PoolConnection
   const rows = connection
     ? (await connection.execute<ChapterRow[]>(sql, [sourceVersionId]))[0]
     : await query<ChapterRow[]>(sql, [sourceVersionId]);
-  return rows.map((row) => ({ id: row.id, ordinal: row.ordinal, chapterTitle: row.chapter_title, sectionTitle: row.section_title, content: row.content_text }));
+  // Textbooks stored before the table-of-contents guard still contain TOC rows.
+  // Their titles carry a printed page number and their bodies hold no prose, so
+  // they must not be treated as chapters when building an outline.
+  return rows.map((row) => ({ id: row.id, ordinal: row.ordinal, chapterTitle: row.chapter_title, sectionTitle: row.section_title, content: row.content_text }))
+    .filter((chapter) => !isTableOfContentsTitle(chapter.chapterTitle));
 }
 async function extractText(bytes: Buffer, extension: string) {
   if (extension === ".txt") return bytes.toString("utf8").trim();
@@ -425,7 +429,9 @@ async function extractText(bytes: Buffer, extension: string) {
 }
 function splitTextbook(text: string) {
   const lines = text.replace(/\r/g, "").split("\n");
-  const headings = lines.map((line, index) => ({ line: line.trim(), index })).filter(({ line }) => /^(第[一二三四五六七八九十百\d]+[章节]|[一二三四五六七八九十]+、|\d+(?:\.\d+){0,2}\s+)/.test(line) && line.length <= 120);
+  // Printed table-of-contents entries match the heading pattern but only name a
+  // section and its page number; keeping them would create contentless chapters.
+  const headings = lines.map((line, index) => ({ line: line.trim(), index })).filter(({ line }) => !isTableOfContentsTitle(line) && /^(第[一二三四五六七八九十百\d]+[章节]|[一二三四五六七八九十]+、|\d+(?:\.\d+){0,2}\s+)/.test(line) && line.length <= 120);
   const usable = headings.filter((heading) => /第[一二三四五六七八九十百\d]+[章节]/.test(heading.line) || /^\d+\.\d+/.test(heading.line));
   const targets = usable.some((heading) => /节/.test(heading.line)) ? usable.filter((heading) => /节/.test(heading.line) || /^\d+\.\d+/.test(heading.line)) : usable.filter((heading) => /章/.test(heading.line) || /^\d+\s/.test(heading.line));
   if (!targets.length) return [{ ordinal: 1, chapterNo: null, chapterTitle: "教材全文", sectionNo: null, sectionTitle: null, content: text }];

@@ -12,6 +12,11 @@ type Item = { question_id: string; current_version_id: string; question_no: stri
   answer_json: { answers?: string[] }; analysis_text: string };
 type GenerationRecord = { id: string; questionNo: string; point: string; questionType: string; stem: string; status: string };
 type GenerationError = { id: string; code: string; type?: string; attempts: number; remaining?: number; error: string };
+type PointLookup = {
+  code: string;
+  current: Array<{ levelCode: string; pointName: string; nodeName: string }>;
+  history: Array<{ levelCode: string; versionNo: number; nodeName: string; publishedAt: string | null; blueprintVersionId: string }>;
+};
 type Detail = { id: string; rowVersion: number; quota: Counts[]; currentReleaseId: string | null; generationPlanId: string | null;
   basis: { points: Array<{ key: string; name: string }>; scopes: Record<string, { occupation: string }> };
   coverage: Array<{ key: string; type: string; count: number; target: number }>;
@@ -25,6 +30,7 @@ const api = "/api/v1/authoring/common-questions";
 const button = "rounded-lg border border-[#d6dce5] bg-white px-3 py-2 text-sm disabled:opacity-40";
 const labels: Record<string, string> = { draft: "草稿", pending_review: "待审核", returned: "退回", approved: "已审定", stored: "已入库", archived: "已归档" };
 const jobLabels: Record<string, string> = { queued: "排队中", running: "生成中", partial: "部分失败", succeeded: "已完成", stopped: "已停止，成果保留", cancelled: "已终止" };
+const levelLabels: Record<string, string> = { level_5: "五级", level_4: "四级", level_3: "三级" };
 
 export function CommonQuestionsWorkspace() {
   const [groups, setGroups] = useState<Group[]>([]);
@@ -43,6 +49,9 @@ export function CommonQuestionsWorkspace() {
   const [recordsOpen, setRecordsOpen] = useState(false);
   const [records, setRecords] = useState<GenerationRecord[]>([]);
   const [quotaPage, setQuotaPage] = useState(1);
+  const [lookupCode, setLookupCode] = useState("");
+  const [lookupBusy, setLookupBusy] = useState(false);
+  const [lookup, setLookup] = useState<PointLookup | null>(null);
   const loadSequence = useRef(0);
 
   const read = useCallback(async <T,>(url: string): Promise<T> => {
@@ -117,6 +126,19 @@ export function CommonQuestionsWorkspace() {
     } catch (error) { setMessage(error instanceof Error ? error.message : "操作失败，请刷新核对结果。"); }
     finally { setBusy(false); }
   }
+  async function runLookup() {
+    if (!groupId || lookupBusy || !lookupCode.trim()) return;
+    setLookupBusy(true);
+    setMessage("");
+    try {
+      setLookup(await read<PointLookup>(`${api}?groupId=${groupId}&code=${encodeURIComponent(lookupCode.trim())}`));
+    } catch (error) {
+      setLookup(null);
+      setMessage(error instanceof Error ? error.message : "编号查询失败，请刷新后重试。");
+    } finally {
+      setLookupBusy(false);
+    }
+  }
   function itemAction(item: Item, action: "reopen" | "suspend") {
     const opinion = window.prompt(action === "reopen" ? "填写统一修订原因，新版发布前仍使用原已发布题：" : "填写统一停用原因，五四三级将同时停止抽取该题：");
     if (!opinion?.trim()) return;
@@ -137,6 +159,7 @@ export function CommonQuestionsWorkspace() {
       <select aria-label="选择公共题组" className={button} disabled={busy} value={groupId} onChange={(event) => {
         loadSequence.current++;
         setGroupId(event.target.value); setDetail(null); setLoading(true); setPage(1); setQuotaPage(1); setSelection([]); setConfigOpen(false); setMessage("");
+        setLookupCode(""); setLookup(null);
       }}><option value="" disabled>选择公共题组</option>{groups.map((group) => <option key={group.id} value={group.id}>
         {group.occupation_name} · {group.generation_status ? jobLabels[group.generation_status] : "未开始"} · {group.version_no ? `V${group.version_no}` : "未发布"} · {group.question_count}题
       </option>)}</select>
@@ -160,6 +183,40 @@ export function CommonQuestionsWorkspace() {
           <button className={button} disabled={busy || !detail.generationPlanId} onClick={() => void act({ action: "terminate", confirmed: true }, "确认终止公共任务？只清理本次新生成且未经审核的草稿，选用旧题及已审核、已发布题保留。")}>终止公共任务</button>
           <button className={button} disabled={busy || active} onClick={() => void act({ action: "publish", rowVersion: detail.rowVersion, confirmed: true }, "确认统一发布？所有题目必须已审核、确认入库；五四三级的新组卷统一采用本版，历史试卷不变。")}>统一发布</button>
           <button className={button} disabled={busy || active} onClick={() => void act({ action: "sync_basis", confirmed: true }, "确认核对最新五四三级细目表？仅来源和内容未变时同步对应关系，发生变化将拒绝沿用。")}>核对细目表对应关系</button>
+        </div>
+        <div className="mt-4 rounded-xl border bg-slate-50 p-4">
+          <p className="text-sm font-medium">考评点编号查询</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <input className="min-w-[260px] rounded-lg border border-[#d6dce5] bg-white px-3 py-2 text-sm"
+              placeholder="输入编号，如 A-B-G-003" value={lookupCode}
+              onChange={(event) => setLookupCode(event.target.value.toUpperCase())}
+              onKeyDown={(event) => { if (event.key === "Enter") void runLookup(); }} />
+            <button className={button} disabled={lookupBusy || !lookupCode.trim()} onClick={() => void runLookup()}>
+              {lookupBusy ? "查询中..." : "查询编号"}
+            </button>
+          </div>
+          {lookup && <div className="mt-3 space-y-2 text-sm">
+            <p>编号：<span className="font-medium">{lookup.code}</span></p>
+            {lookup.current.length > 0
+              ? <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                <p className="font-medium">当前公共题组</p>
+                {lookup.current.map((item) => <p key={`${item.levelCode}-${item.pointName}`}>
+                  {levelLabels[item.levelCode] ?? item.levelCode}：{item.pointName}
+                </p>)}
+              </div>
+              : <div className="rounded-lg border border-slate-200 bg-white p-3">
+                <p>当前公共题组未使用该编号。</p>
+              </div>}
+            {lookup.history.length > 0 && <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+              <p className="font-medium">历史理论细目表</p>
+              {lookup.history.slice(0, 6).map((item) => <p key={`${item.blueprintVersionId}-${item.levelCode}`}>
+                V{item.versionNo} · {levelLabels[item.levelCode] ?? item.levelCode} · {item.nodeName}
+              </p>)}
+            </div>}
+            {lookup.current.length === 0 && lookup.history.length === 0 && <div className="rounded-lg border border-slate-200 bg-white p-3">
+              <p>当前公共题组和历史理论细目表都没有找到这个编号。</p>
+            </div>}
+          </div>}
         </div>
         <div className="mt-4 rounded-xl border border-[#d6e3ff] bg-[#f6f8ff] p-4">
           <p className="mb-3 text-sm">公共任务：{detail.generation?.job ? jobLabels[detail.generation.job.status] ?? "待核对" : "未开始"}</p>
