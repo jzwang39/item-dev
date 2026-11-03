@@ -5,7 +5,7 @@ import { getVerifiedSession } from "@/auth";
 import { query, getPool } from "@/shared/database/mysql";
 import { createUlid } from "@/shared/database/ulid";
 import { createPaperWord, type PaperWord, type PaperWordItem } from "@/modules/documents/paper-word";
-import { estimateSkillMinutesByItem, paperItemContent, parseRecord, type PaperPresentation } from "@/modules/documents/paper-presentation";
+import { paperItemContent, parseRecord, type PaperPresentation } from "@/modules/documents/paper-presentation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,8 +18,8 @@ export async function GET(request: Request) {
   const parsed = z.object({ paperId: z.string().length(26), kind: z.enum(["paper", "answers"]) }).safeParse({ paperId: params.get("paperId"), kind: params.get("kind") });
   if (!parsed.success) return NextResponse.json({ error: { message: "下载参数无效。" } }, { status: 400 });
   try {
-    const papers = await query<(RowDataPacket & Omit<PaperWord, "items"> & { project_id: string; selection_summary_json: unknown; paper_structure_version_id: string })[]>(
-      `SELECT p.title,p.paper_no,p.project_id,p.paper_structure_version_id,po.name AS occupation_name,ap.level_code,ap.assessment_mode,psv.duration_minutes,ar.selection_summary_json
+    const papers = await query<(RowDataPacket & Omit<PaperWord, "items"> & { project_id: string; selection_summary_json: unknown; paper_structure_version_id: string; occupation_id: string })[]>(
+      `SELECT p.title,p.paper_no,p.project_id,p.paper_structure_version_id,ap.occupation_id,po.name AS occupation_name,ap.level_code,ap.assessment_mode,psv.duration_minutes,ar.selection_summary_json
        FROM papers p JOIN projects pr ON pr.id=p.project_id AND pr.status='active'
        JOIN assembly_runs ar ON ar.id=p.assembly_run_id
        JOIN assembly_plan_versions apv ON apv.id=p.assembly_plan_version_id
@@ -39,17 +39,18 @@ export async function GET(request: Request) {
          WHERE paper_id=? ORDER BY item_no`, [parsed.data.paperId],
     );
     const presentation = parseRecord(papers[0].selection_summary_json).presentation as PaperPresentation | undefined;
-    const sectionRows = papers[0].assessment_mode === "skill"
-      ? await query<(RowDataPacket & { section_no: number; item_count: number; section_score: number })[]>(
-        `SELECT section_no,item_count,section_score FROM paper_structure_sections
-         WHERE paper_structure_version_id=? AND item_count>0 ORDER BY section_no`,
-        [papers[0].paper_structure_version_id],
+    const [structureRow] = papers[0].assessment_mode === "skill"
+      ? await query<(RowDataPacket & { snapshot_json: unknown })[]>(
+        `SELECT v.snapshot_json FROM blueprints b
+         INNER JOIN blueprint_versions v ON v.id=b.current_version_id
+         WHERE b.occupation_id=? AND b.level_code=? AND b.assessment_mode='skill'
+           AND b.blueprint_kind='skill_structure' LIMIT 1`,
+        [papers[0].occupation_id, papers[0].level_code],
       )
       : [];
-    const estimatedMinutes = estimateSkillMinutesByItem(items, sectionRows, Number(presentation?.durationMinutes ?? papers[0].duration_minutes));
     const bytes = await createPaperWord({ ...papers[0], presentation,
       items: items.map((item) => ({ ...item, content_snapshot_json: paperItemContent(item, {
-        estimatedMinutes: estimatedMinutes[item.item_no],
+        structureSnapshot: structureRow?.snapshot_json,
       }) })) }, parsed.data.kind);
     await getPool().execute("INSERT INTO audit_logs(id,project_id,actor_id,action,object_type,object_id,after_json,result) VALUES(?,?,?,'paper.download','paper',?,?,'success')",
       [createUlid(), papers[0].project_id, session.user.id, parsed.data.paperId, JSON.stringify({ kind: parsed.data.kind, format: "docx", templateId: presentation?.format.id ?? (papers[0].assessment_mode === "skill" ? "skill_sample_v1" : "theory_sample_v1") })]);
