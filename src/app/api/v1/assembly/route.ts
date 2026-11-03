@@ -130,14 +130,18 @@ export async function GET(request: Request) {
           content_snapshot_json: unknown;
           answer_snapshot_json: unknown;
           assessment_point_names?: unknown;
+          source_snapshot_json?: unknown;
           score: number;
         })[]
       >(
-        `SELECT item_no,section_no,question_no_snapshot,question_type,stem_snapshot,
-          content_snapshot_json,answer_snapshot_json,score_rubric_snapshot_json,score,
+        `SELECT paper_items.item_no,paper_items.section_no,paper_items.question_no_snapshot,paper_items.question_type,paper_items.stem_snapshot,
+          paper_items.content_snapshot_json,paper_items.answer_snapshot_json,paper_items.score_rubric_snapshot_json,paper_items.score,
+          qv.source_snapshot_json,
           (SELECT JSON_ARRAYAGG(n.name) FROM question_assessment_points qp JOIN blueprint_nodes n ON n.id=qp.blueprint_node_id
            WHERE qp.question_version_id=paper_items.question_version_id) AS assessment_point_names
-         FROM paper_items WHERE paper_id = ? ORDER BY item_no`,
+         FROM paper_items
+         INNER JOIN question_versions qv ON qv.id=paper_items.question_version_id
+         WHERE paper_id = ? ORDER BY paper_items.item_no`,
         [paperId],
       ),
     ]);

@@ -28,12 +28,15 @@ export async function GET(request: Request) {
        JOIN paper_structure_versions psv ON psv.id=p.paper_structure_version_id WHERE p.id=?`, [parsed.data.paperId],
     );
     if (!papers.length) return NextResponse.json({ error: { message: "试卷不存在或项目已停用。" } }, { status: 404 });
-    const items = await query<(RowDataPacket & PaperWordItem & { assessment_point_names?: unknown })[]>(
-      `SELECT item_no,section_no,question_type,stem_snapshot,content_snapshot_json,answer_snapshot_json,
+    const items = await query<(RowDataPacket & PaperWordItem & { assessment_point_names?: unknown; source_snapshot_json?: unknown })[]>(
+      `SELECT paper_items.item_no,paper_items.section_no,paper_items.question_type,paper_items.stem_snapshot,paper_items.content_snapshot_json,paper_items.answer_snapshot_json,
          score_rubric_snapshot_json,score,
+         qv.source_snapshot_json,
          (SELECT JSON_ARRAYAGG(n.name) FROM question_assessment_points qp JOIN blueprint_nodes n ON n.id=qp.blueprint_node_id
           WHERE qp.question_version_id=paper_items.question_version_id) AS assessment_point_names
-         FROM paper_items WHERE paper_id=? ORDER BY item_no`, [parsed.data.paperId],
+         FROM paper_items
+         INNER JOIN question_versions qv ON qv.id=paper_items.question_version_id
+         WHERE paper_id=? ORDER BY item_no`, [parsed.data.paperId],
     );
     const presentation = parseRecord(papers[0].selection_summary_json).presentation as PaperPresentation | undefined;
     const bytes = await createPaperWord({ ...papers[0], presentation,

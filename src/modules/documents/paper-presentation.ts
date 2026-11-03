@@ -14,6 +14,7 @@ export type SkillDisplay = {
   title: string; evaluationPoint: string; venuePreparation: string; candidatePreparation: string;
   time: string; method: string; requirements: string; veto: string;
 };
+const normalizeText = (value: string) => value.normalize("NFKC").replace(/\s+/g, "").trim();
 export function paperFormat(mode: string): PaperFormat {
   if (mode !== "skill" && mode !== "theory") throw new Error("未知考核方式，无法确定试卷样式。");
   return mode === "skill" ? {
@@ -34,17 +35,57 @@ export function parseRecord(value: unknown): Record<string, unknown> {
   }
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
-export function paperItemContent(item: { content_snapshot_json: unknown; assessment_point_names?: unknown }) {
+const savedText = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : undefined;
+const savedMinutes = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+function deriveSkillExamFromSource(value: unknown) {
+  const source = parseRecord(value);
+  const structure = parseRecord(source.skillStructure);
+  const skillContext = parseRecord(source.skillContext);
+  const point = parseRecord(skillContext.point);
+  const standardRequirement = parseRecord(point.sourceStandardRequirement);
+  const functionName = savedText(standardRequirement.functionName) ?? savedText(point.level2Name);
+  const direction = savedText(point.direction) ?? "通用";
+  if (!functionName) return {};
+  const scopedRows = Array.isArray(structure.standardScopes) ? structure.standardScopes.flatMap((scopeValue) => {
+    const scope = parseRecord(scopeValue);
+    const column = parseRecord(scope.column);
+    if (normalizeText(savedText(column.direction) ?? "通用") !== normalizeText(direction)) return [];
+    const rules = parseRecord(scope.assessmentRules);
+    return (Array.isArray(scope.rows) ? scope.rows : []).map((rowValue) => {
+      const row = parseRecord(rowValue);
+      return normalizeText(savedText(row.name) ?? "") === normalizeText(functionName)
+        ? { minutes: savedMinutes(row.minutes), method: savedText(row.method) ?? savedText(rules.method) }
+        : null;
+    }).filter((row) => Boolean(row)) as Array<{ minutes?: number; method?: string }>;
+  }) : [];
+  if (scopedRows.length) return scopedRows[0];
+  const flatRows = Array.isArray(structure.rows) ? structure.rows.map((rowValue) => {
+    const row = parseRecord(rowValue);
+    return normalizeText(savedText(row.name) ?? "") === normalizeText(functionName)
+      ? { minutes: savedMinutes(row.minutes), method: savedText(row.method) }
+      : null;
+  }).filter((row) => Boolean(row)) as Array<{ minutes?: number; method?: string }> : [];
+  return flatRows[0] ?? {};
+}
+export function paperItemContent(item: { content_snapshot_json: unknown; assessment_point_names?: unknown; source_snapshot_json?: unknown }) {
   const content = parseRecord(item.content_snapshot_json);
-  if (content.assemblyPresentation) return content;
   let names = item.assessment_point_names;
   if (typeof names === "string") {
     try { names = JSON.parse(names); } catch { names = []; }
   }
   const evaluationPoint = Array.isArray(names) ? [...new Set(names.filter((value) => typeof value === "string"))].join("、") : undefined;
-  return { ...content, assemblyPresentation: { evaluationPoint, skillExam: parseRecord(content.skillExam) } };
+  const presentation = parseRecord(content.assemblyPresentation);
+  const derivedSkillExam = deriveSkillExamFromSource(item.source_snapshot_json);
+  const skillExam = { ...derivedSkillExam, ...parseRecord(presentation.skillExam ?? content.skillExam) };
+  return {
+    ...content,
+    assemblyPresentation: {
+      ...presentation,
+      evaluationPoint: savedText(presentation.evaluationPoint) ?? evaluationPoint,
+      skillExam,
+    },
+  };
 }
-const savedText = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : undefined;
 export function skillDisplay(item: { item_no: number; stem_snapshot: string; content_snapshot_json: unknown }): SkillDisplay {
   const content = parseRecord(item.content_snapshot_json);
   const frozen = parseRecord(content.assemblyPresentation);

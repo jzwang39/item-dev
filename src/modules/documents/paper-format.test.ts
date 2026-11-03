@@ -120,6 +120,26 @@ test("历史题目只从冻结版本关联补评价点，不把题目配分当�
   assert.match(display.veto, /不擅自设定零分/);
   assert.match(sectionInstruction([{ item_no: 1, score: 16.66, question_type: "实操题" }, { item_no: 2, score: 16.67, question_type: "实操题" }], 1), /各题分值见题目.*33.33分/);
 });
+test("历史技能题可从冻结内容结构回填考核时间和考核方式", () => {
+  const content = paperItemContent({
+    content_snapshot_json: {},
+    assessment_point_names: '["新媒体宣传公益慈善理念"]',
+    source_snapshot_json: {
+      skillContext: { point: { direction: "通用", sourceStandardRequirement: { functionName: "公益慈善宣讲" } } },
+      skillStructure: {
+        standardScopes: [{
+          column: { levelCode: "level_4", direction: "通用" },
+          assessmentRules: { method: "现场操作" },
+          rows: [{ name: "公益慈善宣讲", score: 25, minutes: 25, method: "现场操作", selection: "required" }],
+        }],
+      },
+    },
+  });
+  const display = skillDisplay({ item_no: 1, stem_snapshot: "完整任务", content_snapshot_json: content });
+  assert.equal(display.title, "新媒体宣传公益慈善理念");
+  assert.equal(display.time, "25分钟");
+  assert.equal(display.method, "现场操作");
+});
 test("历史技能评分与配分不一致时阻止评分表输出，不伪造合计或改写历史", async () => {
   const mismatch = { ...skill, items: [{ ...skill.items[0], score: 25 }] };
   await assert.rejects(createPaperWord(mismatch, "answers"), /评分标准总分与试卷配分不一致/);
