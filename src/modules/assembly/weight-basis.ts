@@ -1,6 +1,5 @@
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { baseQuestionType, inventoryKey, rangeTargets, scaleRubric, type WeightRange } from "./weight-policy";
-import { formalQuestionSource } from "../authoring/common-question-policy";
 
 export const decode = <T,>(value: unknown): T => (typeof value === "string" ? JSON.parse(value) : value) as T;
 const normalize = (value: string) => value.normalize("NFKC").replace(/^\s*\d+(?:\.\d+)*[.、]?\s*/, "").replace(/\s+/g, "").trim();
@@ -99,16 +98,21 @@ export async function loadWeightedQuestions(db: PoolConnection, context: {
     common_release_id: string | null;
   })[]>(
     `SELECT q.id,q.current_version_id AS version_id,q.question_no,q.question_type,v.stem,v.content_json,v.answer_json,
-      v.score_rubric_json,IF(b.id IS NULL,NULL,n.id) AS node_id,n.name AS node_name,n.requirement_json,q.common_release_id
-     FROM ${formalQuestionSource} q JOIN question_versions v ON v.id=q.current_version_id
-     LEFT JOIN question_assessment_points qp ON qp.question_version_id=v.id AND q.common_group_id IS NULL
-     LEFT JOIN blueprint_nodes n ON n.id=COALESCE(q.blueprint_node_id,qp.blueprint_node_id) AND n.node_kind='assessment_point'
+      v.score_rubric_json,n.id AS node_id,n.name AS node_name,n.requirement_json,cg.current_release_id AS common_release_id
+     FROM questions q
+     JOIN question_versions v ON v.id=q.current_version_id
+     LEFT JOIN common_question_members cm ON cm.question_id=q.id AND cm.suspended=0
+     LEFT JOIN common_question_groups cg ON cg.id=cm.group_id
+     LEFT JOIN common_question_points cp ON cp.group_id=cm.group_id AND cp.point_key=cm.point_key AND cp.level_code=?
+     LEFT JOIN question_assessment_points qp ON qp.question_version_id=v.id AND cm.question_id IS NULL
+     LEFT JOIN blueprint_nodes n ON n.id=COALESCE(cp.blueprint_node_id,qp.blueprint_node_id) AND n.node_kind='assessment_point'
      LEFT JOIN blueprint_versions bv ON bv.id=n.blueprint_version_id
      LEFT JOIN blueprints b ON b.id=bv.blueprint_id AND b.project_id=q.project_id AND b.occupation_id=q.occupation_id
-       AND b.level_code=q.level_code AND b.assessment_mode=q.assessment_mode
-     WHERE q.project_id=? AND q.occupation_id=? AND q.level_code=? AND q.assessment_mode=? AND q.current_status='stored' AND q.archived_at IS NULL
+       AND b.level_code=? AND b.assessment_mode=q.assessment_mode
+     WHERE q.project_id=? AND q.occupation_id=? AND q.assessment_mode=? AND q.current_status='stored' AND q.archived_at IS NULL
+       AND (q.level_code=? OR (q.level_code IS NULL AND q.assessment_mode='theory' AND cm.group_id IS NOT NULL AND cp.blueprint_node_id IS NOT NULL))
      ORDER BY q.id,n.id FOR UPDATE`,
-    [context.project_id, context.occupation_id, context.level_code, context.assessment_mode],
+    [context.level_code, context.level_code, context.project_id, context.occupation_id, context.assessment_mode, context.level_code],
   );
   const grouped = new Map<string, typeof rows>();
   for (const row of rows) grouped.set(row.id, [...(grouped.get(row.id) ?? []), row]);
