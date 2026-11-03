@@ -113,6 +113,19 @@ export function QuestionBankWorkspace({
   const requestSequence = useRef(0);
   const filterSequence = useRef("");
   const questionPageSize = 20;
+  const loadResultScopes = useCallback(async (preferred?: { occupationId: string; levelCode: string; assessmentMode: AssessmentMode }) => {
+    const response = await fetch("/api/v1/questions?view=results", { cache: "no-store" });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error?.message ?? "成果范围加载失败。");
+    const next = body.data as ResultScope[];
+    setResultScopes(next);
+    if (preferred) {
+      const latest = next.find((scope) => scope.occupationId === preferred.occupationId
+        && scope.levelCode === preferred.levelCode && scope.assessmentMode === preferred.assessmentMode);
+      setSelectedResult(latest ?? null);
+    }
+    return next;
+  }, []);
 
   const queryString = useMemo(() => {
     const params = new URLSearchParams();
@@ -165,21 +178,23 @@ export function QuestionBankWorkspace({
     setQuestionType("");
   }, [assessmentMode]);
   useEffect(() => {
-    if (activeTab !== "results" || resultScopes.length) return;
-    void (async () => {
-      try {
-        const response = await fetch("/api/v1/questions?view=results");
-        const body = await response.json();
-        if (!response.ok)
-          throw new Error(body.error?.message ?? "成果范围加载失败。");
-        setResultScopes(body.data);
-      } catch (error) {
-        setNotice(
-          error instanceof Error ? error.message : "成果范围加载失败。",
-        );
-      }
-    })();
-  }, [activeTab, resultScopes.length]);
+    if (activeTab !== "results") return;
+    void loadResultScopes().catch((error) => {
+      setNotice(
+        error instanceof Error ? error.message : "成果范围加载失败。",
+      );
+    });
+  }, [activeTab, loadResultScopes]);
+  const openResult = useCallback((scope: ResultScope) => {
+    void loadResultScopes({
+      occupationId: scope.occupationId,
+      levelCode: scope.levelCode,
+      assessmentMode: scope.assessmentMode,
+    }).catch((error) => {
+      setNotice(error instanceof Error ? error.message : "成果范围加载失败。");
+      setSelectedResult(scope);
+    });
+  }, [loadResultScopes]);
 
   const availableOptions = options.filter(
     (option) => !assessmentMode || option.assessmentMode === assessmentMode,
@@ -548,7 +563,7 @@ export function QuestionBankWorkspace({
           </section>
         </div>
       ) : (
-        <ResultDownloads scopes={resultScopes} onOpen={setSelectedResult} />
+        <ResultDownloads scopes={resultScopes} onOpen={openResult} />
       )}
       {selected ? (
         <QuestionModal question={selected} onClose={() => setSelected(null)} />
