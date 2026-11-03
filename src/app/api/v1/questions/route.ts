@@ -8,7 +8,7 @@ import { createUlid } from "@/shared/database/ulid";
 import { query, withTransaction } from "@/shared/database/mysql";
 import { bulkStorageSchema } from "@/modules/authoring/question-storage-policy";
 import { storeQuestions } from "@/modules/authoring/question-storage";
-import { commonEditorialLevelFilter, resultQuestionSource } from "@/modules/authoring/common-question-policy";
+import { commonEditorialLevelFilter } from "@/modules/authoring/common-question-policy";
 import { buildOutlineWorkbook, type ExportPoint } from "@/modules/blueprints/outline-export";
 import { createSkillOutlineWord, createSkillStructureWord } from "@/modules/documents/skill-blueprint-word";
 
@@ -294,15 +294,16 @@ export async function GET(request: Request) {
           `SELECT q.question_no, q.question_type, qv.stem, qv.answer_json, qv.analysis_text,
                   GROUP_CONCAT(DISTINCT bn.node_code ORDER BY bn.node_code SEPARATOR '、') AS point_code,
                   GROUP_CONCAT(DISTINCT bn.name ORDER BY bn.ordinal SEPARATOR '、') AS point_name
-             FROM ${resultQuestionSource} q
+             FROM questions q
              INNER JOIN question_versions qv ON qv.id = q.current_version_id
-             LEFT JOIN question_assessment_points qap ON qap.question_version_id = qv.id AND q.common_group_id IS NULL
-             LEFT JOIN blueprint_nodes bn ON bn.id = COALESCE(q.blueprint_node_id,qap.blueprint_node_id)
-            WHERE q.occupation_id = ? AND q.level_code = ? AND q.assessment_mode = ?
+             LEFT JOIN question_assessment_points qap ON qap.question_version_id = qv.id
+             LEFT JOIN blueprint_nodes bn ON bn.id = qap.blueprint_node_id
+            WHERE q.occupation_id = ? AND q.assessment_mode = ?
               AND q.current_status = 'stored' AND q.archived_at IS NULL
+              AND ${commonEditorialLevelFilter()}
             GROUP BY q.id, q.question_no, q.question_type, qv.stem, qv.answer_json, qv.analysis_text
             ORDER BY q.question_no`,
-          [occupationId, levelCode!, assessmentMode!],
+          [occupationId, assessmentMode!, levelCode!, levelCode!],
         );
         if (!rows.length)
           return NextResponse.json(
@@ -424,11 +425,15 @@ export async function GET(request: Request) {
              UNION ALL SELECT 'level_3', 'theory'
              UNION ALL SELECT 'level_3', 'skill'
            ) scope
-           LEFT JOIN ${resultQuestionSource} q ON q.occupation_id = po.id
-                               AND q.level_code = scope.level_code
+           LEFT JOIN questions q ON q.occupation_id = po.id
                                AND q.assessment_mode = scope.assessment_mode
                                AND q.current_status = 'stored'
                                AND q.archived_at IS NULL
+                               AND (q.level_code = scope.level_code
+                                 OR (q.level_code IS NULL AND q.assessment_mode='theory'
+                                   AND EXISTS(SELECT 1 FROM common_question_members cm
+                                     JOIN common_question_points cp ON cp.group_id=cm.group_id AND cp.point_key=cm.point_key
+                                     WHERE cm.question_id=q.id AND cp.level_code=scope.level_code)))
           WHERE po.status = 'active'
           GROUP BY po.id, po.name, po.code, scope.level_code, scope.assessment_mode
           ORDER BY po.name, FIELD(scope.level_code, 'level_5', 'level_4', 'level_3', 'level_2', 'level_1'), scope.assessment_mode`,
