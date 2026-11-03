@@ -70,9 +70,9 @@ test("理论样例动态题号、配分、注意事项、得分表、密封栏�
 });
 test("技能考生卷按准备要求和考核试题输出，不泄漏参考步骤或评分表", async () => {
   const result = await inspect(skill, "paper");
-  for (const text of ["评价点：核对并整理捐赠资料", "试题1.核对并整理捐赠资料", "1.准备要求", "考场准备",
+  for (const text of ["试题1.核对并整理捐赠资料", "1.准备要求", "考场准备",
     "考生准备", "2.考核试题", "具体考核要求", "否定项说明", "未保存单题考核时间", "20分钟", "自备书写工具"]) assert.ok(result.text.includes(text), text);
-  for (const text of ["3.配分与评分标准", "分类登记并提交结果", "资料项目核对完整", "《慈善法》", "25min"]) assert.ok(!result.text.includes(text), text);
+  for (const text of ["评价点：核对并整理捐赠资料", "3.配分与评分标准", "分类登记并提交结果", "资料项目核对完整", "《慈善法》", "25min"]) assert.ok(!result.text.includes(text), text);
   assert.match(result.xml, /pageBreakBefore/);
   assert.match(result.xml, /w:top="1440"/);
   assert.match(result.xml, /w:left="1800"/);
@@ -80,7 +80,7 @@ test("技能考生卷按准备要求和考核试题输出，不泄漏参考步�
 });
 test("技能评分文件完整七列表格、重复表头、合计、否定项及参考步骤", async () => {
   const result = await inspect(skill, "answers");
-  for (const text of ["3.配分与评分标准", "序号", "考核内容", "考核要点", "配分", "评分标准（细化可操作扣分标准）",
+  for (const text of ["评价点：核对并整理捐赠资料", "3.配分与评分标准", "序号", "考核内容", "考核要点", "配分", "评分标准（细化可操作扣分标准）",
     "扣分", "得分", "合计", "参考答案", "分类登记并提交结果"]) assert.ok(result.text.includes(text), text);
   assert.match(result.xml, /tblHeader/);
   assert.equal((result.xml.match(/<w:tblGrid>/g) ?? []).length, 2);

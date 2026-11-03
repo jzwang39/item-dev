@@ -224,11 +224,14 @@ function skillPaper(paper: PaperWord, kind: "paper" | "answers"): Block[] {
   if (kind === "paper") children.push(paragraph("姓名：________________　准考证号：________________"));
   for (const [index, item] of paper.items.entries()) {
     const display = skillDisplay(item);
-    children.push(
+    children.push(...(kind === "paper" ? [
+      paragraph(`试题${item.item_no}.${display.title}`, true, { size: 28, pageBreakBefore: index > 0, keepNext: true }),
+      paragraph("1.准备要求", false, { keepNext: true }),
+    ] : [
       paragraph(`评价点：${display.evaluationPoint}`, true, { size: 28, pageBreakBefore: index > 0, keepNext: true }),
       paragraph(`试题${item.item_no}.${display.title}`, true, { size: 28, keepNext: true }),
       paragraph("1.准备要求", false, { keepNext: true }),
-    );
+    ]));
     for (const [label, preparation] of [["（1）考场准备：", display.venuePreparation], ["（2）考生准备：", display.candidatePreparation]]) {
       children.push(paragraph(label, false, { keepNext: true }), paragraph(`①试题名称：${display.title}`),
         paragraph(`②本题分值：${Number(item.score)}分`), paragraph(`③考核时间：${display.time}`),
