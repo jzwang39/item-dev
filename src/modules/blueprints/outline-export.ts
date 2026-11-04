@@ -32,6 +32,15 @@ type TheoryDisplayCodes = {
   secondary: Map<string, Map<string, string>>;
   tertiary: Map<string, Map<string, string>>;
 };
+type TheoryDisplayDraft = {
+  primaryName: string;
+  primaryWeight: CellValue;
+  secondaryName: string;
+  secondaryWeight: CellValue;
+  tertiaryName: string;
+  tertiaryWeight: CellValue;
+  isRelated: boolean;
+};
 type OutlineWorkbookModel = {
   workbook: ExcelJS.Workbook;
   mappings: OutlinePointCodeMapping[];
@@ -65,11 +74,7 @@ function scopedCode(groups: Map<string, Map<string, string>>, parentKey: string,
   return codeFor(values, key);
 }
 
-function theoryHierarchy(point: ExportPoint, index: number, codes: {
-  primary: Map<string, string>;
-  secondary: Map<string, Map<string, string>>;
-  tertiary: Map<string, Map<string, string>>;
-}): DisplayHierarchy {
+function theoryDisplayDraft(point: ExportPoint): TheoryDisplayDraft {
   const r = object(point.requirement);
   const source = object(r.standardSource ?? r.sourceStandardRequirement);
   const rawPrimaryName = text(r.primaryName ?? r.level1Name);
@@ -90,15 +95,32 @@ function theoryHierarchy(point: ExportPoint, index: number, codes: {
   );
 
   return {
-    primaryNo: codeFor(codes.primary, primaryName || `primary-${index}`),
     primaryName,
     primaryWeight: weight(r.primaryWeight ?? r.level1Weight),
-    secondaryNo: scopedCode(codes.secondary, primaryName || `primary-${index}`, secondaryName || `secondary-${index}`),
     secondaryName,
     secondaryWeight: isRelated ? "" : weight(r.secondaryWeight ?? r.level2Weight),
-    tertiaryNo: scopedCode(codes.tertiary, `${primaryName}|${secondaryName || `secondary-${index}`}`, tertiaryName || `tertiary-${index}`),
     tertiaryName,
     tertiaryWeight: isRelated ? "" : weight(r.tertiaryWeight ?? r.level3Weight),
+    isRelated,
+  };
+}
+
+function theoryHierarchy(point: ExportPoint, index: number, codes: {
+  primary: Map<string, string>;
+  secondary: Map<string, Map<string, string>>;
+  tertiary: Map<string, Map<string, string>>;
+}, basicPrimaryWeights: Map<string, CellValue>): DisplayHierarchy {
+  const draft = theoryDisplayDraft(point);
+  return {
+    primaryNo: codeFor(codes.primary, draft.primaryName || `primary-${index}`),
+    primaryName: draft.primaryName,
+    primaryWeight: draft.isRelated ? draft.primaryWeight : (basicPrimaryWeights.get(draft.primaryName) ?? draft.primaryWeight),
+    secondaryNo: scopedCode(codes.secondary, draft.primaryName || `primary-${index}`, draft.secondaryName || `secondary-${index}`),
+    secondaryName: draft.secondaryName,
+    secondaryWeight: draft.secondaryWeight,
+    tertiaryNo: scopedCode(codes.tertiary, `${draft.primaryName}|${draft.secondaryName || `secondary-${index}`}`, draft.tertiaryName || `tertiary-${index}`),
+    tertiaryName: draft.tertiaryName,
+    tertiaryWeight: draft.tertiaryWeight,
   };
 }
 
@@ -152,6 +174,25 @@ function buildOutlineWorkbookModel(points: ExportPoint[], options: OutlineWorkbo
     secondary: new Map<string, Map<string, string>>(),
     tertiary: new Map<string, Map<string, string>>(),
   } satisfies TheoryDisplayCodes;
+  const basicPrimaryWeights = new Map<string, CellValue>();
+  if (options.normalizeTheoryHierarchy) {
+    const buckets = new Map<string, Map<string, CellValue>>();
+    for (const point of points) {
+      const draft = theoryDisplayDraft(point);
+      if (draft.isRelated || draft.secondaryWeight === "") continue;
+      let bySecondary = buckets.get(draft.primaryName);
+      if (!bySecondary) {
+        bySecondary = new Map<string, CellValue>();
+        buckets.set(draft.primaryName, bySecondary);
+      }
+      if (!bySecondary.has(draft.secondaryName)) bySecondary.set(draft.secondaryName, draft.secondaryWeight);
+    }
+    for (const [primaryName, bySecondary] of buckets) {
+      const weights = [...bySecondary.values()];
+      const numeric = weights.map((value) => Number(value)).filter(Number.isFinite);
+      basicPrimaryWeights.set(primaryName, numeric.length === weights.length ? numeric.reduce((sum, value) => sum + value, 0) : weights[0] ?? "");
+    }
+  }
   const pointOrdinals = new Map<string, number>();
   const mappings: OutlinePointCodeMapping[] = [];
   const values = points.map((point, index): CellValue[] => {
@@ -161,7 +202,7 @@ function buildOutlineWorkbookModel(points: ExportPoint[], options: OutlineWorkbo
       ? text(r.importanceCode)
       : ({ critical: "X", high: "Y", medium: "Z", low: "Z" }[point.importance ?? ""] ?? "");
     const hierarchy = options.normalizeTheoryHierarchy
-      ? theoryHierarchy(point, index, displayCodes)
+      ? theoryHierarchy(point, index, displayCodes, basicPrimaryWeights)
       : {
         primaryNo: text(r.primaryNo ?? r.level1Code),
         primaryName: text(r.primaryName ?? r.level1Name),

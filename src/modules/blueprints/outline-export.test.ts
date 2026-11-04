@@ -80,7 +80,41 @@ test("理论知识导出按模板重建相关知识层级并去掉名称编号�
   const row3 = Array.from(sheet.getRow(3).values as unknown[]).slice(1, 13);
   assert.equal(sheet.getColumn(11).width, 49);
   assert.deepEqual(row2, ["A", "相关知识要求", 20, "A", "公益慈善宣讲", "", "A", "理念宣传", "", "001", "募捐工作的含义", "X"]);
-  assert.deepEqual(row3, ["B", "基本要求", "", "A", "职业道德", 5, "A", "职业道德基本知识", "", "001", "职业道德的特殊性", "Y"]);
+  assert.deepEqual(row3, ["B", "基本要求", 5, "A", "职业道德", 5, "A", "职业道德基本知识", "", "001", "职业道德的特殊性", "Y"]);
+});
+
+test("基本要求一级权重按二级权重汇总显示", async () => {
+  const workbook = buildOutlineWorkbook([
+    {
+      code: "A-A-A-001",
+      name: "职业道德的特殊性",
+      importance: "critical",
+      requirement: {
+        primaryName: "基本要求",
+        secondaryName: "职业道德",
+        secondaryWeight: 5,
+        tertiaryName: "31. 职业道德基本知识",
+        importanceCode: "X",
+      },
+    },
+    {
+      code: "A-B-A-001",
+      name: "慈善伦理行为准则中的自愿原则",
+      importance: "critical",
+      requirement: {
+        primaryName: "基本要求",
+        secondaryName: "基础知识",
+        secondaryWeight: 20,
+        tertiaryName: "慈善伦理",
+        importanceCode: "X",
+      },
+    },
+  ], { normalizeTheoryHierarchy: true });
+  const restored = new ExcelJS.Workbook();
+  await restored.xlsx.load(await workbook.xlsx.writeBuffer());
+  const sheet = restored.worksheets[0];
+  assert.equal(sheet.getCell("C2").value, 25);
+  assert.equal(sheet.getCell("C3").master.address, "C2");
 });
 
 test("理论知识二级三级编号按父级从A重新开始，相关知识一级名称跨权重合并", async () => {
