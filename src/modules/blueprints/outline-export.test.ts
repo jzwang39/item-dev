@@ -85,7 +85,7 @@ test("理论知识导出按模板重建相关知识层级并去掉名称编号�
   const row2 = Array.from(sheet.getRow(2).values as unknown[]).slice(1, 13);
   const row3 = Array.from(sheet.getRow(3).values as unknown[]).slice(1, 13);
   assert.equal(sheet.getColumn(11).width, 49);
-  assert.deepEqual(row2, ["A", "相关知识要求", 20, "A", "公益慈善宣讲", "", "A", "理念宣传", "", "001", "募捐工作的含义", "X"]);
+  assert.deepEqual(row2, ["A", "相关知识要求", 20, "A", "公益慈善宣讲", 20, "A", "理念宣传", "", "001", "募捐工作的含义", "X"]);
   assert.deepEqual(row3, ["B", "基本要求", 5, "A", "职业道德", 5, "A", "职业道德基本知识", "", "001", "职业道德的特殊性", "Y"]);
 });
 
@@ -188,9 +188,67 @@ test("理论知识二级三级编号按父级从A重新开始，相关知识一�
   assert.equal(sheet.getCell("G4").value, "A");
   assert.equal(sheet.getCell("B5").master.address, "B4");
   assert.equal(sheet.getCell("A5").master.address, "A4");
-  assert.equal(sheet.getCell("C4").isMerged, false);
-  assert.equal(sheet.getCell("C5").isMerged, false);
+  assert.equal(sheet.getCell("C4").value, 50);
+  assert.equal(sheet.getCell("C5").master.address, "C4");
+  assert.equal(sheet.getCell("F4").value, 20);
+  assert.equal(sheet.getCell("F5").value, 30);
   assert.equal(sheet.getCell("F5").isMerged, false);
+});
+
+test("相关知识要求一级权重汇总显示，二级权重保留原权重", async () => {
+  const workbook = buildOutlineWorkbook([
+    {
+      code: "R-003",
+      name: "考评点3",
+      importance: "critical",
+      requirement: {
+        primaryName: "相关知识要求 · 公益慈善宣讲",
+        primaryWeight: 20,
+        secondaryName: "理念宣传",
+        tertiaryName: "1.1.1 募捐工作基本内容",
+        sectionKind: "related_knowledge",
+        standardSource: { functionName: "公益慈善宣讲", contentName: "理念宣传" },
+        importanceCode: "X",
+      },
+    },
+    {
+      code: "R-004",
+      name: "考评点4",
+      importance: "critical",
+      requirement: {
+        primaryName: "相关知识要求 · 款物募集",
+        primaryWeight: 30,
+        secondaryName: "方案策划",
+        tertiaryName: "2.2.1 募捐活动策划基础",
+        sectionKind: "related_knowledge",
+        standardSource: { functionName: "款物募集", contentName: "方案策划" },
+        importanceCode: "X",
+      },
+    },
+    {
+      code: "R-005",
+      name: "考评点5",
+      importance: "critical",
+      requirement: {
+        primaryName: "相关知识要求 · 捐赠管理",
+        primaryWeight: 25,
+        secondaryName: "业务管理",
+        tertiaryName: "3.1.1 募捐执行情况跟进",
+        sectionKind: "related_knowledge",
+        standardSource: { functionName: "捐赠管理", contentName: "业务管理" },
+        importanceCode: "X",
+      },
+    },
+  ], { normalizeTheoryHierarchy: true });
+  const restored = new ExcelJS.Workbook();
+  await restored.xlsx.load(await workbook.xlsx.writeBuffer());
+  const sheet = restored.worksheets[0];
+  assert.equal(sheet.getCell("C2").value, 75);
+  assert.equal(sheet.getCell("C3").master.address, "C2");
+  assert.equal(sheet.getCell("C4").master.address, "C2");
+  assert.equal(sheet.getCell("F2").value, 20);
+  assert.equal(sheet.getCell("F3").value, 30);
+  assert.equal(sheet.getCell("F4").value, 25);
 });
 
 test("权重列空值也随层级合并，避免模板格式断开", async () => {
@@ -256,7 +314,7 @@ test("权重列空值也随层级合并，避免模板格式断开", async () =>
   assert.equal(sheet.getCell("F5").master.address, "F4");
   assert.equal(sheet.getCell("I5").master.address, "I4");
   assert.equal(sheet.getCell("C4").value, 20);
-  assert.equal(sheet.getCell("F4").value, "");
+  assert.equal(sheet.getCell("F4").value, 20);
 });
 
 test("理论知识考评点序号按导出后的展示三级范围连续编号", async () => {

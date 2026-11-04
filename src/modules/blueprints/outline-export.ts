@@ -64,6 +64,10 @@ type OutlineWorkbookModel = {
   workbook: ExcelJS.Workbook;
   mappings: OutlinePointCodeMapping[];
 };
+type TheoryWeightBuckets = {
+  basicPrimaryWeights: Map<string, CellValue>;
+  relatedPrimaryWeights: Map<string, CellValue>;
+};
 function object(value: unknown): Record<string, unknown> {
   const parsed = typeof value === "string" ? JSON.parse(value) : value;
   return parsed && typeof parsed === "object" && !Array.isArray(parsed)
@@ -208,15 +212,17 @@ function theoryHierarchy(point: ExportPoint, index: number, codes: {
   primary: Map<string, string>;
   secondary: Map<string, Map<string, string>>;
   tertiary: Map<string, Map<string, string>>;
-}, basicPrimaryWeights: Map<string, CellValue>, options: OutlineWorkbookOptions = {}): DisplayHierarchy {
+}, weights: TheoryWeightBuckets, options: OutlineWorkbookOptions = {}): DisplayHierarchy {
   const draft = theoryDisplayDraft(point, options);
   return {
     primaryNo: codeFor(codes.primary, draft.primaryName || `primary-${index}`),
     primaryName: draft.primaryName,
-    primaryWeight: draft.isRelated ? draft.primaryWeight : (basicPrimaryWeights.get(draft.primaryName) ?? draft.primaryWeight),
+    primaryWeight: draft.isRelated
+      ? (weights.relatedPrimaryWeights.get(draft.primaryName) ?? draft.primaryWeight)
+      : (weights.basicPrimaryWeights.get(draft.primaryName) ?? draft.primaryWeight),
     secondaryNo: scopedCode(codes.secondary, draft.primaryName || `primary-${index}`, draft.secondaryName || `secondary-${index}`),
     secondaryName: draft.secondaryName,
-    secondaryWeight: draft.secondaryWeight,
+    secondaryWeight: draft.isRelated ? draft.primaryWeight : draft.secondaryWeight,
     tertiaryNo: scopedCode(codes.tertiary, `${draft.primaryName}|${draft.secondaryName || `secondary-${index}`}`, draft.tertiaryName || `tertiary-${index}`),
     tertiaryName: draft.tertiaryName,
     tertiaryWeight: draft.tertiaryWeight,
@@ -297,23 +303,45 @@ function buildOutlineWorkbookModel(points: ExportPoint[], options: OutlineWorkbo
     secondary: new Map<string, Map<string, string>>(),
     tertiary: new Map<string, Map<string, string>>(),
   } satisfies TheoryDisplayCodes;
-  const basicPrimaryWeights = new Map<string, CellValue>();
+  const weights: TheoryWeightBuckets = {
+    basicPrimaryWeights: new Map<string, CellValue>(),
+    relatedPrimaryWeights: new Map<string, CellValue>(),
+  };
   if (options.normalizeTheoryHierarchy) {
-    const buckets = new Map<string, Map<string, CellValue>>();
+    const basicBuckets = new Map<string, Map<string, CellValue>>();
+    const relatedBuckets = new Map<string, Map<string, CellValue>>();
     for (const point of points) {
       const draft = theoryDisplayDraft(point, options);
-      if (draft.isRelated || draft.secondaryWeight === "") continue;
-      let bySecondary = buckets.get(draft.primaryName);
+      if (draft.isRelated) {
+        let bySecondary = relatedBuckets.get(draft.primaryName);
+        if (!bySecondary) {
+          bySecondary = new Map<string, CellValue>();
+          relatedBuckets.set(draft.primaryName, bySecondary);
+        }
+        if (!bySecondary.has(draft.secondaryName) && draft.primaryWeight !== "") {
+          bySecondary.set(draft.secondaryName, draft.primaryWeight);
+        }
+        continue;
+      }
+      if (draft.secondaryWeight === "") continue;
+      let bySecondary = basicBuckets.get(draft.primaryName);
       if (!bySecondary) {
         bySecondary = new Map<string, CellValue>();
-        buckets.set(draft.primaryName, bySecondary);
+        basicBuckets.set(draft.primaryName, bySecondary);
       }
       if (!bySecondary.has(draft.secondaryName)) bySecondary.set(draft.secondaryName, draft.secondaryWeight);
     }
-    for (const [primaryName, bySecondary] of buckets) {
-      const weights = [...bySecondary.values()];
-      const numeric = weights.map((value) => Number(value)).filter(Number.isFinite);
-      basicPrimaryWeights.set(primaryName, numeric.length === weights.length ? numeric.reduce((sum, value) => sum + value, 0) : weights[0] ?? "");
+    for (const [primaryName, bySecondary] of basicBuckets) {
+      const secondaryWeights = [...bySecondary.values()];
+      const numeric = secondaryWeights.map((value) => Number(value)).filter(Number.isFinite);
+      const total = numeric.length === secondaryWeights.length ? numeric.reduce((sum, value) => sum + value, 0) : secondaryWeights[0] ?? "";
+      weights.basicPrimaryWeights.set(primaryName, total);
+    }
+    for (const [primaryName, bySecondary] of relatedBuckets) {
+      const secondaryWeights = [...bySecondary.values()];
+      const numeric = secondaryWeights.map((value) => Number(value)).filter(Number.isFinite);
+      const total = numeric.length === secondaryWeights.length ? numeric.reduce((sum, value) => sum + value, 0) : secondaryWeights[0] ?? "";
+      weights.relatedPrimaryWeights.set(primaryName, total);
     }
       for (const basicModule of options.standardBasicModules ?? []) {
         scopedCode(displayCodes.tertiary, `基本要求|${basicModule.secondaryName}`, basicModule.moduleName);
@@ -327,7 +355,7 @@ function buildOutlineWorkbookModel(points: ExportPoint[], options: OutlineWorkbo
       ? text(r.importanceCode)
       : ({ critical: "X", high: "Y", medium: "Z", low: "Z" }[point.importance ?? ""] ?? "");
     const hierarchy = options.normalizeTheoryHierarchy
-      ? theoryHierarchy(point, index, displayCodes, basicPrimaryWeights, options)
+      ? theoryHierarchy(point, index, displayCodes, weights, options)
       : {
         primaryNo: text(r.primaryNo ?? r.level1Code),
         primaryName: text(r.primaryName ?? r.level1Name),

@@ -292,6 +292,7 @@ export async function GET(request: Request) {
         file === "question-bank" ? "题库" : "考评要素",
       );
       if (file === "question-bank") {
+        let theoryOutlineVersionId: string | null = null;
         if (assessmentMode === "theory") {
           await withTransaction(async (db) => {
             const [outlineRows] = await db.execute<(RowDataPacket & ExportPoint & { blueprint_version_id: string })[]>(
@@ -306,6 +307,7 @@ export async function GET(request: Request) {
             );
             if (!outlineRows.length) return;
             const versionId = outlineRows[0].blueprint_version_id;
+            theoryOutlineVersionId = versionId;
             const exported = buildOutlineWorkbookPackage(outlineRows, {
               normalizeTheoryHierarchy: true,
               standardBasicModules: await loadTheoryStandardBasicModules(db, versionId),
@@ -345,14 +347,16 @@ export async function GET(request: Request) {
              INNER JOIN question_versions qv ON qv.id = q.current_version_id
              LEFT JOIN question_assessment_points qap ON qap.question_version_id = qv.id
              LEFT JOIN blueprint_nodes bn ON bn.id = qap.blueprint_node_id
-             LEFT JOIN theory_outline_export_mappings toem ON toem.blueprint_node_id = qap.blueprint_node_id
+             LEFT JOIN theory_outline_export_mappings toem
+               ON toem.blueprint_node_id = qap.blueprint_node_id
+              AND (? IS NOT NULL AND toem.blueprint_version_id = ?)
             WHERE q.occupation_id = ? AND q.assessment_mode = ?
               AND q.archived_at IS NULL
               AND ${commonEditorialLevelFilter()}
             GROUP BY q.id, q.question_no, q.question_type, q.difficulty, q.current_version_id,
                      qv.stem, qv.content_json, qv.answer_json, qv.score_rubric_json, qv.analysis_text
             ORDER BY point_code, q.question_no`,
-          [occupationId, assessmentMode!, levelCode!, levelCode!],
+          [theoryOutlineVersionId, theoryOutlineVersionId, occupationId, assessmentMode!, levelCode!, levelCode!],
         );
         if (!rows.length)
           return NextResponse.json(
