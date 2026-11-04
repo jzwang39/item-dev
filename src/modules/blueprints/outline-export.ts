@@ -110,6 +110,7 @@ export function buildOutlineWorkbook(points: ExportPoint[], options: OutlineWork
     secondary: new Map<string, Map<string, string>>(),
     tertiary: new Map<string, Map<string, string>>(),
   } satisfies TheoryDisplayCodes;
+  const pointOrdinals = new Map<string, number>();
   const values = points.map((point, index): CellValue[] => {
     const r = object(point.requirement);
     // Use the version's stored hierarchy, not a newer weight table.
@@ -129,6 +130,14 @@ export function buildOutlineWorkbook(points: ExportPoint[], options: OutlineWork
         tertiaryName: text(r.tertiaryName ?? r.level3Name),
         tertiaryWeight: weight(r.tertiaryWeight ?? r.level3Weight),
       };
+    const pointOrdinal = options.normalizeTheoryHierarchy
+      ? (() => {
+        const key = [hierarchy.primaryName, hierarchy.secondaryName, hierarchy.tertiaryName].join("\u0000");
+        const next = (pointOrdinals.get(key) ?? 0) + 1;
+        pointOrdinals.set(key, next);
+        return String(next).padStart(3, "0");
+      })()
+      : (point.code.match(/(?:^|-)(\d+)$/)?.[1] ?? point.code);
     return [
       hierarchy.primaryNo, hierarchy.primaryName,
       hierarchy.primaryWeight,
@@ -136,7 +145,7 @@ export function buildOutlineWorkbook(points: ExportPoint[], options: OutlineWork
       hierarchy.secondaryWeight,
       hierarchy.tertiaryNo, hierarchy.tertiaryName,
       hierarchy.tertiaryWeight,
-      point.code.match(/(?:^|-)(\d+)$/)?.[1] ?? point.code,
+      pointOrdinal,
       point.name, importance,
     ];
   });
