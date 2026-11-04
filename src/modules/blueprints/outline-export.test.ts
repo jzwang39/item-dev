@@ -37,6 +37,51 @@ test("12列表头、样例样式、层级合并与字符串序号可读回", asy
   assert.equal(sheet.pageSetup.printArea, "A1:L3");
 });
 
+test("理论知识导出按模板重建相关知识层级并去掉名称编号前缀", async () => {
+  const workbook = buildOutlineWorkbook([
+    {
+      code: "RAW-001",
+      name: "募捐工作的含义",
+      importance: "critical",
+      requirement: {
+        primaryNo: "B",
+        primaryName: "相关知识要求 · 公益慈善宣讲",
+        primaryWeight: 20,
+        secondaryNo: "C",
+        secondaryName: "理念宣传",
+        tertiaryNo: "Z",
+        tertiaryName: "1.1.1 募捐工作基本内容",
+        importanceCode: "X",
+        sectionKind: "related_knowledge",
+        standardSource: { functionName: "公益慈善宣讲", contentName: "理念宣传" },
+      },
+    },
+    {
+      code: "RAW-002",
+      name: "职业道德的特殊性",
+      importance: "high",
+      requirement: {
+        primaryNo: "A",
+        primaryName: "基本要求",
+        secondaryNo: "A",
+        secondaryName: "职业道德",
+        secondaryWeight: 5,
+        tertiaryNo: "A",
+        tertiaryName: "31. 职业道德基本知识",
+        importanceCode: "Y",
+      },
+    },
+  ], { normalizeTheoryHierarchy: true });
+  const restored = new ExcelJS.Workbook();
+  await restored.xlsx.load(await workbook.xlsx.writeBuffer());
+  const sheet = restored.worksheets[0];
+  const row2 = Array.from(sheet.getRow(2).values as unknown[]).slice(1, 13);
+  const row3 = Array.from(sheet.getRow(3).values as unknown[]).slice(1, 13);
+  assert.equal(sheet.getColumn(11).width, 49);
+  assert.deepEqual(row2, ["A", "相关知识要求", 20, "A", "公益慈善宣讲", "", "A", "理念宣传", "", "001", "募捐工作的含义", "X"]);
+  assert.deepEqual(row3, ["B", "基本要求", "", "B", "职业道德", 5, "B", "职业道德基本知识", "", "002", "职业道德的特殊性", "Y"]);
+});
+
 test("技能使用冻结层级、权重与重要度，不编造三级权重或页码", () => {
   const sheet = buildOutlineWorkbook([{
     code: "D1-A-B-007", name: "完成操作", importance: "critical",

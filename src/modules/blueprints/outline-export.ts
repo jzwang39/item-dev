@@ -3,11 +3,24 @@ import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { withTransaction } from "@/shared/database/mysql";
 import { createUlid } from "@/shared/database/ulid";
 import { assertOutlineConfirmed } from "./point-review";
+import { codeFor } from "./theory-outline-generation/node-code";
 
 export type ExportPoint = {
   code: string; name: string; importance: string | null; requirement: unknown;
 };
 type CellValue = string | number;
+type OutlineWorkbookOptions = { normalizeTheoryHierarchy?: boolean };
+type DisplayHierarchy = {
+  primaryNo: string;
+  primaryName: string;
+  primaryWeight: CellValue;
+  secondaryNo: string;
+  secondaryName: string;
+  secondaryWeight: CellValue;
+  tertiaryNo: string;
+  tertiaryName: string;
+  tertiaryWeight: CellValue;
+};
 function object(value: unknown): Record<string, unknown> {
   const parsed = typeof value === "string" ? JSON.parse(value) : value;
   return parsed && typeof parsed === "object" && !Array.isArray(parsed)
@@ -22,7 +35,50 @@ function weight(value: unknown): CellValue {
   return Number.isFinite(number) ? number : text(value);
 }
 
-export function buildOutlineWorkbook(points: ExportPoint[]) {
+function stripDisplayPrefix(value: unknown) {
+  return text(value)
+    .replace(/^\s*\d+(?:\.\d+)*(?:\s*[.、．])?\s+/, "")
+    .trim();
+}
+
+function theoryHierarchy(point: ExportPoint, index: number, codes: {
+  primary: Map<string, string>;
+  secondary: Map<string, string>;
+  tertiary: Map<string, string>;
+}): DisplayHierarchy {
+  const r = object(point.requirement);
+  const source = object(r.standardSource ?? r.sourceStandardRequirement);
+  const rawPrimaryName = text(r.primaryName ?? r.level1Name);
+  const rawSecondaryName = text(r.secondaryName ?? r.level2Name);
+  const rawTertiaryName = text(r.tertiaryName ?? r.level3Name);
+  const isRelated = text(r.sectionKind) === "related_knowledge" || /^相关知识要求/.test(rawPrimaryName);
+
+  const primaryName = isRelated ? "相关知识要求" : stripDisplayPrefix(rawPrimaryName);
+  const secondaryName = stripDisplayPrefix(
+    isRelated
+      ? (source.functionName ?? rawPrimaryName.replace(/^相关知识要求\s*[·.]\s*/, "").trim())
+      : rawSecondaryName,
+  );
+  const tertiaryName = stripDisplayPrefix(
+    isRelated
+      ? (source.contentName ?? rawSecondaryName)
+      : rawTertiaryName,
+  );
+
+  return {
+    primaryNo: codeFor(codes.primary, primaryName || `primary-${index}`),
+    primaryName,
+    primaryWeight: isRelated ? weight(r.primaryWeight ?? r.level1Weight) : weight(r.primaryWeight ?? r.level1Weight),
+    secondaryNo: codeFor(codes.secondary, `${primaryName}|${secondaryName || `secondary-${index}`}`),
+    secondaryName,
+    secondaryWeight: isRelated ? "" : weight(r.secondaryWeight ?? r.level2Weight),
+    tertiaryNo: codeFor(codes.tertiary, `${primaryName}|${secondaryName}|${tertiaryName || `tertiary-${index}`}`),
+    tertiaryName,
+    tertiaryWeight: isRelated ? "" : weight(r.tertiaryWeight ?? r.level3Weight),
+  };
+}
+
+export function buildOutlineWorkbook(points: ExportPoint[], options: OutlineWorkbookOptions = {}) {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("评价要素细目表", {
     views: [{ state: "frozen", ySplit: 1, showGridLines: false }],
@@ -32,22 +88,40 @@ export function buildOutlineWorkbook(points: ExportPoint[]) {
     },
   });
   const headers = ["一级", "一级名称", "权重(%)", "二级序号", "二级名称", "权重(%)", "三级序号", "三级名称", "权重(%)", "考评点序号", "考评点名称", "重要程度"];
-  const widths = [6, 16, 8, 8, 18, 8, 10, 26, 8, 9, 38, 9];
+  const widths = [6, 16, 8, 8, 18, 8, 10, 26, 8, 9, options.normalizeTheoryHierarchy ? 49 : 38, 9];
   sheet.columns = widths.map((width) => ({ width }));
   sheet.addRow(headers);
-  const values = points.map((point): CellValue[] => {
+  const displayCodes = {
+    primary: new Map<string, string>(),
+    secondary: new Map<string, string>(),
+    tertiary: new Map<string, string>(),
+  };
+  const values = points.map((point, index): CellValue[] => {
     const r = object(point.requirement);
     // Use the version's stored hierarchy, not a newer weight table.
     const importance = ["X", "Y", "Z"].includes(text(r.importanceCode))
       ? text(r.importanceCode)
       : ({ critical: "X", high: "Y", medium: "Z", low: "Z" }[point.importance ?? ""] ?? "");
+    const hierarchy = options.normalizeTheoryHierarchy
+      ? theoryHierarchy(point, index, displayCodes)
+      : {
+        primaryNo: text(r.primaryNo ?? r.level1Code),
+        primaryName: text(r.primaryName ?? r.level1Name),
+        primaryWeight: weight(r.primaryWeight ?? r.level1Weight),
+        secondaryNo: text(r.secondaryNo ?? r.level2Code),
+        secondaryName: text(r.secondaryName ?? r.level2Name),
+        secondaryWeight: weight(r.secondaryWeight ?? r.level2Weight),
+        tertiaryNo: text(r.tertiaryNo ?? r.level3Code),
+        tertiaryName: text(r.tertiaryName ?? r.level3Name),
+        tertiaryWeight: weight(r.tertiaryWeight ?? r.level3Weight),
+      };
     return [
-      text(r.primaryNo ?? r.level1Code), text(r.primaryName ?? r.level1Name),
-      weight(r.primaryWeight ?? r.level1Weight),
-      text(r.secondaryNo ?? r.level2Code), text(r.secondaryName ?? r.level2Name),
-      weight(r.secondaryWeight ?? r.level2Weight),
-      text(r.tertiaryNo ?? r.level3Code), text(r.tertiaryName ?? r.level3Name),
-      weight(r.tertiaryWeight ?? r.level3Weight),
+      hierarchy.primaryNo, hierarchy.primaryName,
+      hierarchy.primaryWeight,
+      hierarchy.secondaryNo, hierarchy.secondaryName,
+      hierarchy.secondaryWeight,
+      hierarchy.tertiaryNo, hierarchy.tertiaryName,
+      hierarchy.tertiaryWeight,
       point.code.match(/(?:^|-)(\d+)$/)?.[1] ?? point.code,
       point.name, importance,
     ];
@@ -105,8 +179,10 @@ export async function exportConfirmedOutline(
        FROM blueprint_nodes WHERE blueprint_version_id=? AND node_kind='assessment_point'
        ORDER BY ordinal,id`, [versionId],
     );
-    const bytes = Buffer.from(await buildOutlineWorkbook(points).xlsx.writeBuffer());
     const version = versions[0];
+    const bytes = Buffer.from(await buildOutlineWorkbook(points, {
+      normalizeTheoryHierarchy: version.assessmentMode === "theory",
+    }).xlsx.writeBuffer());
     const level = ({ level_5: "五级", level_4: "四级", level_3: "三级", level_2: "二级", level_1: "一级" } as Record<string, string>)[version.levelCode] ?? version.levelCode;
     const mode = version.assessmentMode === "skill" ? "操作技能" : "理论知识";
     const filename = `评价要素细目表-${version.occupationName}${level}-${mode}-V${version.versionNo}.xlsx`.replace(/[/\\\r\n]/g, "_");

@@ -268,7 +268,7 @@ export async function GET(request: Request) {
           [occupationId, levelCode],
         );
         if (!rows.length) throw new Error("当前范围尚未维护理论知识考评要素细目表，无法生成成果文件。");
-        const bytes = await buildOutlineWorkbook(rows).xlsx.writeBuffer();
+        const bytes = await buildOutlineWorkbook(rows, { normalizeTheoryHierarchy: true }).xlsx.writeBuffer();
         const filename = `${scope.occupation_name}-${levelLabel}-理论知识考评要素细目表.xlsx`;
         return new NextResponse(bytes, { headers: {
           "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
