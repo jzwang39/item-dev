@@ -152,19 +152,21 @@ export function buildOutlineWorkbook(points: ExportPoint[], options: OutlineWork
     });
   });
   const mergeGroups = [
-    { columns: [1, 2], keyEnd: 2 },
-    { columns: [3], keyEnd: 3 },
-    { columns: [4, 5], keyEnd: 5 },
-    { columns: [6], keyEnd: 6 },
-    { columns: [7, 8], keyEnd: 8 },
-    { columns: [9], keyEnd: 9 },
+    { columns: [1, 2], keyEnd: 2, allowEmpty: false },
+    { columns: [3], keyEnd: 3, allowEmpty: true, anchorColumns: [1, 2] },
+    { columns: [4, 5], keyEnd: 5, allowEmpty: false },
+    { columns: [6], keyEnd: 6, allowEmpty: true, anchorColumns: [4, 5] },
+    { columns: [7, 8], keyEnd: 8, allowEmpty: false },
+    { columns: [9], keyEnd: 9, allowEmpty: true, anchorColumns: [7, 8] },
   ];
   for (const group of mergeGroups) {
     let start = 0;
     const key = (index: number) => JSON.stringify(values[index]?.slice(0, group.keyEnd));
     for (let end = 1; end <= values.length; end += 1) {
       if (end < values.length && key(start) === key(end)) continue;
-      if (end - start > 1 && group.columns.some((column) => values[start][column - 1] !== "")) {
+      const hasTargetValue = group.columns.some((column) => values[start][column - 1] !== "");
+      const hasAnchorValue = (group.anchorColumns ?? []).some((column) => values[start][column - 1] !== "");
+      if (end - start > 1 && (hasTargetValue || (group.allowEmpty && hasAnchorValue))) {
         for (const column of group.columns) {
           sheet.mergeCells(start + 2, column, end + 1, column);
         }

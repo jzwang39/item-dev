@@ -151,6 +151,71 @@ test("理论知识二级三级编号按父级从A重新开始，相关知识一�
   assert.equal(sheet.getCell("C5").isMerged, false);
 });
 
+test("权重列空值也随层级合并，避免模板格式断开", async () => {
+  const workbook = buildOutlineWorkbook([
+    {
+      code: "P-001",
+      name: "点1",
+      importance: "critical",
+      requirement: {
+        primaryName: "基本要求",
+        secondaryName: "职业道德",
+        secondaryWeight: 5,
+        tertiaryName: "职业道德基本知识",
+        importanceCode: "X",
+      },
+    },
+    {
+      code: "P-002",
+      name: "点2",
+      importance: "critical",
+      requirement: {
+        primaryName: "基本要求",
+        secondaryName: "职业道德",
+        secondaryWeight: 5,
+        tertiaryName: "职业守则",
+        importanceCode: "X",
+      },
+    },
+    {
+      code: "P-003",
+      name: "点3",
+      importance: "critical",
+      requirement: {
+        primaryName: "相关知识要求 · 公益慈善宣讲",
+        primaryWeight: 20,
+        secondaryName: "理念宣传",
+        tertiaryName: "募捐工作基本内容",
+        sectionKind: "related_knowledge",
+        standardSource: { functionName: "公益慈善宣讲", contentName: "理念宣传" },
+        importanceCode: "X",
+      },
+    },
+    {
+      code: "P-004",
+      name: "点4",
+      importance: "critical",
+      requirement: {
+        primaryName: "相关知识要求 · 公益慈善宣讲",
+        primaryWeight: 20,
+        secondaryName: "理念宣传",
+        tertiaryName: "募捐沟通要点",
+        sectionKind: "related_knowledge",
+        standardSource: { functionName: "公益慈善宣讲", contentName: "理念宣传" },
+        importanceCode: "X",
+      },
+    },
+  ], { normalizeTheoryHierarchy: true });
+  const restored = new ExcelJS.Workbook();
+  await restored.xlsx.load(await workbook.xlsx.writeBuffer());
+  const sheet = restored.worksheets[0];
+  assert.equal(sheet.getCell("C3").master.address, "C2");
+  assert.equal(sheet.getCell("F3").master.address, "F2");
+  assert.equal(sheet.getCell("F5").master.address, "F4");
+  assert.equal(sheet.getCell("I5").master.address, "I4");
+  assert.equal(sheet.getCell("C4").value, 20);
+});
+
 test("技能使用冻结层级、权重与重要度，不编造三级权重或页码", () => {
   const sheet = buildOutlineWorkbook([{
     code: "D1-A-B-007", name: "完成操作", importance: "critical",
