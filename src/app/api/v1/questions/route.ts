@@ -348,7 +348,7 @@ export async function GET(request: Request) {
              LEFT JOIN question_assessment_points qap ON qap.question_version_id = qv.id
              LEFT JOIN blueprint_nodes bn ON bn.id = qap.blueprint_node_id
              LEFT JOIN theory_outline_export_mappings toem
-               ON toem.blueprint_node_id = qap.blueprint_node_id
+               ON toem.source_point_code = bn.node_code
               AND (? IS NOT NULL AND toem.blueprint_version_id = ?)
             WHERE q.occupation_id = ? AND q.assessment_mode = ?
               AND q.archived_at IS NULL

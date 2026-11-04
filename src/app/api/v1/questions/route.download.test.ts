@@ -187,6 +187,8 @@ test("理论知识题库下载按考评点和题型导出最近配额内的题�
     assert.ok(sql);
     assert.doesNotMatch(sql!, /AS point_code,\s+FROM questions q/);
     assert.match(sql!, /AS stored_at/);
+    assert.match(sql!, /toem\.source_point_code = bn\.node_code/);
+    assert.doesNotMatch(sql!, /toem\.blueprint_node_id = qap\.blueprint_node_id/);
 
     const workbook = new ExcelJS.Workbook();
     const bytes: any = new Uint8Array(await response.arrayBuffer());
