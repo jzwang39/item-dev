@@ -315,8 +315,8 @@ function buildOutlineWorkbookModel(points: ExportPoint[], options: OutlineWorkbo
       const numeric = weights.map((value) => Number(value)).filter(Number.isFinite);
       basicPrimaryWeights.set(primaryName, numeric.length === weights.length ? numeric.reduce((sum, value) => sum + value, 0) : weights[0] ?? "");
     }
-    for (const module of options.standardBasicModules ?? []) {
-      scopedCode(displayCodes.tertiary, `基本要求|${module.secondaryName}`, module.moduleName);
+      for (const basicModule of options.standardBasicModules ?? []) {
+        scopedCode(displayCodes.tertiary, `基本要求|${basicModule.secondaryName}`, basicModule.moduleName);
     }
   }
   const mappings: OutlinePointCodeMapping[] = [];
