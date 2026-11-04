@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import ExcelJS from "exceljs";
 import type { PoolConnection } from "mysql2/promise";
-import { buildOutlineWorkbook, buildOutlineWorkbookPackage, exportConfirmedOutline, type ExportPoint } from "./outline-export";
+import {
+  buildOutlineWorkbook,
+  buildOutlineWorkbookPackage,
+  buildStandardBasicModules,
+  exportConfirmedOutline,
+  type ExportPoint,
+} from "./outline-export";
 
 const point: ExportPoint = {
   id: "N".repeat(26),
@@ -350,6 +356,137 @@ test("理论知识导出同时生成按版本保存所需的编码映射", () =>
       sourcePointCode: "SRC-002",
       exportPointCode: "A-A-A-002",
       pointName: "社会主义职业道德的强制性与自觉性",
+    },
+  ]);
+});
+
+test("教材生成的基础知识三级按标准模块归并并重排编码", async () => {
+  const modules = buildStandardBasicModules([
+    {
+      ancestorNames: ["基本要求", "基础知识"],
+      parentName: "基础知识",
+      name: "慈善文化与事业发展概况",
+      evidence: "慈善文化 慈善事业发展历程 慈善文化理念及变迁",
+    },
+    {
+      ancestorNames: ["基本要求", "基础知识"],
+      parentName: "基础知识",
+      name: "慈善组织管理基本知识",
+      evidence: "慈善组织管理 慈善组织活动管理 慈善组织内部治理",
+    },
+    {
+      ancestorNames: ["基本要求", "基础知识"],
+      parentName: "基础知识",
+      name: "劝募业务基本知识",
+      evidence: "劝募活动管理 劝募沟通常识 捐赠心理常识 捐赠人关系管理",
+    },
+  ]);
+  const workbook = buildOutlineWorkbook([
+    {
+      code: "A-B-X-001",
+      name: "慈善文化的同题性特征",
+      importance: "critical",
+      requirement: {
+        primaryName: "基本要求",
+        secondaryName: "基础知识",
+        secondaryWeight: 20,
+        tertiaryName: "慈善文化理念及变迁",
+        importanceCode: "X",
+      },
+    },
+    {
+      code: "A-B-X-002",
+      name: "慈善组织活动与慈善组织管理的区别",
+      importance: "critical",
+      requirement: {
+        primaryName: "基本要求",
+        secondaryName: "基础知识",
+        secondaryWeight: 20,
+        tertiaryName: "慈善组织活动管理",
+        importanceCode: "X",
+      },
+    },
+    {
+      code: "A-B-X-003",
+      name: "捐赠后发送个性化感谢信息的时限要求",
+      importance: "critical",
+      requirement: {
+        primaryName: "基本要求",
+        secondaryName: "基础知识",
+        secondaryWeight: 20,
+        tertiaryName: "捐赠人关系管理",
+        importanceCode: "X",
+      },
+    },
+  ], { normalizeTheoryHierarchy: true, standardBasicModules: modules });
+  const restored = new ExcelJS.Workbook();
+  await restored.xlsx.load(await workbook.xlsx.writeBuffer());
+  const sheet = restored.worksheets[0];
+  assert.deepEqual(
+    ["H2", "H3", "H4"].map((cell) => sheet.getCell(cell).value),
+    ["慈善文化与事业发展概况", "慈善组织管理基本知识", "劝募业务基本知识"],
+  );
+  assert.deepEqual(
+    ["G2", "G3", "G4"].map((cell) => sheet.getCell(cell).value),
+    ["A", "B", "C"],
+  );
+});
+
+test("教材生成的基础知识映射表按标准模块归并后的编码保存", () => {
+  const modules = buildStandardBasicModules([
+    {
+      ancestorNames: ["基本要求", "基础知识"],
+      parentName: "基础知识",
+      name: "慈善文化与事业发展概况",
+      evidence: "慈善文化 慈善事业发展历程 慈善文化理念及变迁",
+    },
+    {
+      ancestorNames: ["基本要求", "基础知识"],
+      parentName: "基础知识",
+      name: "慈善组织管理基本知识",
+      evidence: "慈善组织管理 慈善组织活动管理 慈善组织内部治理",
+    },
+  ]);
+  const exported = buildOutlineWorkbookPackage([
+    {
+      id: "A".repeat(26),
+      code: "SRC-001",
+      name: "慈善文化的同题性特征",
+      importance: "critical",
+      requirement: {
+        primaryName: "基本要求",
+        secondaryName: "基础知识",
+        secondaryWeight: 20,
+        tertiaryName: "慈善文化理念及变迁",
+        importanceCode: "X",
+      },
+    },
+    {
+      id: "B".repeat(26),
+      code: "SRC-002",
+      name: "慈善组织活动与慈善组织管理的区别",
+      importance: "critical",
+      requirement: {
+        primaryName: "基本要求",
+        secondaryName: "基础知识",
+        secondaryWeight: 20,
+        tertiaryName: "慈善组织活动管理",
+        importanceCode: "X",
+      },
+    },
+  ], { normalizeTheoryHierarchy: true, standardBasicModules: modules });
+  assert.deepEqual(exported.mappings, [
+    {
+      blueprintNodeId: "A".repeat(26),
+      sourcePointCode: "SRC-001",
+      exportPointCode: "A-A-A-001",
+      pointName: "慈善文化的同题性特征",
+    },
+    {
+      blueprintNodeId: "B".repeat(26),
+      sourcePointCode: "SRC-002",
+      exportPointCode: "A-A-B-001",
+      pointName: "慈善组织活动与慈善组织管理的区别",
     },
   ]);
 });

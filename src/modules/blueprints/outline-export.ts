@@ -1,15 +1,28 @@
+import { readFile } from "node:fs/promises";
+import { extname } from "node:path";
 import ExcelJS from "exceljs";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { withTransaction } from "@/shared/database/mysql";
 import { createUlid } from "@/shared/database/ulid";
+import { extractDocxText, extractPdfText } from "@/modules/documents/extraction/service";
 import { assertOutlineConfirmed } from "./point-review";
 import { codeFor } from "./theory-outline-generation/node-code";
+import { parseStandardBasicItems, type StandardBasicSource } from "./theory-outline-generation/standard-basic";
 
 export type ExportPoint = {
-  id?: string | null; code: string; name: string; importance: string | null; requirement: unknown;
+  id?: string | null; code: string; name: string; importance: string | null; requirement: unknown; sourceRef?: unknown;
 };
 type CellValue = string | number;
-type OutlineWorkbookOptions = { normalizeTheoryHierarchy?: boolean };
+export type StandardBasicModule = {
+  secondaryName: string;
+  moduleName: string;
+  order: number;
+  searchText: string;
+};
+type OutlineWorkbookOptions = {
+  normalizeTheoryHierarchy?: boolean;
+  standardBasicModules?: StandardBasicModule[];
+};
 export type OutlinePointCodeMapping = {
   blueprintNodeId: string;
   sourcePointCode: string;
@@ -41,6 +54,12 @@ type TheoryDisplayDraft = {
   tertiaryWeight: CellValue;
   isRelated: boolean;
 };
+type DisplayPoint = {
+  point: ExportPoint;
+  hierarchy: DisplayHierarchy;
+  importance: string;
+  originalIndex: number;
+};
 type OutlineWorkbookModel = {
   workbook: ExcelJS.Workbook;
   mappings: OutlinePointCodeMapping[];
@@ -65,6 +84,84 @@ function stripDisplayPrefix(value: unknown) {
     .trim();
 }
 
+function normalizeMatchText(value: unknown) {
+  return text(value)
+    .normalize("NFKC")
+    .replace(/^\s*\d+(?:\.\d+)*(?:\s*[.、．])?\s*/u, "")
+    .replace(/[\s\p{P}\p{S}]+/gu, "")
+    .trim();
+}
+
+function bigrams(value: string) {
+  const result = new Set<string>();
+  for (let index = 0; index < value.length - 1; index += 1) result.add(value.slice(index, index + 2));
+  return result;
+}
+
+function overlapScore(left: string, right: string) {
+  if (!left || !right) return 0;
+  const l = bigrams(left);
+  const r = bigrams(right);
+  let score = 0;
+  for (const token of l) if (r.has(token)) score += 1;
+  return score;
+}
+
+function distinct(values: string[]) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function secondaryScopeName(item: Pick<StandardBasicSource, "ancestorNames" | "parentName">) {
+  return stripDisplayPrefix(item.ancestorNames?.[1] ?? item.parentName);
+}
+
+function moduleNameFor(item: Pick<StandardBasicSource, "ancestorNames" | "name">) {
+  return stripDisplayPrefix(item.ancestorNames?.[2] ?? item.name);
+}
+
+export function buildStandardBasicModules(items: ReadonlyArray<Pick<StandardBasicSource, "ancestorNames" | "parentName" | "name" | "evidence">>) {
+  const groups = new Map<string, StandardBasicModule>();
+  items.forEach((item, index) => {
+    const secondaryName = secondaryScopeName(item);
+    const moduleName = moduleNameFor(item);
+    if (!secondaryName || !moduleName) return;
+    const key = `${normalizeMatchText(secondaryName)}\u0000${normalizeMatchText(moduleName)}`;
+    const existing = groups.get(key);
+    const searchText = distinct([moduleName, item.name, item.parentName, ...(item.ancestorNames ?? []), item.evidence ?? ""]).join(" ");
+    if (existing) {
+      existing.searchText = distinct([existing.searchText, searchText]).join(" ");
+      return;
+    }
+    groups.set(key, { secondaryName, moduleName, order: index, searchText });
+  });
+  return [...groups.values()].sort((left, right) => left.order - right.order);
+}
+
+function resolveStandardBasicModule(point: ExportPoint, secondaryName: string, tertiaryName: string, modules: StandardBasicModule[]) {
+  const source = object(point.sourceRef).standardBasic;
+  const standardBasic = source && typeof source === "object" && !Array.isArray(source)
+    ? source as Pick<StandardBasicSource, "ancestorNames" | "parentName" | "name">
+    : null;
+  if (standardBasic) return moduleNameFor(standardBasic);
+
+  const secondaryKey = normalizeMatchText(secondaryName);
+  const candidates = modules.filter((item) => normalizeMatchText(item.secondaryName) === secondaryKey);
+  if (!candidates.length) return stripDisplayPrefix(tertiaryName);
+  if (candidates.length === 1) return candidates[0].moduleName;
+  const pointKey = normalizeMatchText(point.name);
+  const tertiaryKey = normalizeMatchText(tertiaryName);
+  const ranked = candidates.map((candidate) => {
+    const moduleKey = normalizeMatchText(candidate.moduleName);
+    const searchKey = normalizeMatchText(candidate.searchText);
+    let score = overlapScore(pointKey, searchKey) * 5 + overlapScore(tertiaryKey, searchKey) * 3;
+    if (moduleKey && (pointKey.includes(moduleKey) || tertiaryKey.includes(moduleKey))) score += 100;
+    if (pointKey && searchKey.includes(pointKey)) score += 80;
+    if (tertiaryKey && searchKey.includes(tertiaryKey)) score += 50;
+    return { candidate, score };
+  }).sort((left, right) => right.score - left.score || left.candidate.order - right.candidate.order);
+  return ranked[0]?.candidate.moduleName ?? stripDisplayPrefix(tertiaryName);
+}
+
 function scopedCode(groups: Map<string, Map<string, string>>, parentKey: string, key: string) {
   let values = groups.get(parentKey);
   if (!values) {
@@ -74,7 +171,7 @@ function scopedCode(groups: Map<string, Map<string, string>>, parentKey: string,
   return codeFor(values, key);
 }
 
-function theoryDisplayDraft(point: ExportPoint): TheoryDisplayDraft {
+function theoryDisplayDraft(point: ExportPoint, options: OutlineWorkbookOptions = {}): TheoryDisplayDraft {
   const r = object(point.requirement);
   const source = object(r.standardSource ?? r.sourceStandardRequirement);
   const rawPrimaryName = text(r.primaryName ?? r.level1Name);
@@ -91,7 +188,9 @@ function theoryDisplayDraft(point: ExportPoint): TheoryDisplayDraft {
   const tertiaryName = stripDisplayPrefix(
     isRelated
       ? (source.contentName ?? rawSecondaryName)
-      : rawTertiaryName,
+      : (options.standardBasicModules?.length
+        ? resolveStandardBasicModule(point, secondaryName, rawTertiaryName, options.standardBasicModules)
+        : rawTertiaryName),
   );
 
   return {
@@ -109,8 +208,8 @@ function theoryHierarchy(point: ExportPoint, index: number, codes: {
   primary: Map<string, string>;
   secondary: Map<string, Map<string, string>>;
   tertiary: Map<string, Map<string, string>>;
-}, basicPrimaryWeights: Map<string, CellValue>): DisplayHierarchy {
-  const draft = theoryDisplayDraft(point);
+}, basicPrimaryWeights: Map<string, CellValue>, options: OutlineWorkbookOptions = {}): DisplayHierarchy {
+  const draft = theoryDisplayDraft(point, options);
   return {
     primaryNo: codeFor(codes.primary, draft.primaryName || `primary-${index}`),
     primaryName: draft.primaryName,
@@ -156,6 +255,30 @@ export async function replaceTheoryOutlineExportMappings(
   );
 }
 
+async function extractSourceText(objectKey: string, originalName: string) {
+  const extension = extname(originalName).toLowerCase();
+  const bytes = await readFile(objectKey);
+  if (extension === ".txt") return bytes.toString("utf8").trim();
+  if (extension === ".docx") return extractDocxText(bytes);
+  return (await extractPdfText(bytes)).text;
+}
+
+export async function loadTheoryStandardBasicModules(db: PoolConnection, blueprintVersionId: string) {
+  const [rows] = await db.execute<(RowDataPacket & { objectKey: string; originalName: string })[]>(
+    `SELECT fo.object_key AS objectKey, fo.original_name AS originalName
+       FROM blueprint_version_sources bvs
+       JOIN source_versions sv ON sv.id = bvs.source_version_id
+       JOIN sources s ON s.id = sv.source_id AND s.source_type = 'occupation_standard' AND s.status = 'active'
+       JOIN file_objects fo ON fo.id = sv.file_object_id
+      WHERE bvs.blueprint_version_id = ?
+      ORDER BY sv.created_at DESC, sv.id DESC
+      LIMIT 1`,
+    [blueprintVersionId],
+  );
+  if (!rows[0]) return [];
+  return buildStandardBasicModules(parseStandardBasicItems(await extractSourceText(rows[0].objectKey, rows[0].originalName)));
+}
+
 function buildOutlineWorkbookModel(points: ExportPoint[], options: OutlineWorkbookOptions = {}): OutlineWorkbookModel {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("评价要素细目表", {
@@ -178,7 +301,7 @@ function buildOutlineWorkbookModel(points: ExportPoint[], options: OutlineWorkbo
   if (options.normalizeTheoryHierarchy) {
     const buckets = new Map<string, Map<string, CellValue>>();
     for (const point of points) {
-      const draft = theoryDisplayDraft(point);
+      const draft = theoryDisplayDraft(point, options);
       if (draft.isRelated || draft.secondaryWeight === "") continue;
       let bySecondary = buckets.get(draft.primaryName);
       if (!bySecondary) {
@@ -192,17 +315,19 @@ function buildOutlineWorkbookModel(points: ExportPoint[], options: OutlineWorkbo
       const numeric = weights.map((value) => Number(value)).filter(Number.isFinite);
       basicPrimaryWeights.set(primaryName, numeric.length === weights.length ? numeric.reduce((sum, value) => sum + value, 0) : weights[0] ?? "");
     }
+    for (const module of options.standardBasicModules ?? []) {
+      scopedCode(displayCodes.tertiary, `基本要求|${module.secondaryName}`, module.moduleName);
+    }
   }
-  const pointOrdinals = new Map<string, number>();
   const mappings: OutlinePointCodeMapping[] = [];
-  const values = points.map((point, index): CellValue[] => {
+  const rows = points.map((point, index): DisplayPoint => {
     const r = object(point.requirement);
     // Use the version's stored hierarchy, not a newer weight table.
     const importance = ["X", "Y", "Z"].includes(text(r.importanceCode))
       ? text(r.importanceCode)
       : ({ critical: "X", high: "Y", medium: "Z", low: "Z" }[point.importance ?? ""] ?? "");
     const hierarchy = options.normalizeTheoryHierarchy
-      ? theoryHierarchy(point, index, displayCodes, basicPrimaryWeights)
+      ? theoryHierarchy(point, index, displayCodes, basicPrimaryWeights, options)
       : {
         primaryNo: text(r.primaryNo ?? r.level1Code),
         primaryName: text(r.primaryName ?? r.level1Name),
@@ -214,6 +339,17 @@ function buildOutlineWorkbookModel(points: ExportPoint[], options: OutlineWorkbo
         tertiaryName: text(r.tertiaryName ?? r.level3Name),
         tertiaryWeight: weight(r.tertiaryWeight ?? r.level3Weight),
       };
+    return { point, hierarchy, importance, originalIndex: index };
+  });
+  const orderedRows = options.normalizeTheoryHierarchy
+    ? [...rows].sort((left, right) =>
+      left.hierarchy.primaryNo.localeCompare(right.hierarchy.primaryNo) ||
+      left.hierarchy.secondaryNo.localeCompare(right.hierarchy.secondaryNo) ||
+      left.hierarchy.tertiaryNo.localeCompare(right.hierarchy.tertiaryNo) ||
+      left.originalIndex - right.originalIndex)
+    : rows;
+  const pointOrdinals = new Map<string, number>();
+  const values = orderedRows.map(({ point, hierarchy, importance }): CellValue[] => {
     const pointOrdinal = options.normalizeTheoryHierarchy
       ? (() => {
         const key = [hierarchy.primaryName, hierarchy.secondaryName, hierarchy.tertiaryName].join("\u0000");
@@ -222,15 +358,12 @@ function buildOutlineWorkbookModel(points: ExportPoint[], options: OutlineWorkbo
         return String(next).padStart(3, "0");
       })()
       : (point.code.match(/(?:^|-)(\d+)$/)?.[1] ?? point.code);
-    const exportPointCode = [hierarchy.primaryNo, hierarchy.secondaryNo, hierarchy.tertiaryNo, pointOrdinal].join("-");
-    if (point.id) {
-      mappings.push({
-        blueprintNodeId: point.id,
-        sourcePointCode: point.code,
-        exportPointCode,
-        pointName: point.name,
-      });
-    }
+    if (point.id) mappings.push({
+      blueprintNodeId: point.id,
+      sourcePointCode: point.code,
+      exportPointCode: [hierarchy.primaryNo, hierarchy.secondaryNo, hierarchy.tertiaryNo, pointOrdinal].join("-"),
+      pointName: point.name,
+    });
     return [
       hierarchy.primaryNo, hierarchy.primaryName,
       hierarchy.primaryWeight,
@@ -301,12 +434,17 @@ export async function exportConfirmedOutline(
     await assertOutlineConfirmed(db, versionId);
     const [points] = await db.execute<(RowDataPacket & ExportPoint)[]>(
       `SELECT id,node_code AS code,name,importance,requirement_json AS requirement
+              ,source_ref_json AS sourceRef
        FROM blueprint_nodes WHERE blueprint_version_id=? AND node_kind='assessment_point'
        ORDER BY ordinal,id`, [versionId],
     );
     const version = versions[0];
+    const standardBasicModules = version.assessmentMode === "theory"
+      ? await loadTheoryStandardBasicModules(db, versionId)
+      : [];
     const exported = buildOutlineWorkbookPackage(points, {
       normalizeTheoryHierarchy: version.assessmentMode === "theory",
+      standardBasicModules,
     });
     if (version.assessmentMode === "theory") {
       await replaceTheoryOutlineExportMappings(db, versionId, exported.mappings);

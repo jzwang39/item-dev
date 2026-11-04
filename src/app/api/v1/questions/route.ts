@@ -9,7 +9,7 @@ import { query, withTransaction } from "@/shared/database/mysql";
 import { bulkStorageSchema } from "@/modules/authoring/question-storage-policy";
 import { storeQuestions } from "@/modules/authoring/question-storage";
 import { commonEditorialLevelFilter } from "@/modules/authoring/common-question-policy";
-import { buildOutlineWorkbookPackage, replaceTheoryOutlineExportMappings, type ExportPoint } from "@/modules/blueprints/outline-export";
+import { buildOutlineWorkbookPackage, loadTheoryStandardBasicModules, replaceTheoryOutlineExportMappings, type ExportPoint } from "@/modules/blueprints/outline-export";
 import { createSkillOutlineWord, createSkillStructureWord } from "@/modules/documents/skill-blueprint-word";
 import { buildTheoryQuestionBankWorkbook } from "@/modules/questions/theory-question-bank-export";
 import { limitTheoryQuestionBankRows } from "@/modules/questions/theory-question-bank-selection";
@@ -262,6 +262,7 @@ export async function GET(request: Request) {
         const bytes = await withTransaction(async (db) => {
           const [rows] = await db.execute<(RowDataPacket & ExportPoint & { blueprint_version_id: string })[]>(
             `SELECT bn.id,bn.node_code AS code,bn.name,bn.importance,bn.requirement_json AS requirement,
+                    bn.source_ref_json AS sourceRef,
                     b.current_version_id AS blueprint_version_id
                FROM blueprints b INNER JOIN blueprint_nodes bn ON bn.blueprint_version_id=b.current_version_id
               WHERE b.occupation_id=? AND b.level_code=? AND b.assessment_mode='theory'
@@ -271,7 +272,10 @@ export async function GET(request: Request) {
           );
           if (!rows.length) throw new Error("当前范围尚未维护理论知识考评要素细目表，无法生成成果文件。");
           const versionId = rows[0].blueprint_version_id;
-          const exported = buildOutlineWorkbookPackage(rows, { normalizeTheoryHierarchy: true });
+          const exported = buildOutlineWorkbookPackage(rows, {
+            normalizeTheoryHierarchy: true,
+            standardBasicModules: await loadTheoryStandardBasicModules(db, versionId),
+          });
           await replaceTheoryOutlineExportMappings(db, versionId, exported.mappings);
           return exported.workbook.xlsx.writeBuffer();
         });
