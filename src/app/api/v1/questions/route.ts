@@ -292,6 +292,27 @@ export async function GET(request: Request) {
         file === "question-bank" ? "题库" : "考评要素",
       );
       if (file === "question-bank") {
+        if (assessmentMode === "theory") {
+          await withTransaction(async (db) => {
+            const [outlineRows] = await db.execute<(RowDataPacket & ExportPoint & { blueprint_version_id: string })[]>(
+              `SELECT bn.id,bn.node_code AS code,bn.name,bn.importance,bn.requirement_json AS requirement,
+                      bn.source_ref_json AS sourceRef,
+                      b.current_version_id AS blueprint_version_id
+                 FROM blueprints b INNER JOIN blueprint_nodes bn ON bn.blueprint_version_id=b.current_version_id
+                WHERE b.occupation_id=? AND b.level_code=? AND b.assessment_mode='theory'
+                  AND b.blueprint_kind='theory_outline' AND bn.node_kind='assessment_point'
+                ORDER BY bn.ordinal,bn.id`,
+              [occupationId, levelCode],
+            );
+            if (!outlineRows.length) return;
+            const versionId = outlineRows[0].blueprint_version_id;
+            const exported = buildOutlineWorkbookPackage(outlineRows, {
+              normalizeTheoryHierarchy: true,
+              standardBasicModules: await loadTheoryStandardBasicModules(db, versionId),
+            });
+            await replaceTheoryOutlineExportMappings(db, versionId, exported.mappings);
+          });
+        }
         const rows = await query<
           (RowDataPacket & {
             question_no: string;

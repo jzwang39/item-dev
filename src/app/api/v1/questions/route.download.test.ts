@@ -138,8 +138,41 @@ test("理论知识题库下载按考评点和题型导出最近配额内的题�
         }
         throw new Error(`unexpected sql: ${sql}`);
       },
-      withTransaction: async () => {
-        throw new Error("not expected");
+      withTransaction: async (runner: (db: { execute: (sql: string) => Promise<unknown[]> }) => Promise<unknown>) => {
+        const db = {
+          execute: async (sql: string) => {
+            if (sql.includes("FROM blueprints b INNER JOIN blueprint_nodes bn")) {
+              return [[
+                {
+                  id: "N".repeat(26),
+                  code: "A-A-B-001",
+                  name: "示例考评点",
+                  importance: "critical",
+                  requirement: {
+                    primaryName: "基本要求",
+                    secondaryName: "职业道德",
+                    secondaryWeight: 5,
+                    tertiaryName: "职业守则",
+                    importanceCode: "X",
+                  },
+                  sourceRef: null,
+                  blueprint_version_id: "V".repeat(26),
+                },
+              ]];
+            }
+            if (sql.includes("FROM blueprint_version_sources bvs")) {
+              return [[]];
+            }
+            if (sql.includes("DELETE FROM theory_outline_export_mappings")) {
+              return [{ affectedRows: 0 }];
+            }
+            if (sql.includes("INSERT INTO theory_outline_export_mappings")) {
+              return [{ affectedRows: 1 }];
+            }
+            throw new Error(`unexpected tx sql: ${sql}`);
+          },
+        };
+        return runner(db);
       },
     },
   } as NonNullable<typeof previousDb>;
