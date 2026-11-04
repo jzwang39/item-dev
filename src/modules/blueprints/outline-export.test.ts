@@ -79,7 +79,76 @@ test("理论知识导出按模板重建相关知识层级并去掉名称编号�
   const row3 = Array.from(sheet.getRow(3).values as unknown[]).slice(1, 13);
   assert.equal(sheet.getColumn(11).width, 49);
   assert.deepEqual(row2, ["A", "相关知识要求", 20, "A", "公益慈善宣讲", "", "A", "理念宣传", "", "001", "募捐工作的含义", "X"]);
-  assert.deepEqual(row3, ["B", "基本要求", "", "B", "职业道德", 5, "B", "职业道德基本知识", "", "002", "职业道德的特殊性", "Y"]);
+  assert.deepEqual(row3, ["B", "基本要求", "", "A", "职业道德", 5, "A", "职业道德基本知识", "", "002", "职业道德的特殊性", "Y"]);
+});
+
+test("理论知识二级三级编号按父级从A重新开始，相关知识一级名称跨权重合并", async () => {
+  const workbook = buildOutlineWorkbook([
+    {
+      code: "R-001",
+      name: "考评点1",
+      importance: "critical",
+      requirement: {
+        primaryName: "基本要求",
+        secondaryName: "基础知识",
+        secondaryWeight: 20,
+        tertiaryName: "31. 慈善文化与事业发展概况",
+        importanceCode: "X",
+      },
+    },
+    {
+      code: "R-002",
+      name: "考评点2",
+      importance: "critical",
+      requirement: {
+        primaryName: "基本要求",
+        secondaryName: "基础知识",
+        secondaryWeight: 20,
+        tertiaryName: "32. 慈善组织管理基本知识",
+        importanceCode: "X",
+      },
+    },
+    {
+      code: "R-003",
+      name: "考评点3",
+      importance: "critical",
+      requirement: {
+        primaryName: "相关知识要求 · 公益慈善宣讲",
+        primaryWeight: 20,
+        secondaryName: "理念宣传",
+        tertiaryName: "1.1.1 募捐工作基本内容",
+        sectionKind: "related_knowledge",
+        standardSource: { functionName: "公益慈善宣讲", contentName: "理念宣传" },
+        importanceCode: "X",
+      },
+    },
+    {
+      code: "R-004",
+      name: "考评点4",
+      importance: "critical",
+      requirement: {
+        primaryName: "相关知识要求 · 款物募集",
+        primaryWeight: 30,
+        secondaryName: "方案策划",
+        tertiaryName: "2.2.1 募捐活动策划基础",
+        sectionKind: "related_knowledge",
+        standardSource: { functionName: "款物募集", contentName: "方案策划" },
+        importanceCode: "X",
+      },
+    },
+  ], { normalizeTheoryHierarchy: true });
+  const restored = new ExcelJS.Workbook();
+  await restored.xlsx.load(await workbook.xlsx.writeBuffer());
+  const sheet = restored.worksheets[0];
+  assert.equal(sheet.getCell("D2").value, "A");
+  assert.equal(sheet.getCell("G2").value, "A");
+  assert.equal(sheet.getCell("G3").value, "B");
+  assert.equal(sheet.getCell("D4").value, "A");
+  assert.equal(sheet.getCell("G4").value, "A");
+  assert.equal(sheet.getCell("B5").master.address, "B4");
+  assert.equal(sheet.getCell("A5").master.address, "A4");
+  assert.equal(sheet.getCell("C4").isMerged, false);
+  assert.equal(sheet.getCell("C5").isMerged, false);
 });
 
 test("技能使用冻结层级、权重与重要度，不编造三级权重或页码", () => {

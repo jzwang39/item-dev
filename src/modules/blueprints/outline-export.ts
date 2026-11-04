@@ -21,6 +21,11 @@ type DisplayHierarchy = {
   tertiaryName: string;
   tertiaryWeight: CellValue;
 };
+type TheoryDisplayCodes = {
+  primary: Map<string, string>;
+  secondary: Map<string, Map<string, string>>;
+  tertiary: Map<string, Map<string, string>>;
+};
 function object(value: unknown): Record<string, unknown> {
   const parsed = typeof value === "string" ? JSON.parse(value) : value;
   return parsed && typeof parsed === "object" && !Array.isArray(parsed)
@@ -41,10 +46,19 @@ function stripDisplayPrefix(value: unknown) {
     .trim();
 }
 
+function scopedCode(groups: Map<string, Map<string, string>>, parentKey: string, key: string) {
+  let values = groups.get(parentKey);
+  if (!values) {
+    values = new Map<string, string>();
+    groups.set(parentKey, values);
+  }
+  return codeFor(values, key);
+}
+
 function theoryHierarchy(point: ExportPoint, index: number, codes: {
   primary: Map<string, string>;
-  secondary: Map<string, string>;
-  tertiary: Map<string, string>;
+  secondary: Map<string, Map<string, string>>;
+  tertiary: Map<string, Map<string, string>>;
 }): DisplayHierarchy {
   const r = object(point.requirement);
   const source = object(r.standardSource ?? r.sourceStandardRequirement);
@@ -69,10 +83,10 @@ function theoryHierarchy(point: ExportPoint, index: number, codes: {
     primaryNo: codeFor(codes.primary, primaryName || `primary-${index}`),
     primaryName,
     primaryWeight: isRelated ? weight(r.primaryWeight ?? r.level1Weight) : weight(r.primaryWeight ?? r.level1Weight),
-    secondaryNo: codeFor(codes.secondary, `${primaryName}|${secondaryName || `secondary-${index}`}`),
+    secondaryNo: scopedCode(codes.secondary, primaryName || `primary-${index}`, secondaryName || `secondary-${index}`),
     secondaryName,
     secondaryWeight: isRelated ? "" : weight(r.secondaryWeight ?? r.level2Weight),
-    tertiaryNo: codeFor(codes.tertiary, `${primaryName}|${secondaryName}|${tertiaryName || `tertiary-${index}`}`),
+    tertiaryNo: scopedCode(codes.tertiary, `${primaryName}|${secondaryName || `secondary-${index}`}`, tertiaryName || `tertiary-${index}`),
     tertiaryName,
     tertiaryWeight: isRelated ? "" : weight(r.tertiaryWeight ?? r.level3Weight),
   };
@@ -93,9 +107,9 @@ export function buildOutlineWorkbook(points: ExportPoint[], options: OutlineWork
   sheet.addRow(headers);
   const displayCodes = {
     primary: new Map<string, string>(),
-    secondary: new Map<string, string>(),
-    tertiary: new Map<string, string>(),
-  };
+    secondary: new Map<string, Map<string, string>>(),
+    tertiary: new Map<string, Map<string, string>>(),
+  } satisfies TheoryDisplayCodes;
   const values = points.map((point, index): CellValue[] => {
     const r = object(point.requirement);
     // Use the version's stored hierarchy, not a newer weight table.
@@ -137,14 +151,21 @@ export function buildOutlineWorkbook(points: ExportPoint[], options: OutlineWork
       if (index === 1) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9E1F2" } };
     });
   });
-  // Merge only adjacent identical groups, including all ancestor identities.
-  for (const firstColumn of [1, 4, 7]) {
+  const mergeGroups = [
+    { columns: [1, 2], keyEnd: 2 },
+    { columns: [3], keyEnd: 3 },
+    { columns: [4, 5], keyEnd: 5 },
+    { columns: [6], keyEnd: 6 },
+    { columns: [7, 8], keyEnd: 8 },
+    { columns: [9], keyEnd: 9 },
+  ];
+  for (const group of mergeGroups) {
     let start = 0;
-    const key = (index: number) => JSON.stringify(values[index]?.slice(0, firstColumn + 2));
+    const key = (index: number) => JSON.stringify(values[index]?.slice(0, group.keyEnd));
     for (let end = 1; end <= values.length; end += 1) {
       if (end < values.length && key(start) === key(end)) continue;
-      if (end - start > 1 && values[start].slice(firstColumn - 1, firstColumn + 1).some((value) => value !== "")) {
-        for (let column = firstColumn; column < firstColumn + 3; column += 1) {
+      if (end - start > 1 && group.columns.some((column) => values[start][column - 1] !== "")) {
+        for (const column of group.columns) {
           sheet.mergeCells(start + 2, column, end + 1, column);
         }
       }
