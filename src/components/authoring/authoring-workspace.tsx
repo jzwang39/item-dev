@@ -6299,9 +6299,12 @@ function AuthoringTaskPanel() {
                     </td>
                     <td className="px-5 py-5">
                       {(() => {
-                        const progressGenerated = row.common ? row.common.available : (row.generation_generated ?? row.question_count);
-                        const progressTarget = row.common ? row.common.target : (row.generation_target ?? row.quota_json.minimumTotal);
-                        const progressStarted = row.common ? progressGenerated > 0 || Boolean(row.generation_status) : Boolean(row.generation_status) || row.question_count > 0;
+                        const usesCommonProgress = Boolean(row.scope_json.commonGroupId);
+                        const progressGenerated = usesCommonProgress && row.common ? row.common.available : (row.generation_generated ?? row.question_count);
+                        const progressTarget = usesCommonProgress && row.common ? row.common.target : (row.generation_target ?? row.quota_json.minimumTotal);
+                        const progressStarted = usesCommonProgress && row.common
+                          ? progressGenerated > 0 || Boolean(row.generation_status)
+                          : Boolean(row.generation_status) || row.question_count > 0;
                         const canSupplement = row.generation_status === "stopped"
                           && progressGenerated < progressTarget
                           && !stoppingPlanId && !terminatingPlanId && !supplementingPlanId && !isLoadingHistoryResult && !isSavingHandoff;
