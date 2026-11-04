@@ -82,10 +82,10 @@ function theoryHierarchy(point: ExportPoint, index: number, codes: {
   return {
     primaryNo: codeFor(codes.primary, primaryName || `primary-${index}`),
     primaryName,
-    primaryWeight: isRelated ? weight(r.primaryWeight ?? r.level1Weight) : weight(r.primaryWeight ?? r.level1Weight),
+    primaryWeight: isRelated ? "" : weight(r.primaryWeight ?? r.level1Weight),
     secondaryNo: scopedCode(codes.secondary, primaryName || `primary-${index}`, secondaryName || `secondary-${index}`),
     secondaryName,
-    secondaryWeight: isRelated ? "" : weight(r.secondaryWeight ?? r.level2Weight),
+    secondaryWeight: isRelated ? weight(r.primaryWeight ?? r.level1Weight) : weight(r.secondaryWeight ?? r.level2Weight),
     tertiaryNo: scopedCode(codes.tertiary, `${primaryName}|${secondaryName || `secondary-${index}`}`, tertiaryName || `tertiary-${index}`),
     tertiaryName,
     tertiaryWeight: isRelated ? "" : weight(r.tertiaryWeight ?? r.level3Weight),
