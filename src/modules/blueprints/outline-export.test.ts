@@ -79,7 +79,7 @@ test("理论知识导出按模板重建相关知识层级并去掉名称编号�
   const row2 = Array.from(sheet.getRow(2).values as unknown[]).slice(1, 13);
   const row3 = Array.from(sheet.getRow(3).values as unknown[]).slice(1, 13);
   assert.equal(sheet.getColumn(11).width, 49);
-  assert.deepEqual(row2, ["A", "相关知识要求", "", "A", "公益慈善宣讲", 20, "A", "理念宣传", "", "001", "募捐工作的含义", "X"]);
+  assert.deepEqual(row2, ["A", "相关知识要求", 20, "A", "公益慈善宣讲", "", "A", "理念宣传", "", "001", "募捐工作的含义", "X"]);
   assert.deepEqual(row3, ["B", "基本要求", "", "A", "职业道德", 5, "A", "职业道德基本知识", "", "001", "职业道德的特殊性", "Y"]);
 });
 
@@ -148,7 +148,8 @@ test("理论知识二级三级编号按父级从A重新开始，相关知识一�
   assert.equal(sheet.getCell("G4").value, "A");
   assert.equal(sheet.getCell("B5").master.address, "B4");
   assert.equal(sheet.getCell("A5").master.address, "A4");
-  assert.equal(sheet.getCell("C5").master.address, "C4");
+  assert.equal(sheet.getCell("C4").isMerged, false);
+  assert.equal(sheet.getCell("C5").isMerged, false);
   assert.equal(sheet.getCell("F5").isMerged, false);
 });
 
@@ -214,8 +215,8 @@ test("权重列空值也随层级合并，避免模板格式断开", async () =>
   assert.equal(sheet.getCell("F3").master.address, "F2");
   assert.equal(sheet.getCell("F5").master.address, "F4");
   assert.equal(sheet.getCell("I5").master.address, "I4");
-  assert.equal(sheet.getCell("C4").value, "");
-  assert.equal(sheet.getCell("F4").value, 20);
+  assert.equal(sheet.getCell("C4").value, 20);
+  assert.equal(sheet.getCell("F4").value, "");
 });
 
 test("理论知识考评点序号按导出后的展示三级范围连续编号", async () => {
