@@ -39,6 +39,44 @@ type Unit = RowDataPacket & {
   appliedQualityStandard?: AppliedQualityStandard;
 };
 
+type StandardEvidenceSegment = RowDataPacket & {
+  source_version_id: string;
+  id: string;
+  locator: string | null;
+  content_excerpt: string;
+};
+
+function object(value: unknown) {
+  return value && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+export function theoryEvidenceTopic(node: Snapshot["nodes"][number]) {
+  const theoryContext = object(node.theoryContext);
+  const point = object(theoryContext.point);
+  const source = object(theoryContext.source);
+  const pointStandard = object(point.standardSource);
+  const sourceStandard = object(source.standard);
+  const standard = Object.keys(pointStandard).length ? pointStandard : sourceStandard;
+  return [
+    node.name,
+    point.primaryName,
+    point.secondaryName,
+    point.tertiaryName,
+    standard.functionName,
+    standard.contentName,
+    standard.name,
+  ].filter((value): value is string => typeof value === "string" && value.trim().length > 0).join(" ");
+}
+
+export function theoryEvidenceSourceVersionIds(node: Snapshot["nodes"][number]) {
+  const theoryContext = object(node.theoryContext);
+  const point = object(theoryContext.point);
+  const source = object(theoryContext.source);
+  const entries = [object(point.standardSource), object(source.standard), object(source.standardBasic)];
+  return [...new Set(entries.map((entry) => entry.sourceVersionId)
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0))];
+}
+
 export async function startGeneration(planId: string, actorId: string, retryFailed = false, skillRecoveryAuthorized = false) {
   const connection = await getSavedModelConnection();
   const id = await withTransaction(async (db) => {
@@ -335,7 +373,6 @@ async function claimUnit(): Promise<Unit | null> {
     );
     const unit = units[0];
     if (!unit) throw new Error("领取的命题请求或关联任务不存在。");
-    const snapshot = json<Snapshot>(unit.snapshot_json);
     const state = retryState(unit.retry_state_json);
     if (state.supplement) unit.created_by = state.supplement.actorId;
     if (!unit.retry_state_json && Number(unit.attempts) > 0 && unit.error_message) {
@@ -562,6 +599,22 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
       id: chapter.id, ordinal: chapter.ordinal, chapterTitle: chapter.chapter_title, sectionTitle: chapter.section_title, content: chapter.content_text,
     })), node.name);
     excerpts = selectBatchExcerpts(pool, previous.length, Math.max(1, previous.length + missing.length), unit.attempts);
+  } else if (snapshot.scope.assessmentMode === "理论知识") {
+    const sourceVersionIds = theoryEvidenceSourceVersionIds(node);
+    if (sourceVersionIds.length) {
+      const standardSegments = await query<StandardEvidenceSegment[]>(
+        `SELECT source_version_id,id,locator,content_excerpt FROM source_segments
+         WHERE source_version_id IN (${sourceVersionIds.map(() => "?").join(",")})
+         ORDER BY source_version_id, ordinal`,
+        sourceVersionIds,
+      );
+      evidenceChapters = standardSegments.map((segment, index) => ({
+        id: segment.id,
+        chapter_title: segment.locator || `职业标准原文片段${index + 1}`,
+        section_title: null,
+        content_text: segment.content_excerpt,
+      }));
+    }
   }
   const kind = snapshot.scope.assessmentMode === "操作技能" ? "skill" : "theory";
   const standard = await readGenerationQualityStandard(kind);
@@ -593,7 +646,7 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
   if (useTargetedFlow || (kind === "theory" && !node.chapterIds.length && !snapshot.scope.commonGroupId)) {
     state.targeted = true;
     const context = snapshot.scope.assessmentMode === "操作技能" ? node.skillContext : node.theoryContext;
-    const sources = buildEvidenceCatalog(context, evidenceChapters, node.name);
+    const sources = buildEvidenceCatalog(context, evidenceChapters, kind === "theory" ? theoryEvidenceTopic(node) : node.name);
     ensureTargetedBudget(state, missing, unit.attempts - 1);
     const result = await generateTargeted({ snapshot, code: node.code, previous, sources, state }, {
       signal: cancellation,
