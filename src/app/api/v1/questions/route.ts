@@ -9,7 +9,7 @@ import { query, withTransaction } from "@/shared/database/mysql";
 import { bulkStorageSchema } from "@/modules/authoring/question-storage-policy";
 import { storeQuestions } from "@/modules/authoring/question-storage";
 import { commonEditorialLevelFilter } from "@/modules/authoring/common-question-policy";
-import { buildOutlineWorkbook, type ExportPoint } from "@/modules/blueprints/outline-export";
+import { buildOutlineWorkbookPackage, replaceTheoryOutlineExportMappings, type ExportPoint } from "@/modules/blueprints/outline-export";
 import { createSkillOutlineWord, createSkillStructureWord } from "@/modules/documents/skill-blueprint-word";
 import { buildTheoryQuestionBankWorkbook } from "@/modules/questions/theory-question-bank-export";
 import { limitTheoryQuestionBankRows } from "@/modules/questions/theory-question-bank-selection";
@@ -259,16 +259,22 @@ export async function GET(request: Request) {
       }
 
       if (file === "theory-outline") {
-        const rows = await query<(RowDataPacket & ExportPoint)[]>(
-          `SELECT bn.node_code AS code,bn.name,bn.importance,bn.requirement_json AS requirement
-             FROM blueprints b INNER JOIN blueprint_nodes bn ON bn.blueprint_version_id=b.current_version_id
-            WHERE b.occupation_id=? AND b.level_code=? AND b.assessment_mode='theory'
-              AND b.blueprint_kind='theory_outline' AND bn.node_kind='assessment_point'
-            ORDER BY bn.ordinal,bn.id`,
-          [occupationId, levelCode],
-        );
-        if (!rows.length) throw new Error("当前范围尚未维护理论知识考评要素细目表，无法生成成果文件。");
-        const bytes = await buildOutlineWorkbook(rows, { normalizeTheoryHierarchy: true }).xlsx.writeBuffer();
+        const bytes = await withTransaction(async (db) => {
+          const [rows] = await db.execute<(RowDataPacket & ExportPoint & { blueprint_version_id: string })[]>(
+            `SELECT bn.id,bn.node_code AS code,bn.name,bn.importance,bn.requirement_json AS requirement,
+                    b.current_version_id AS blueprint_version_id
+               FROM blueprints b INNER JOIN blueprint_nodes bn ON bn.blueprint_version_id=b.current_version_id
+              WHERE b.occupation_id=? AND b.level_code=? AND b.assessment_mode='theory'
+                AND b.blueprint_kind='theory_outline' AND bn.node_kind='assessment_point'
+              ORDER BY bn.ordinal,bn.id`,
+            [occupationId, levelCode],
+          );
+          if (!rows.length) throw new Error("当前范围尚未维护理论知识考评要素细目表，无法生成成果文件。");
+          const versionId = rows[0].blueprint_version_id;
+          const exported = buildOutlineWorkbookPackage(rows, { normalizeTheoryHierarchy: true });
+          await replaceTheoryOutlineExportMappings(db, versionId, exported.mappings);
+          return exported.workbook.xlsx.writeBuffer();
+        });
         const filename = `${scope.occupation_name}-${levelLabel}-理论知识考评要素细目表.xlsx`;
         return new NextResponse(bytes, { headers: {
           "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -302,7 +308,8 @@ export async function GET(request: Request) {
                     WHERE rr.question_version_id = q.current_version_id
                     ORDER BY rr.submitted_at DESC, rr.id DESC LIMIT 1) AS alignment,
                   qv.stem, qv.content_json, qv.answer_json, qv.score_rubric_json, qv.analysis_text,
-                  GROUP_CONCAT(DISTINCT bn.node_code ORDER BY bn.node_code SEPARATOR '、') AS point_code,
+                  GROUP_CONCAT(DISTINCT COALESCE(toem.export_point_code,bn.node_code)
+                    ORDER BY COALESCE(toem.export_point_code,bn.node_code) SEPARATOR '、') AS point_code,
                   COALESCE(
                     (SELECT MAX(qse.created_at) FROM question_status_events qse
                       WHERE qse.question_id = q.id AND qse.to_status = 'stored'),
@@ -313,6 +320,7 @@ export async function GET(request: Request) {
              INNER JOIN question_versions qv ON qv.id = q.current_version_id
              LEFT JOIN question_assessment_points qap ON qap.question_version_id = qv.id
              LEFT JOIN blueprint_nodes bn ON bn.id = qap.blueprint_node_id
+             LEFT JOIN theory_outline_export_mappings toem ON toem.blueprint_node_id = qap.blueprint_node_id
             WHERE q.occupation_id = ? AND q.assessment_mode = ?
               AND q.archived_at IS NULL
               AND ${commonEditorialLevelFilter()}

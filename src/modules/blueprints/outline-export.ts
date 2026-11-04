@@ -6,10 +6,16 @@ import { assertOutlineConfirmed } from "./point-review";
 import { codeFor } from "./theory-outline-generation/node-code";
 
 export type ExportPoint = {
-  code: string; name: string; importance: string | null; requirement: unknown;
+  id?: string | null; code: string; name: string; importance: string | null; requirement: unknown;
 };
 type CellValue = string | number;
 type OutlineWorkbookOptions = { normalizeTheoryHierarchy?: boolean };
+export type OutlinePointCodeMapping = {
+  blueprintNodeId: string;
+  sourcePointCode: string;
+  exportPointCode: string;
+  pointName: string;
+};
 type DisplayHierarchy = {
   primaryNo: string;
   primaryName: string;
@@ -25,6 +31,10 @@ type TheoryDisplayCodes = {
   primary: Map<string, string>;
   secondary: Map<string, Map<string, string>>;
   tertiary: Map<string, Map<string, string>>;
+};
+type OutlineWorkbookModel = {
+  workbook: ExcelJS.Workbook;
+  mappings: OutlinePointCodeMapping[];
 };
 function object(value: unknown): Record<string, unknown> {
   const parsed = typeof value === "string" ? JSON.parse(value) : value;
@@ -93,6 +103,38 @@ function theoryHierarchy(point: ExportPoint, index: number, codes: {
 }
 
 export function buildOutlineWorkbook(points: ExportPoint[], options: OutlineWorkbookOptions = {}) {
+  return buildOutlineWorkbookModel(points, options).workbook;
+}
+
+export function buildOutlineWorkbookPackage(points: ExportPoint[], options: OutlineWorkbookOptions = {}) {
+  const model = buildOutlineWorkbookModel(points, options);
+  return { workbook: model.workbook, mappings: model.mappings };
+}
+
+export async function replaceTheoryOutlineExportMappings(
+  db: PoolConnection,
+  blueprintVersionId: string,
+  mappings: OutlinePointCodeMapping[],
+) {
+  await db.execute("DELETE FROM theory_outline_export_mappings WHERE blueprint_version_id=?", [blueprintVersionId]);
+  if (!mappings.length) return;
+  const placeholders = mappings.map(() => "(?,?,?,?,?)").join(",");
+  const parameters = mappings.flatMap((mapping) => [
+    blueprintVersionId,
+    mapping.blueprintNodeId,
+    mapping.sourcePointCode,
+    mapping.exportPointCode,
+    mapping.pointName,
+  ]);
+  await db.execute(
+    `INSERT INTO theory_outline_export_mappings
+      (blueprint_version_id,blueprint_node_id,source_point_code,export_point_code,point_name)
+     VALUES ${placeholders}`,
+    parameters,
+  );
+}
+
+function buildOutlineWorkbookModel(points: ExportPoint[], options: OutlineWorkbookOptions = {}): OutlineWorkbookModel {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("评价要素细目表", {
     views: [{ state: "frozen", ySplit: 1, showGridLines: false }],
@@ -111,6 +153,7 @@ export function buildOutlineWorkbook(points: ExportPoint[], options: OutlineWork
     tertiary: new Map<string, Map<string, string>>(),
   } satisfies TheoryDisplayCodes;
   const pointOrdinals = new Map<string, number>();
+  const mappings: OutlinePointCodeMapping[] = [];
   const values = points.map((point, index): CellValue[] => {
     const r = object(point.requirement);
     // Use the version's stored hierarchy, not a newer weight table.
@@ -138,6 +181,15 @@ export function buildOutlineWorkbook(points: ExportPoint[], options: OutlineWork
         return String(next).padStart(3, "0");
       })()
       : (point.code.match(/(?:^|-)(\d+)$/)?.[1] ?? point.code);
+    const exportPointCode = [hierarchy.primaryNo, hierarchy.secondaryNo, hierarchy.tertiaryNo, pointOrdinal].join("-");
+    if (point.id) {
+      mappings.push({
+        blueprintNodeId: point.id,
+        sourcePointCode: point.code,
+        exportPointCode,
+        pointName: point.name,
+      });
+    }
     return [
       hierarchy.primaryNo, hierarchy.primaryName,
       hierarchy.primaryWeight,
@@ -184,7 +236,7 @@ export function buildOutlineWorkbook(points: ExportPoint[], options: OutlineWork
     }
   }
   sheet.pageSetup.printArea = `A1:L${points.length + 1}`;
-  return workbook;
+  return { workbook, mappings };
 }
 
 export async function exportConfirmedOutline(
@@ -207,14 +259,18 @@ export async function exportConfirmedOutline(
     if (!versions.length) throw new Error("细目表版本不存在或已归档。");
     await assertOutlineConfirmed(db, versionId);
     const [points] = await db.execute<(RowDataPacket & ExportPoint)[]>(
-      `SELECT node_code AS code,name,importance,requirement_json AS requirement
+      `SELECT id,node_code AS code,name,importance,requirement_json AS requirement
        FROM blueprint_nodes WHERE blueprint_version_id=? AND node_kind='assessment_point'
        ORDER BY ordinal,id`, [versionId],
     );
     const version = versions[0];
-    const bytes = Buffer.from(await buildOutlineWorkbook(points, {
+    const exported = buildOutlineWorkbookPackage(points, {
       normalizeTheoryHierarchy: version.assessmentMode === "theory",
-    }).xlsx.writeBuffer());
+    });
+    if (version.assessmentMode === "theory") {
+      await replaceTheoryOutlineExportMappings(db, versionId, exported.mappings);
+    }
+    const bytes = Buffer.from(await exported.workbook.xlsx.writeBuffer());
     const level = ({ level_5: "五级", level_4: "四级", level_3: "三级", level_2: "二级", level_1: "一级" } as Record<string, string>)[version.levelCode] ?? version.levelCode;
     const mode = version.assessmentMode === "skill" ? "操作技能" : "理论知识";
     const filename = `评价要素细目表-${version.occupationName}${level}-${mode}-V${version.versionNo}.xlsx`.replace(/[/\\\r\n]/g, "_");

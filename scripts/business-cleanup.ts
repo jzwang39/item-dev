@@ -46,6 +46,7 @@ export const cleanupTargets: CleanupTarget[] = [
   { table: "model_runs", where: "task_id IS NOT NULL OR batch_id IS NOT NULL OR capability IN ('plan','author','review')" },
   { table: "outline_point_reviews", where: `node_id IN (SELECT id FROM blueprint_nodes WHERE ${nodes})` },
   { table: "theory_outline_point_quotas", where: `blueprint_node_id IN (SELECT id FROM blueprint_nodes WHERE ${nodes})` },
+  { table: "theory_outline_export_mappings", where: `blueprint_node_id IN (SELECT id FROM blueprint_nodes WHERE ${nodes})` },
   { table: "blueprint_node_source_refs", where: `blueprint_node_id IN (SELECT id FROM blueprint_nodes WHERE ${nodes})` },
   { table: "blueprint_nodes", where: nodes },
   { table: "blueprint_version_sources", where: `blueprint_version_id IN (SELECT id FROM blueprint_versions WHERE ${versions})` },

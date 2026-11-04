@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import ExcelJS from "exceljs";
 import type { PoolConnection } from "mysql2/promise";
-import { buildOutlineWorkbook, exportConfirmedOutline, type ExportPoint } from "./outline-export";
+import { buildOutlineWorkbook, buildOutlineWorkbookPackage, exportConfirmedOutline, type ExportPoint } from "./outline-export";
 
 const point: ExportPoint = {
+  id: "N".repeat(26),
   code: "A-A-A-A-A-A-001", name: "职业道德的含义", importance: "medium",
   requirement: {
     primaryNo: "A", primaryName: "基本要求", primaryWeight: 25,
@@ -273,6 +274,51 @@ test("理论知识考评点序号按导出后的展示三级范围连续编号",
   assert.equal(sheet.getCell("J4").value, "003");
 });
 
+test("理论知识导出同时生成按版本保存所需的编码映射", () => {
+  const exported = buildOutlineWorkbookPackage([
+    {
+      id: "A".repeat(26),
+      code: "SRC-001",
+      name: "职业道德的特殊性",
+      importance: "critical",
+      requirement: {
+        primaryName: "基本要求",
+        secondaryName: "职业道德",
+        secondaryWeight: 5,
+        tertiaryName: "31. 职业道德基本知识",
+        importanceCode: "X",
+      },
+    },
+    {
+      id: "B".repeat(26),
+      code: "SRC-002",
+      name: "社会主义职业道德的强制性与自觉性",
+      importance: "high",
+      requirement: {
+        primaryName: "基本要求",
+        secondaryName: "职业道德",
+        secondaryWeight: 5,
+        tertiaryName: "31. 职业道德基本知识",
+        importanceCode: "Y",
+      },
+    },
+  ], { normalizeTheoryHierarchy: true });
+  assert.deepEqual(exported.mappings, [
+    {
+      blueprintNodeId: "A".repeat(26),
+      sourcePointCode: "SRC-001",
+      exportPointCode: "A-A-A-001",
+      pointName: "职业道德的特殊性",
+    },
+    {
+      blueprintNodeId: "B".repeat(26),
+      sourcePointCode: "SRC-002",
+      exportPointCode: "A-A-A-002",
+      pointName: "社会主义职业道德的强制性与自觉性",
+    },
+  ]);
+});
+
 test("技能使用冻结层级、权重与重要度，不编造三级权重或页码", () => {
   const sheet = buildOutlineWorkbook([{
     code: "D1-A-B-007", name: "完成操作", importance: "critical",
@@ -313,7 +359,7 @@ function database(total = 2, confirmed = 2, exists = true) {
       projectId: "project", occupationName: "劝募员", levelCode: "level_5", assessmentMode: "theory", versionNo: 2,
     }] : [], []];
     if (sql.includes("COUNT(*)")) return [[{ total, confirmed }], []];
-    if (sql.includes("FROM blueprint_nodes")) return [[point, { ...point, code: "002" }], []];
+    if (sql.includes("FROM blueprint_nodes")) return [[point, { ...point, id: "M".repeat(26), code: "002" }], []];
     return [[], []];
   } } as unknown as PoolConnection;
   const transaction = async <T>(run: (connection: PoolConnection) => Promise<T>) => run(db);
@@ -337,6 +383,8 @@ test("历史已确认版本可重复导出，始终读指定版本，每次留�
     assert.ok(result.bytes.length > 0);
   }
   assert.equal(calls.filter((call) => call.sql.includes("INSERT INTO audit_logs")).length, 2);
+  assert.equal(calls.filter((call) => call.sql.includes("DELETE FROM theory_outline_export_mappings")).length, 2);
+  assert.equal(calls.filter((call) => call.sql.includes("INSERT INTO theory_outline_export_mappings")).length, 2);
   assert.equal(calls.filter((call) => call.sql.includes("FROM blueprint_nodes")).every((call) => call.values[0] === "historical-version"), true);
   assert.equal(calls.some((call) => /UPDATE|current_version_id/.test(call.sql.replace("FOR UPDATE", ""))), false);
 });
