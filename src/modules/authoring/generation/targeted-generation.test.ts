@@ -199,7 +199,7 @@ test("无教材理论点连续失败2次后追加旧题角度摘要和失败原�
       { key: "A", content: "核对反馈记录" }, { key: "B", content: "忽略反馈记录" }, { key: "C", content: "删除传播对象" }, { key: "D", content: "取消修正安排" },
     ], answers: ["A"] }] });
   }));
-  assert.equal(result.questions.length, 1);
+  if (result.questions.length !== 1) throw new Error(JSON.stringify(result));
 });
 
 test("有教材理论点即使连续失败也不追加这两类摘要", async () => {
@@ -725,34 +725,32 @@ test("确实无原文时不试制，保持人工处理边界", async () => {
   assert.equal(input.state.budget!.calls, 0);
 });
 
-test("批量索引错误改为逐候选核验，单题仍用索引0且不重新生成", async () => {
+test("理论题默认仅核验1个候选，避免批量核验返回过长", async () => {
   const input = fixture();
   const candidates = [question, { ...question, stem: "归还资料需要核对完整性。" }, { ...question, stem: "借阅时必须登记资料信息。" }];
   let generations = 0;
-  let singles = 0;
+  let verifications = 0;
   const deps = dependencies(async (prompt) => {
     if (prompt.instruction.includes("补题分析助手")) return plan();
     if (prompt.instruction.includes("独立核验助手")) {
       const data = JSON.parse(prompt.prompt);
-      if (data.候选.length > 1) return review({ ...prompt, prompt: JSON.stringify({ ...data, 候选: data.候选.slice(0, 1) }) });
-      singles++;
+      verifications++;
+      assert.equal(data.候选.length, 1);
       assert.equal(data.候选[0].index, 0);
-      return review(prompt, singles === 2);
+      return review(prompt);
     }
     generations++;
     return JSON.stringify({ questions: candidates });
   });
   const first = await generateTargeted(input, deps);
-  assert.equal(first.failures[0].code, "review_invalid");
-  const slot = input.state.budget!.slots["slot-0"];
-  assert.equal(slot.reviewMode, "single");
-  assert.ok(slot.pendingResponse);
-  const second = await generateTargeted(input, deps);
-  assert.equal(second.questions.length, 1);
-  assert.equal(second.questions[0].stem, candidates[1].stem);
+  assert.equal(first.questions.length, 1);
+  assert.equal(first.questions[0].stem, candidates[0].stem);
   assert.equal(generations, 1);
-  assert.equal(singles, 3);
-  assert.equal(slot.reviewResponses?.length, 4);
+  assert.equal(verifications, 1);
+  const slot = input.state.budget!.slots["slot-0"];
+  assert.equal(slot.reviewMode, undefined);
+  assert.equal(slot.reviewResponses?.length, 1);
+  assert.equal(slot.reviewResponses?.[0].mode, "batch");
 });
 
 test("逐题核验仍格式异常时累计两次关闭并保留候选，绝不默认通过", async () => {
@@ -819,47 +817,60 @@ test("技能试制仍只使用专项标准和操作任务，不套用理论条�
   assert.equal(input.state.qualityRelaxations, undefined);
 });
 
-test("逐题核验上下文改变后不复用旧标准下的结论", async () => {
+test("逐题核验上下文改变后不复用旧标准下的缓存结论", async () => {
+  const input = fixture();
+  const slot = input.state.budget!.slots["slot-0"];
+  slot.reviewMode = "single";
+  slot.angle = { angle: "借阅登记", sourceId: source.id, quote: source.content, task: "辨析借阅资料是否需要登记" };
+  slot.pendingResponse = JSON.stringify({ questions: [question] });
+  slot.evidenceSources = [source];
+  slot.evidenceSourceIds = [source.id];
+  slot.singleReviews = [{ index: 0, response: review({
+    instruction: "独立核验助手",
+    prompt: JSON.stringify({ 候选: [{ index: 0, ...question }], 可核验原文: [source] }),
+  } as never) }];
+  input.state.budget!.reviewContext = {
+    kind: "theory",
+    qualityStandard: snapshot.qualityStandard,
+    qualityRequirements: snapshot.qualityRequirements,
+    previous: [],
+  };
+  input.snapshot = { ...snapshot, qualityStandard: `${snapshot.qualityStandard} 核对条件完整。` };
+  let verifications = 0;
+  const result = await generateTargeted(input, dependencies(async (prompt) => {
+    if (!prompt.instruction.includes("独立核验助手")) throw new Error("不应重新生成候选");
+    verifications++;
+    const data = JSON.parse(prompt.prompt);
+    assert.equal(data.试题质量标准, `${snapshot.qualityStandard} 核对条件完整。`);
+    assert.equal(data.候选.length, 1);
+    return review(prompt);
+  }));
+  if (result.questions.length !== 1) throw new Error(JSON.stringify(result));
+  assert.equal(result.questions[0].stem, question.stem);
+  assert.equal(verifications, 1);
+});
+
+test("理论核验格式失败后只重核验首个候选，不重新生成也不扩到后续候选", async () => {
   const input = fixture();
   const candidates = [question, { ...question, stem: "归还资料需要核对完整性。" }];
-  let calls = 0;
+  let verifications = 0;
   const deps = dependencies(async (prompt) => {
     if (prompt.instruction.includes("补题分析助手")) return plan();
     if (!prompt.instruction.includes("独立核验助手")) return JSON.stringify({ questions: candidates });
     const data = JSON.parse(prompt.prompt);
-    if (data.候选.length > 1) return "broken";
-    calls++;
-    if (data.试题质量标准 === snapshot.qualityStandard) return calls === 1 ? review(prompt, false) : "broken";
-    return review(prompt, data.候选[0].stem === question.stem);
+    assert.equal(data.候选.length, 1);
+    verifications++;
+    if (verifications === 1) return "broken";
+    assert.equal(data.候选[0].stem, question.stem);
+    return review(prompt);
   });
-  await generateTargeted(input, deps);
-  assert.equal((await generateTargeted(input, deps)).questions.length, 0);
-  assert.equal(input.state.budget!.slots["slot-0"].singleReviews?.length, 1);
-  input.snapshot = { ...snapshot, qualityStandard: `${snapshot.qualityStandard} 核对条件完整。` };
-  const result = await generateTargeted(input, deps);
-  assert.equal(result.questions.length, 1);
-  assert.equal(result.questions[0].stem, question.stem);
-  assert.equal(calls, 4);
+  const first = await generateTargeted(input, deps);
+  assert.equal(first.failures[0].code, "review_invalid");
+  const second = await generateTargeted(input, deps);
+  assert.equal(second.questions.length, 1);
+  assert.equal(second.questions[0].stem, question.stem);
   assert.equal(input.state.budget!.slots["slot-0"].generations, 1);
-});
-
-test("后续候选网络失败不丢弃已经完整核验通过的候选", async () => {
-  const input = fixture();
-  const candidates = [question, { ...question, stem: "归还资料需要核对完整性。" }];
-  let singles = 0;
-  const deps = dependencies(async (prompt) => {
-    if (prompt.instruction.includes("补题分析助手")) return plan();
-    if (!prompt.instruction.includes("独立核验助手")) return JSON.stringify({ questions: candidates });
-    if (JSON.parse(prompt.prompt).候选.length > 1) return "broken";
-    if (++singles === 1) return review(prompt);
-    throw new GenerationFailure("network_error", "503");
-  });
-  await generateTargeted(input, deps);
-  const result = await generateTargeted(input, deps);
-  assert.equal(result.questions.length, 1);
-  assert.equal(result.questions[0].stem, question.stem);
-  assert.ok(result.questions[0].standardReview);
-  assert.equal(input.state.budget!.slots["slot-0"].generations, 1);
+  assert.equal(verifications, 2);
 });
 
 for (const reason of ["stop", "lease"] as const) {

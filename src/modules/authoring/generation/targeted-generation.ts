@@ -342,7 +342,8 @@ export async function generateTargeted(input: {
       }
     }));
     const blockedHashes = new Set([...previousHashes, ...rejectedHashes]);
-    const candidates = parsed.valid.filter((question) => !blockedHashes.has(stemHash(question.stem))).slice(0, 3);
+    const reviewCandidateLimit = kind === "theory" ? 1 : 3;
+    const candidates = parsed.valid.filter((question) => !blockedHashes.has(stemHash(question.stem))).slice(0, reviewCandidateLimit);
     if (!candidates.length) {
       failures.push({ code: parsed.valid.length ? "duplicate" : "invalid_content",
         message: parsed.valid.length ? "候选题干与已有题重复，需重新设计任务，不仅换词改写。" : `候选修复后仍不合格：${parsed.invalidReasons.join("；") || "模型未提供可核验候选"}` });

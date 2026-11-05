@@ -687,8 +687,8 @@ async function callGenerationModel(snapshot: Snapshot, apiKey: string, input: { 
     headers: target.anthropic ? { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Type": "application/json" }
       : { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify(target.anthropic
-      ? { model: snapshot.model.model, max_tokens: 8192, system: input.instruction, messages: [{ role: "user", content: input.prompt }] }
-      : { model: snapshot.model.model, temperature: 0.5, max_tokens: 8192, response_format: { type: "json_object" },
+      ? { model: snapshot.model.model, max_tokens: 65536, system: input.instruction, messages: [{ role: "user", content: input.prompt }] }
+      : { model: snapshot.model.model, temperature: 0.5, max_tokens: 65536, response_format: { type: "json_object" },
         messages: [{ role: "system", content: input.instruction }, { role: "user", content: input.prompt }] }),
       signal: AbortSignal.any([cancellation, AbortSignal.timeout(600000)]),
   });
