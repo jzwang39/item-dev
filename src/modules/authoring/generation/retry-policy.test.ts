@@ -68,6 +68,8 @@ const plan = {
 };
 test("知识角度分析必须覆盖已有题并引用可核验原文，不能只用层级名称凑依据", () => {
   assert.equal(parseAnglePlan(JSON.stringify(plan), 1, sources, []).selected.angle, "归档核对要素");
+  assert.equal(parseAnglePlan(`\`\`\`json\n${JSON.stringify(plan)}\n\`\`\``, 1, sources, []).selected.angle, "归档核对要素");
+  assert.equal(parseAnglePlan(`下面是分析结果：\n${JSON.stringify(plan)}\n请按此处理。`, 1, sources, []).selected.angle, "归档核对要素");
   assert.throws(() => parseAnglePlan(JSON.stringify({ ...plan, covered: [] }), 1, sources, []), /未完整覆盖/);
   assert.throws(() => parseAnglePlan(JSON.stringify({ ...plan, remaining: [{ ...plan.remaining[0], quote: "虚构法规要求保存三十年" }] }), 1, sources, []), /引用无法/);
   assert.throws(() => parseAnglePlan(JSON.stringify({ ...plan, remaining: [] }), 1, sources, []), /未找到/);

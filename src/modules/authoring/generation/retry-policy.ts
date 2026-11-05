@@ -187,10 +187,21 @@ const planSchema = z.object({
   remaining: z.array(angleSchema).max(12),
   reason: z.string().trim().max(1000).optional(),
 });
+
+function parsePlanJson(content: string) {
+  const text = content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  try { return JSON.parse(text); }
+  catch {
+    const start = text.indexOf("{"), end = text.lastIndexOf("}");
+    if (start < 0 || end <= start) throw new Error("响应不是完整JSON对象，可能已截断；必须重新返回完整对象。");
+    return JSON.parse(text.slice(start, end + 1));
+  }
+}
+
 export function parseAnglePlan(content: string, previousCount: number, sources: AngleSource[], attempted: KnowledgeAngle[],
   variantType?: Exclude<QuestionType, "practical">) {
   let parsed: z.infer<typeof planSchema>;
-  try { parsed = planSchema.parse(JSON.parse(content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""))); }
+  try { parsed = planSchema.parse(parsePlanJson(content)); }
   catch { throw new GenerationFailure("angle_plan_invalid", "知识角度分析返回格式无效，需重新分析。"); }
   const stable = sources.some((source) => source.systemQuote);
   const indexes = new Set(parsed.covered.map((entry) => entry.index));
