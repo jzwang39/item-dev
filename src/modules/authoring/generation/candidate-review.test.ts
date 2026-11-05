@@ -62,3 +62,47 @@ test("候选核验也严格隔离数据库标准，不覆盖独立性和多样�
     assert.match(prompt.instruction, /不得覆盖知识独立性、多样性要求/);
   }
 });
+
+test("单选全角括号和题干直给正确项核心词时，本地规则也会拦截", () => {
+  const single: GeneratedQuestion = {
+    assessmentPointCode: "A",
+    questionType: "single",
+    stem: "开展互联网公开募捐时，使用的合规线上渠道属于（　　）。",
+    options: [
+      { key: "A", content: "信息服务" },
+      { key: "B", content: "公开募捐平台" },
+      { key: "C", content: "志愿服务" },
+      { key: "D", content: "内部管理" },
+    ],
+    answers: ["B"],
+    analysis: "标准原文列出能运用互联网公开募捐平台募捐。",
+  };
+  const result = parseCandidateReview(JSON.stringify({ checks: [{
+    index: 0,
+    meetsQualityStandard: true,
+    answerCorrect: true,
+    evidenceSupported: true,
+    distinctTask: true,
+    score: 95,
+    explanation: "依据方向正确。",
+    evidenceSourceIds: ["source"],
+    requirements: [{ requirement: "完整质量标准核验", passed: true, explanation: "模型判通过" }],
+  }] }), [single], sources);
+  assert.equal(result.questions.length, 0);
+  assert.match(result.failures[0].message, /半角\(　　\)/);
+  assert.match(result.failures[0].message, /核心词/);
+});
+
+test("理论生成提示词明确禁止概念词面回填并要求单选半角括号", () => {
+  const snapshot: Snapshot = {
+    projectId: "p", requirement: "补题", points: [], qualityRequirements: ["唯一解"], qualityStandard: "理论数据库完整标准",
+    sourceVersionIds: [], skillQualityStandard: undefined,
+    nodes: [{ id: "n", code: "A", name: "公开募捐", chapterIds: ["c"], theoryContext: { evidence: "标准原文" } }],
+    scope: { occupationId: "o", occupation: "职业", levelCode: "level_4", assessmentMode: "理论知识", blueprintVersions: { outline: { id: "v", versionNo: 1 }, weights: { id: "w", versionNo: 1 } } },
+    model: { provider: "test", baseUrl: "https://example.com", model: "test" },
+  };
+  const { theoryQuestionPrompt } = require("./theory-prompt") as typeof import("./theory-prompt");
+  const prompt = theoryQuestionPrompt(snapshot, "A", ["single"], [], [{ id: "textbook:1", content: "标准原文" }], 1, true);
+  assert.match(prompt.instruction, /半角\(　　\)/);
+  assert.match(prompt.instruction, /不得再把该概念名称本身设为空/);
+});

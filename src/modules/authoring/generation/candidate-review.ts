@@ -16,6 +16,39 @@ const reviewSchema = z.object({
   })).min(1).max(3),
 });
 
+function normalizeStemText(value: string) {
+  return value.normalize("NFKC").replace(/\s+/g, "");
+}
+
+function longestSharedSegment(a: string, b: string) {
+  let longest = "";
+  for (let start = 0; start < a.length; start++) {
+    for (let end = start + 4; end <= a.length; end++) {
+      const fragment = a.slice(start, end);
+      if (fragment.length <= longest.length) continue;
+      if (b.includes(fragment)) longest = fragment;
+    }
+  }
+  return longest;
+}
+
+function candidateFormatFailures(candidate: GeneratedQuestion) {
+  const failures: string[] = [];
+  if (candidate.questionType !== "single") return failures;
+  if (candidate.stem.includes("（　　）")) failures.push("单选题题干括号必须使用半角(　　)，不能使用全角（　　）。");
+  if (!candidate.stem.includes("(　　)") && !candidate.stem.includes("（　　）")) return failures;
+  const answer = candidate.answers[0];
+  const correct = candidate.options.find((option) => option.key === answer)?.content;
+  if (!correct) return failures;
+  const stem = normalizeStemText(candidate.stem);
+  const normalizedCorrect = normalizeStemText(correct);
+  const overlap = longestSharedSegment(normalizedCorrect, stem);
+  if (overlap.length >= 4 && overlap.length / normalizedCorrect.length >= 0.35) {
+    failures.push(`题干已直接出现正确项核心词“${overlap}”，形成词面提示，未落在需要实质理解的区分上。`);
+  }
+  return failures;
+}
+
 function normalizeReviewPayload(content: string) {
   const payload = parseModelJson(content) as { checks?: unknown };
   const checks = Array.isArray(payload?.checks) ? payload.checks : [];
@@ -85,13 +118,21 @@ export function parseCandidateReview(content: string, candidates: GeneratedQuest
   if (!passed.length && parsed.checks.some((check) => check.evidenceSourceIds.some((id) => !ids.has(id)))) {
     throw new GenerationFailure("review_invalid", "核验引用了未知原文编号，保留候选重新核验，不猜答案或放宽引用要求。");
   }
+  const blockedByLocalRules = new Map<number, string[]>();
+  for (const check of parsed.checks) {
+    const failures = candidateFormatFailures(candidates[check.index]);
+    if (failures.length) blockedByLocalRules.set(check.index, failures);
+  }
   return {
-    questions: passed.sort((a, b) => b.score - a.score).map((check) => ({
+    questions: passed.filter((check) => !blockedByLocalRules.has(check.index)).sort((a, b) => b.score - a.score).map((check) => ({
       ...candidates[check.index],
       standardReview: { score: check.score, requirements: check.requirements, evidenceSourceIds: check.evidenceSourceIds },
     })),
-    failures: parsed.checks.filter((check) => !passed.includes(check)).map((check) => ({
-      code: "quality_rejected" as const, message: `候选${check.index + 1}未通过完整质量核验：${check.explanation}`,
+    failures: parsed.checks.filter((check) => !passed.includes(check) || blockedByLocalRules.has(check.index)).map((check) => ({
+      code: "quality_rejected" as const,
+      message: blockedByLocalRules.has(check.index)
+        ? `候选${check.index + 1}未通过完整质量核验：${check.explanation}；${blockedByLocalRules.get(check.index)!.join("；")}`
+        : `候选${check.index + 1}未通过完整质量核验：${check.explanation}`,
     })),
   };
 }
