@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { generateTargeted, type TargetedDependencies } from "./targeted-generation";
 import { completeRetry, GenerationFailure, retryState } from "./retry-policy";
@@ -226,6 +227,102 @@ test("有教材理论点即使连续失败也不追加这两类摘要", async ()
     ], answers: ["A"] }] });
   }));
   assert.equal(result.questions.length, 1);
+});
+
+test("无教材补题会复用已核验扩展资料，而不是只看冻结原文", async () => {
+  const input = noTextbookFixture("single");
+  input.sources = [{ id: "standard-title", content: "募捐工作沟通要点；募捐沟通常识。", systemQuote: true, sourceKind: "standard" as const }];
+  input.state.budget!.theoryExpansion = {
+    version: 1, discoveryAttempts: 1, reviewAttempts: 1, documents: [], discoveryResponses: [], reviewResponses: [], errors: [],
+    sources: [{
+      id: "expansion:ready",
+      content: "募捐沟通目标可分为建立信任、形成理解、促成行动三个层次。",
+      title: "扩展资料：https://example.gov.cn/article",
+      systemQuote: true,
+      sourceKind: "expansion",
+      expansion: { label: "扩展", url: "https://example.gov.cn/article", retrievedAt: "2026-11-05T00:00:00.000Z", documentHash: "hash", review: "已核验" },
+    }],
+  };
+  const output = await generateTargeted(input, dependencies(async (prompt) => {
+    if (prompt.instruction.includes("补题分析助手")) {
+      return JSON.stringify({ remaining: [{ angle: "募捐沟通目标层次辨析", sourceId: "expansion:ready", task: "辨析沟通目标三层次的先后关系" }] });
+    }
+    if (prompt.instruction.includes("独立核验助手")) {
+      const data = JSON.parse(prompt.prompt);
+      assert.equal(data.可核验原文.some((item: { id: string }) => item.id === "expansion:ready"), true);
+      return JSON.stringify({ checks: data.候选.map((candidate: { index: number }) => ({
+        index: candidate.index, meetsQualityStandard: true, answerCorrect: true, evidenceSupported: true, distinctTask: true,
+        score: 92, explanation: "扩展依据给出了三层次定义，答案和任务均可核验。",
+        evidenceSourceIds: ["expansion:ready"], requirements: [{ requirement: "答案正确", passed: true, explanation: "核对扩展原文" }],
+      })) });
+    }
+    return JSON.stringify({ questions: [{ ...question, questionType: "single", stem: "下列哪一项属于募捐沟通目标的第三层次？", options: [
+      { key: "A", content: "建立信任" }, { key: "B", content: "形成理解" }, { key: "C", content: "促成行动" }, { key: "D", content: "忽略反馈" },
+    ], answers: ["C"] }] });
+  }));
+  if (output.questions.length !== 1) throw new Error(JSON.stringify(output));
+});
+
+test("无教材冻结原文翻完仍无任务时先转扩展依据，不直接空转试制", async () => {
+  const input = noTextbookFixture("single");
+  input.sources = Array.from({ length: 6 }, (_, index) => ({
+    id: `standard-${index}`,
+    content: "募捐工作沟通要点。募捐沟通常识。",
+    systemQuote: true,
+    sourceKind: "standard" as const,
+  }));
+  const documentText = "募捐沟通目标可分为建立信任、形成理解、促成行动三个层次，层次之间应逐步推进；在形成理解后，再根据受众反馈引导其进入实际参与与行动阶段，整个过程强调信息解释、关系维护与行动转化的连续性。";
+  const quote = documentText;
+  const documentHash = createHash("sha256").update(documentText).digest("hex");
+  const sourceId = `expansion:${documentHash.slice(0, 16)}:${createHash("sha256").update(quote).digest("hex").slice(0, 16)}`;
+  let discoveryCalls = 0;
+  let expansionReviewCalls = 0;
+  let analysisCalls = 0;
+  const output = await generateTargeted(input, {
+    signal: new AbortController().signal,
+    persist: async () => {},
+    fetchDocument: async () => ({
+      url: "https://example.gov.cn/article",
+      text: documentText,
+      retrievedAt: "2026-11-05T00:00:00.000Z",
+      suggestedTitle: "官方资料",
+    }),
+    call: async (prompt) => {
+      if (prompt.instruction.includes("无教材理论命题资料检索助手")) {
+        discoveryCalls++;
+        return JSON.stringify({ sources: [{ url: "https://example.gov.cn/article", title: "官方资料" }] });
+      }
+      if (prompt.instruction.includes("无教材理论扩展依据独立核验助手")) {
+        expansionReviewCalls++;
+        return JSON.stringify({ checks: [{
+          sourceId: "D1", quote, trustworthy: true, correctScope: true, supportsKnowledge: true, standardAllowsExpansion: true,
+          isLegalQuestion: false, explanation: "正文给出了沟通目标层次及关系，可作为无教材点的可靠扩展依据。",
+        }] });
+      }
+      if (prompt.instruction.includes("补题分析助手")) {
+        analysisCalls++;
+        return analysisCalls === 1
+          ? JSON.stringify({ remaining: [], reason: "冻结原文只有上位标题，没有可直接命题的任务。" })
+          : JSON.stringify({ remaining: [{ angle: "募捐沟通目标层次辨析", sourceId, task: "辨析沟通目标三层次的先后关系" }] });
+      }
+      if (prompt.instruction.includes("独立核验助手")) {
+        const data = JSON.parse(prompt.prompt);
+        assert.equal(data.可核验原文.some((item: { id: string }) => item.id === sourceId), true);
+        return JSON.stringify({ checks: data.候选.map((candidate: { index: number }) => ({
+          index: candidate.index, meetsQualityStandard: true, answerCorrect: true, evidenceSupported: true, distinctTask: true,
+          score: 95, explanation: "扩展原文给出了三层次和关系，可核验。",
+          evidenceSourceIds: [sourceId], requirements: [{ requirement: "答案正确", passed: true, explanation: "核对扩展原文" }],
+        })) });
+      }
+      return JSON.stringify({ questions: [{ ...question, questionType: "single", stem: "下列哪一项属于募捐沟通目标的第三层次？", options: [
+        { key: "A", content: "建立信任" }, { key: "B", content: "形成理解" }, { key: "C", content: "促成行动" }, { key: "D", content: "忽略反馈" },
+      ], answers: ["C"] }] });
+    },
+  });
+  assert.equal(output.questions.length, 1);
+  assert.equal(discoveryCalls, 1);
+  assert.equal(expansionReviewCalls, 1);
+  assert.equal(analysisCalls, 2);
 });
 
 test("复述恢复仍重复则关闭，不重新授予旧重设计或复述额度", async () => {

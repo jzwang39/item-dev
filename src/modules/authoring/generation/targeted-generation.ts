@@ -80,6 +80,10 @@ function theoryRetrySummaries(
   };
 }
 
+function mergeSources(primary: AngleSource[], secondary: AngleSource[]) {
+  return [...new Map([...primary, ...secondary].map((source) => [source.id, source])).values()];
+}
+
 export async function generateTargeted(input: {
   snapshot: Snapshot; code: string; previous: Array<{ stem: string; content?: unknown; answer?: unknown; analysis?: string | null }>;
   sources: AngleSource[]; state: RetryState;
@@ -127,12 +131,13 @@ export async function generateTargeted(input: {
     }
     if (!node.chapterIds.length) {
       sources = factualTheorySources(sources);
+      if (budget.theoryExpansion?.sources.length) sources = mergeSources(budget.theoryExpansion.sources, sources);
       // Public basic questions must never trigger external retrieval; they are
       // grounded only in their frozen public blueprint and linked chapters.
       if ((!sources.length || budget.theoryExpansion?.basisRevision) && !snapshot.scope.commonGroupId) {
-        sources = await acquireTheoryExpansion({ snapshot, code, state }, {
+        sources = mergeSources(await acquireTheoryExpansion({ snapshot, code, state }, {
           call, persist: dependencies.persist, signal: dependencies.signal, fetchDocument: dependencies.fetchDocument,
-        });
+        }), sources);
         if (!sources.length) {
           failures.push({ code: "search_pending", message: "无教材考评点仅有范围标题，正在获取并核验可靠扩展正文；未取得依据前不生成候选。" });
           return output();
@@ -178,64 +183,76 @@ export async function generateTargeted(input: {
       budget.phase = "analysis";
       recordTargetedPhase(state, "按已核验指标表定位认知效果辨析任务，完整旧题仅供独立核验，不作为生成示例。");
     }
-    if (!slot.angle && !slot.trialDesign) {
-      for (let pageIndex = 0; pageIndex < 2 && !slot.angle; pageIndex++) {
-        const page = nextEvidencePage(sources, slot.analysisSearchedSourceIds);
-        if (!page.length) {
-          slot.trialDesign = true;
-          break;
-        }
-        const analysisPrompt = anglePlanningPrompt(code, snapshot.nodes.find((node) => node.code === code)!.name, slot.type,
-          previous, page, state, { 职业: snapshot.scope.occupation, 等级: snapshot.scope.commonGroupId ? "五级、四级、三级共用基本要求" : snapshot.scope.levelCode }, {
-            kind, content: snapshot.qualityStandard,
-            requirements: snapshot.qualityRequirements,
-          });
-        if (failures.length) analysisPrompt.prompt = JSON.stringify({ ...JSON.parse(analysisPrompt.prompt), 上次分析错误: failures.map((failure) => failure.message) });
-        analysisPrompt.prompt = JSON.stringify({ ...JSON.parse(analysisPrompt.prompt),
-          被查重拒绝的候选及任务: rejectedContext.filter((record) => record.failures.some((failure) => failure.code === "duplicate")),
-          定向设计建议: designHint,
-          重新设计要求: "查重拒绝的任务须重新设计实际考查内容，不反复选择同一任务或只换词；格式和答案错误不是成功覆盖，不一律排除。" });
-        try {
-          const content = await call("analysis", analysisPrompt);
-          // Only successful saved tasks are excluded; failed attempts remain
-          // available for repair or a genuinely different candidate.
-          const plan = parseAnglePlan(content, previous.length, page, [...budget.completedAngles, ...duplicateAngles],
-            kind === "theory" && slot.type !== "practical" ? slot.type : undefined);
-          slot.angle = plan.selected;
-          slot.evidenceSourceIds = page.map((source) => source.id);
-          slot.searchedSourceIds = [...new Set([...slot.searchedSourceIds, ...page.map((source) => source.id)])];
-          slot.analysisSearchedSourceIds = [...new Set([...slot.analysisSearchedSourceIds, ...page.map((source) => source.id)])];
-          state.covered = plan.covered;
-          state.selectedAngle = plan.selected;
-          state.attemptedAngles = [...state.attemptedAngles.slice(-59), plan.selected];
-        } catch (error) {
-          const failure = failureOf(error);
-          if (failure.code === "no_task_in_excerpt" || failure.code === "angle_duplicate") {
-            slot.searchedSourceIds = [...new Set([...slot.searchedSourceIds, ...page.map((source) => source.id)])];
-            slot.analysisSearchedSourceIds = [...new Set([...slot.analysisSearchedSourceIds, ...page.map((source) => source.id)])];
-            slot.searchReasons = [...slot.searchReasons.slice(-19), failure.message];
-          } else if (failure.code === "angle_plan_invalid" || failure.code === "evidence_invalid") {
-            slot.analysisFailures++;
-            failures.push(failure);
-            if (slot.analysisFailures >= 2) {
-              slot.blocked = { ...failure, message: `${failure.message}；分析或引用修复已达2次，请人工核对，不判定为原文不足。` };
+      if (!slot.angle && !slot.trialDesign) {
+        let expansionAttempted = false;
+        while (!slot.angle && !slot.trialDesign) {
+          for (let pageIndex = 0; pageIndex < 2 && !slot.angle; pageIndex++) {
+            const page = nextEvidencePage(sources, slot.analysisSearchedSourceIds);
+            if (!page.length) break;
+            const analysisPrompt = anglePlanningPrompt(code, snapshot.nodes.find((node) => node.code === code)!.name, slot.type,
+              previous, page, state, { 职业: snapshot.scope.occupation, 等级: snapshot.scope.commonGroupId ? "五级、四级、三级共用基本要求" : snapshot.scope.levelCode }, {
+                kind, content: snapshot.qualityStandard,
+                requirements: snapshot.qualityRequirements,
+              });
+            if (failures.length) analysisPrompt.prompt = JSON.stringify({ ...JSON.parse(analysisPrompt.prompt), 上次分析错误: failures.map((failure) => failure.message) });
+            analysisPrompt.prompt = JSON.stringify({ ...JSON.parse(analysisPrompt.prompt),
+              被查重拒绝的候选及任务: rejectedContext.filter((record) => record.failures.some((failure) => failure.code === "duplicate")),
+              定向设计建议: designHint,
+              重新设计要求: "查重拒绝的任务须重新设计实际考查内容，不反复选择同一任务或只换词；格式和答案错误不是成功覆盖，不一律排除。" });
+            try {
+              const content = await call("analysis", analysisPrompt);
+              // Only successful saved tasks are excluded; failed attempts remain
+              // available for repair or a genuinely different candidate.
+              const plan = parseAnglePlan(content, previous.length, page, [...budget.completedAngles, ...duplicateAngles],
+                kind === "theory" && slot.type !== "practical" ? slot.type : undefined);
+              slot.angle = plan.selected;
+              slot.evidenceSourceIds = page.map((source) => source.id);
+              slot.searchedSourceIds = [...new Set([...slot.searchedSourceIds, ...page.map((source) => source.id)])];
+              slot.analysisSearchedSourceIds = [...new Set([...slot.analysisSearchedSourceIds, ...page.map((source) => source.id)])];
+              state.covered = plan.covered;
+              state.selectedAngle = plan.selected;
+              state.attemptedAngles = [...state.attemptedAngles.slice(-59), plan.selected];
+            } catch (error) {
+              const failure = failureOf(error);
+              if (failure.code === "no_task_in_excerpt" || failure.code === "angle_duplicate") {
+                slot.searchedSourceIds = [...new Set([...slot.searchedSourceIds, ...page.map((source) => source.id)])];
+                slot.analysisSearchedSourceIds = [...new Set([...slot.analysisSearchedSourceIds, ...page.map((source) => source.id)])];
+                slot.searchReasons = [...slot.searchReasons.slice(-19), failure.message];
+              } else if (failure.code === "angle_plan_invalid" || failure.code === "evidence_invalid") {
+                slot.analysisFailures++;
+                failures.push(failure);
+                if (slot.analysisFailures >= 2) {
+                  slot.blocked = { ...failure, message: `${failure.message}；分析或引用修复已达2次，请人工核对，不判定为原文不足。` };
+                  return output();
+                }
+              } else throw error;
+            }
+            await dependencies.persist();
+          }
+          if (slot.angle) break;
+          if (nextEvidencePage(sources, slot.analysisSearchedSourceIds).length) {
+            failures.push({ code: "search_pending", message: `已查阅${slot.searchedSourceIds.length}/${sources.length}段原文，继续检索其他关联段落。` });
+            return output();
+          }
+          if (!expansionAttempted && !node.chapterIds.length && !snapshot.scope.commonGroupId && !budget.theoryExpansion?.sources.length) {
+            expansionAttempted = true;
+            const expanded = await acquireTheoryExpansion({ snapshot, code, state }, {
+              call, persist: dependencies.persist, signal: dependencies.signal, fetchDocument: dependencies.fetchDocument,
+            });
+            if (!expanded.length) {
+              failures.push({ code: "search_pending", message: "冻结原文未形成可用任务，正在获取并核验可靠扩展正文；未取得依据前不生成候选。" });
               return output();
             }
-          } else throw error;
-        }
-        await dependencies.persist();
-      }
-      if (!slot.angle) {
-        if (nextEvidencePage(sources, slot.analysisSearchedSourceIds).length) {
-          failures.push({ code: "search_pending", message: `已查阅${slot.searchedSourceIds.length}/${sources.length}段原文，继续检索其他关联段落。` });
-          return output();
-        } else {
+            sources = mergeSources(expanded, sources);
+            budget.sourceCount = sources.length;
+            budget.catalogIds = sources.map((source) => source.id);
+            continue;
+          }
           slot.trialDesign = true;
           budget.phase = "analysis";
           recordTargetedPhase(state, `已查阅${sources.length}段关联原文，分析未选出任务；进入有依据候选试制，不将模型一次否定视为依据不足。`);
         }
       }
-    }
     state.selectedAngle = slot.angle;
     if (slot.trialDesign && !slot.pendingResponse) {
       const start = (slot.generations * 6) % sources.length;
