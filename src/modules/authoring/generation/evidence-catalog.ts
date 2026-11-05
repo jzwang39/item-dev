@@ -22,12 +22,6 @@ function referenceId(prefix: string, content: string) {
   return `${prefix}:${createHash("sha256").update(content).digest("hex").slice(0, 16)}`;
 }
 
-function obviousStandardNoise(chapter: EvidenceChapter) {
-  const text = `${chapter.chapter_title} ${chapter.section_title ?? ""} ${chapter.content_text}`.replace(/\s+/g, " ").trim();
-  return /(权重表|申报条件|基本文化程度|培训参考时长|鉴定时间|评价方式|比重|百分比|职业概况|附录|说明)/u.test(text)
-    || (/[%％]/u.test(text) && !/[。！？；;!?]/u.test(text));
-}
-
 export function buildEvidenceCatalog(context: unknown, chapters: EvidenceChapter[], topic: string): AngleSource[] {
   const sources: AngleSource[] = [];
   const visit = (value: unknown, path: string) => {
@@ -46,7 +40,6 @@ export function buildEvidenceCatalog(context: unknown, chapters: EvidenceChapter
   // Inspect every chapter linked by the frozen point. Ranking affects order,
   // never removes chapters or expands to other points/source versions.
   for (const chapter of chapters) {
-    if (chapter.source_type === "standard" && obviousStandardNoise(chapter)) continue;
     const sourceKind = chapter.source_type ?? "textbook";
     const prefix = sourceKind === "standard" ? "standard" : "textbook";
     for (let start = 0; start < chapter.content_text.length; start += 1200) {
