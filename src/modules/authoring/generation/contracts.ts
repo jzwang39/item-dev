@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { cleanSkillStem } from "./skill-stem-quality";
+import type { LowBasisDraft } from "../low-basis-draft";
 
 export const questionTypes = ["single", "multiple", "judgement", "practical"] as const;
 export type QuestionType = typeof questionTypes[number];
@@ -122,6 +123,7 @@ export type GeneratedQuestion = z.infer<typeof questionSchema> & {
     calculated: NonNullable<z.infer<typeof questionSchema>["scoreRubric"]>;
     rule: "largest_remainder_0.01";
   };
+  lowBasisDraft?: LowBasisDraft;
 };
 
 function judgementAnswer(value: unknown): string | undefined {

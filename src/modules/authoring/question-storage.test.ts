@@ -7,8 +7,8 @@ import { storeQuestions } from "./question-storage";
 const id = (index: number) => String(index).padStart(26, "0");
 const input = (index: number) => ({ questionId: id(index), versionId: `V${id(index).slice(1)}` });
 const request = { action: "bulk_store", confirmed: true, opinion: "管理员批量终审入库。", questions: [input(1)] };
-type Row = { id: string; project_id: string; current_version_id: string | null; current_status: string };
-const row = (index: number): Row => ({ id: id(index), project_id: id(100), current_version_id: input(index).versionId, current_status: "approved" });
+type Row = { id: string; project_id: string; current_version_id: string | null; current_status: string; source_snapshot_json?: unknown };
+const row = (index: number): Row => ({ id: id(index), project_id: id(100), current_version_id: input(index).versionId, current_status: "approved", source_snapshot_json: {} });
 
 function database(rows: Row[], confirmed = rows.map((item) => item.current_version_id)) {
   const writes: Array<{ sql: string; values: unknown[] }> = [];
@@ -87,4 +87,22 @@ test("已入库、缺失版本、缺失试题和重复输入均不能入库", as
 test("单题入库保持原请求兼容并校验管理员确认", async () => {
   const db = database([row(1)]);
   assert.deepEqual(await storeQuestions(db.connection, [{ questionId: id(1) }], id(99)), { stored: true, storedCount: 1 });
+});
+
+test("标题相关草稿未补来源摘录时不能入库", async () => {
+  const db = database([{
+    ...row(1),
+    source_snapshot_json: {
+      lowBasisDraft: {
+        mode: "title_only",
+        pointName: "宣讲要点",
+        titleContext: "宣讲要点 / 构成要素",
+        placeholderExcerpt: "宣讲要点 / 构成要素",
+        manualEvidenceExcerpt: "",
+        requiresManualEvidence: true,
+      },
+    },
+  }]);
+  await assert.rejects(storeQuestions(db.connection, [input(1)], id(99)), /标题相关草稿须先在人工审核时补充来源摘录/);
+  assert.equal(db.writes.length, 0);
 });

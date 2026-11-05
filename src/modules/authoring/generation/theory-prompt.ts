@@ -74,3 +74,41 @@ ${example}。
     }),
   };
 }
+
+export function lowBasisTheoryDraftPrompt(snapshot: Snapshot, code: string, requested: QuestionType[], previous: unknown[],
+  attempts: number, titleContext: string) {
+  const node = snapshot.nodes.find((item) => item.code === code);
+  if (!node) throw new Error("理论任务缺少冻结考评点。");
+  const requestedType = requested[0] ?? "single";
+  const example = requestedType === "judgement"
+    ? `{"questions":[{"assessmentPointCode":"指定考评点代码","questionType":"judgement","stem":"真实中文判断题干","options":[],"answers":["正确"],"analysis":"[标题相关草稿] 仅依据标题范围起草，待人工补充来源摘录后再审定。"}]}`
+    : `{"questions":[{"assessmentPointCode":"指定考评点代码","questionType":"single","stem":"真实中文题干","options":[{"key":"A","content":"真实选项"}],"answers":["A"],"analysis":"[标题相关草稿] 仅依据标题范围起草，待人工补充来源摘录后再审定。"}]}`;
+  return {
+    instruction: `你是职业技能理论知识试题起草助手。本次处于“标题相关草稿模式”，只能依据冻结考评点标题及模块上下文起草待人工核查的中文草稿，不得冒充已有可核验正文，不得编造法律条款、数值标准、主体资格排他结论或具体制度细节。
+本模式生成的题目仅供人工补充依据和修订，必须在解析开头明确标注“[标题相关草稿]”。若题干需要精确事实、数值、主体边界或正式定义，但标题上下文不足以支持，请返回questions=[]，不要强行凑题。
+只允许生成single或judgement，不生成multiple、填空变体或任何需要多个明确事实共同支撑的题。单选题若使用填空式题干，括号必须写成半角(　　)，不能写全角（　　）。题干已出现正确项核心概念或名称时，不得再把该概念名称本身设为空或作为正确项词面回填。
+仅返回JSON：
+${example}。`,
+    prompt: JSON.stringify({
+      用户需求: snapshot.requirement,
+      职业: snapshot.scope.occupation,
+      等级: snapshot.scope.commonGroupId ? "五级、四级、三级共用基本要求" : snapshot.scope.levelCode,
+      考评点: { code: node.code, name: node.name },
+      指定题型: requested.every((item) => item === requested[0]) ? requested[0] : "mixed",
+      本次必须生成数: requested.length,
+      本次题型配额: Object.fromEntries(questionTypes.map((type) => [type, requested.filter((item) => item === type).length])),
+      标题相关草稿模式: {
+        已启用: true,
+        标题范围: titleContext,
+        要求: "仅依据标题和模块上下文起草，解析必须标注[标题相关草稿]，待人工补充来源摘录。",
+      },
+      冻结考评点与标准依据: node.theoryContext,
+      质量要求: snapshot.qualityRequirements,
+      已有试题: previous.map((question) => {
+        const item = question as { stem?: string; content?: unknown; answer?: unknown; analysis?: string | null };
+        return { stem: item.stem, content: item.content, answer: item.answer, analysis: item.analysis };
+      }),
+      补齐次数: attempts,
+    }),
+  };
+}

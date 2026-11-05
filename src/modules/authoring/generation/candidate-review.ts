@@ -68,6 +68,10 @@ function candidateScopeFailures(candidate: GeneratedQuestion, context?: { pointN
   return failures;
 }
 
+export function localCandidateFailures(candidate: GeneratedQuestion, context?: { pointName?: string; kind?: "theory" | "skill" }) {
+  return [...candidateFormatFailures(candidate), ...candidateScopeFailures(candidate, context)];
+}
+
 function normalizeReviewPayload(content: string) {
   const payload = parseModelJson(content) as { checks?: unknown };
   const checks = Array.isArray(payload?.checks) ? payload.checks : [];
@@ -145,7 +149,7 @@ export function parseCandidateReview(content: string, candidates: GeneratedQuest
   }
   const blockedByLocalRules = new Map<number, string[]>();
   for (const check of parsed.checks) {
-    const failures = [...candidateFormatFailures(candidates[check.index]), ...candidateScopeFailures(candidates[check.index], context)];
+    const failures = localCandidateFailures(candidates[check.index], context);
     if (failures.length) blockedByLocalRules.set(check.index, failures);
   }
   return {

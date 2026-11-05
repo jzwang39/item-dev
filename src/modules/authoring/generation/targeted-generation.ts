@@ -2,12 +2,13 @@ import { parseQuestions, stemHash, type GeneratedQuestion, type Snapshot } from 
 import { anglePlanningPrompt, failureOf, GenerationFailure, parseAnglePlan, recordQualityRelaxation, type AngleSource, type RequestOutput, type RetryFailure, type RetryState } from "./retry-policy";
 import { theoryGenerationLimit, MAX_SLOT_REPAIRS, MAX_SLOT_TRANSPORT_FAILURES, nextTargetedSlot, recordTargetedPhase, type SlotBudget, type TargetedPhase } from "./targeted-budget";
 import { factualTheorySources, nextEvidencePage } from "./evidence-catalog";
-import { candidateReviewPrompt, parseCandidateReview } from "./candidate-review";
-import { theoryQuestionPrompt } from "./theory-prompt";
+import { candidateReviewPrompt, localCandidateFailures, parseCandidateReview } from "./candidate-review";
+import { lowBasisTheoryDraftPrompt, theoryQuestionPrompt } from "./theory-prompt";
 import { generateSkillTargeted } from "./skill-targeted";
 import { acquireTheoryExpansion } from "./theory-expansion";
 import type { fetchExternalDocument } from "./external-document";
 import { curatedEvaluationTask, curatedTheoryBasis, curatedTheoryBasisReplacement } from "./curated-theory-basis";
+import { buildLowBasisDraft } from "../low-basis-draft";
 
 type ModelInput = { instruction: string; prompt: string };
 export type TargetedDependencies = {
@@ -84,6 +85,25 @@ function mergeSources(primary: AngleSource[], secondary: AngleSource[]) {
   return [...new Map([...primary, ...secondary].map((source) => [source.id, source])).values()];
 }
 
+function collectTitleContext(value: unknown, bucket: string[] = []) {
+  if (!value || typeof value !== "object") return bucket;
+  for (const [key, child] of Object.entries(value)) {
+    if (typeof child === "string" && /^(primaryName|secondaryName|tertiaryName|functionName|contentName|name|evidence)$/u.test(key) && child.trim()) {
+      bucket.push(child.trim());
+    } else if (child && typeof child === "object") collectTitleContext(child, bucket);
+  }
+  return bucket;
+}
+
+function lowBasisTitleContext(snapshot: Snapshot, code: string) {
+  const node = snapshot.nodes.find((item) => item.code === code)!;
+  return [...new Set([node.name, ...collectTitleContext(node.theoryContext)])].join(" / ");
+}
+
+function canUseLowBasisDraft(snapshot: Snapshot, type: "single" | "multiple" | "judgement" | "practical") {
+  return snapshot.scope.assessmentMode === "理论知识" && ["single", "judgement"].includes(type);
+}
+
 export async function generateTargeted(input: {
   snapshot: Snapshot; code: string; previous: Array<{ stem: string; content?: unknown; answer?: unknown; analysis?: string | null }>;
   sources: AngleSource[]; state: RetryState;
@@ -135,9 +155,21 @@ export async function generateTargeted(input: {
       // Public basic questions must never trigger external retrieval; they are
       // grounded only in their frozen public blueprint and linked chapters.
       if ((!sources.length || budget.theoryExpansion?.basisRevision) && !snapshot.scope.commonGroupId) {
-        sources = mergeSources(await acquireTheoryExpansion({ snapshot, code, state }, {
-          call, persist: dependencies.persist, signal: dependencies.signal, fetchDocument: dependencies.fetchDocument,
-        }), sources);
+        let lowBasisFallback = false;
+        try {
+          sources = mergeSources(await acquireTheoryExpansion({ snapshot, code, state }, {
+            call, persist: dependencies.persist, signal: dependencies.signal, fetchDocument: dependencies.fetchDocument,
+          }), sources);
+        } catch (error) {
+          const failure = failureOf(error);
+          if (failure.code !== "insufficient_basis" || !canUseLowBasisDraft(snapshot, slot.type)) throw error;
+          lowBasisFallback = true;
+        }
+        if (!sources.length && lowBasisFallback) {
+          return await generateLowBasisDraft({
+            snapshot, code, previous, state, slotId, slot, node,
+          }, { call, persist: dependencies.persist, signal: dependencies.signal }, output);
+        }
         if (!sources.length) {
           failures.push({ code: "search_pending", message: "无教材考评点仅有范围标题，正在获取并核验可靠扩展正文；未取得依据前不生成候选。" });
           return output();
@@ -236,9 +268,22 @@ export async function generateTargeted(input: {
           }
           if (!expansionAttempted && !node.chapterIds.length && !snapshot.scope.commonGroupId && !budget.theoryExpansion?.sources.length) {
             expansionAttempted = true;
-            const expanded = await acquireTheoryExpansion({ snapshot, code, state }, {
-              call, persist: dependencies.persist, signal: dependencies.signal, fetchDocument: dependencies.fetchDocument,
-            });
+            let lowBasisFallback = false;
+            let expanded: AngleSource[] = [];
+            try {
+              expanded = await acquireTheoryExpansion({ snapshot, code, state }, {
+                call, persist: dependencies.persist, signal: dependencies.signal, fetchDocument: dependencies.fetchDocument,
+              });
+            } catch (error) {
+              const failure = failureOf(error);
+              if (failure.code !== "insufficient_basis" || !canUseLowBasisDraft(snapshot, slot.type)) throw error;
+              lowBasisFallback = true;
+            }
+            if (!expanded.length && lowBasisFallback) {
+              return await generateLowBasisDraft({
+                snapshot, code, previous, state, slotId, slot, node,
+              }, { call, persist: dependencies.persist, signal: dependencies.signal }, output);
+            }
             if (!expanded.length) {
               failures.push({ code: "search_pending", message: "冻结原文未形成可用任务，正在获取并核验可靠扩展正文；未取得依据前不生成候选。" });
               return output();
@@ -445,6 +490,70 @@ export async function generateTargeted(input: {
   }
   recordTargetedPhase(state, failures.map((failure) => failure.message).join("；"));
   return output();
+}
+
+async function generateLowBasisDraft(
+  input: {
+    snapshot: Snapshot;
+    code: string;
+    previous: Array<{ stem: string; content?: unknown; answer?: unknown; analysis?: string | null }>;
+    state: RetryState;
+    slotId: string;
+    slot: SlotBudget;
+    node: Snapshot["nodes"][number];
+  },
+  dependencies: {
+    call: (phase: TargetedPhase, input: { instruction: string; prompt: string }) => Promise<string>;
+    persist: () => Promise<void>;
+    signal: AbortSignal;
+  },
+  output: () => { questions: never[]; failures: RetryFailure[]; state: RetryState },
+) {
+  const { snapshot, code, previous, state, slotId, slot, node } = input;
+  if (slot.generations >= theoryGenerationLimit(slot)) {
+    slot.blocked = { code: "insufficient_basis", message: "标题相关草稿额度已耗尽，需人工命题或补充资料。" };
+    return output();
+  }
+  const titleContext = lowBasisTitleContext(snapshot, code);
+  const prompt = lowBasisTheoryDraftPrompt(snapshot, code, [slot.type], previous, slot.generations + 1, titleContext);
+  slot.pendingResponse = await dependencies.call("generation", prompt);
+  slot.generations++;
+  await dependencies.persist();
+  let parsed;
+  try {
+    parsed = parseQuestions(slot.pendingResponse, code, slot.type, snapshot.scope.occupation, { judgement: true });
+  } catch (error) {
+    slot.pendingResponse = undefined;
+    const failure: RetryFailure = { code: "invalid_content", message: error instanceof Error ? error.message : "标题相关草稿格式无效。" };
+    return {
+      questions: [],
+      failures: [failure],
+      state,
+    };
+  }
+  const candidate = parsed.valid.find((question) => !localCandidateFailures(question, { pointName: node.name, kind: "theory" }).length);
+  if (!candidate) {
+    slot.pendingResponse = undefined;
+    const failure: RetryFailure = { code: "invalid_content", message: parsed.invalidReasons[0] ?? "标题相关草稿未通过本地格式校验。" };
+    return {
+      questions: [],
+      failures: [failure],
+      state,
+    };
+  }
+  candidate.analysis = candidate.analysis.startsWith("[标题相关草稿]") ? candidate.analysis : `[标题相关草稿] ${candidate.analysis}`;
+  const titleDraft = buildLowBasisDraft(node.name, titleContext);
+  recordTargetedPhase(state, "未取得可核验正文，已按标题范围生成待人工补证据的低依据草稿。");
+  return {
+    questions: [{
+      ...candidate,
+      targetSlotId: slotId,
+      candidateRepairs: slot.candidateRepairs,
+      lowBasisDraft: titleDraft,
+    }],
+    failures: [],
+    state,
+  };
 }
 
 function clearCandidates(slot: SlotBudget, failures: RetryFailure[]) {

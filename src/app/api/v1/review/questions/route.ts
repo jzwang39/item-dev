@@ -8,12 +8,15 @@ import { createUlid } from "@/shared/database/ulid";
 import { assertQuestionConfirmed } from "@/modules/authoring/question-confirmation";
 import { bulkQuestionConfirmSchema, bulkQuestionReviewSchema } from "@/modules/authoring/bulk-question-review";
 import { confirmQuestionBatch } from "@/modules/authoring/bulk-question-confirmation";
+import { assertLowBasisEvidence, lowBasisDraftMeta, withLowBasisEvidence } from "@/modules/authoring/low-basis-draft";
 
 const schema = z.object({
   assignmentId: z.string().length(26).nullish(), questionId: z.string().length(26),
   versionId: z.string().length(26), action: z.enum(["review", "confirm", "revise", "store"]),
   decision: z.enum(["approved", "returned"]).default("approved"),
   opinion: z.string().trim().min(1).max(4000),
+  manualEvidenceExcerpt: z.string().trim().max(10000).optional(),
+  manualEvidenceCitation: z.string().trim().max(1000).optional(),
   stem: z.string().trim().min(1).max(10000).optional(),
   options: z.array(z.object({ key: z.string().trim().min(1), content: z.string().trim().min(1) })).max(8).optional(),
   answers: z.array(z.string().trim().min(1)).min(1).optional(),
@@ -92,6 +95,7 @@ export async function POST(request: Request) {
           !["assigned", "submitted"].includes(row.assignment_status ?? ""))) throw new Error("仅能修订本人当前分配的试题。");
       if (input.action === "confirm" || input.action === "store") {
         if (row.current_status !== "approved") throw new Error("仅审核通过的试题可管理员确认。");
+        assertLowBasisEvidence(row.source_snapshot_json);
         if (input.action === "confirm") {
           const [existing] = await db.execute<RowDataPacket[]>("SELECT question_version_id FROM question_review_confirmations WHERE question_version_id=?", [input.versionId]);
           if (existing.length) throw new Error("该版本已确认，请执行入库操作。");
@@ -105,6 +109,11 @@ export async function POST(request: Request) {
         if (!expert && row.reviewer_role === "expert") throw new Error("试题已分配给专家，管理员不能审核或编辑修订，请由任务专家处理。");
         if (!["pending_review", "returned"].includes(row.current_status)) throw new Error("当前试题不能再代审。");
         if (!input.stem || !input.options || !input.answers || !input.analysis) throw new Error("请填写题干、答案与解析。");
+        const lowBasis = lowBasisDraftMeta(row.source_snapshot_json);
+        if (bulk && lowBasis) throw new Error("标题相关草稿需逐题补充来源摘录，不能使用批量审核通过。");
+        if (input.decision === "approved" && lowBasis && !input.manualEvidenceExcerpt?.trim()) {
+          throw new Error("标题相关草稿在审核通过前必须补充来源摘录。");
+        }
         const answers = input.answers;
         const keys = input.options.map((option) => option.key);
         const isSingle = /单.*选/.test(row.question_type), isMultiple = /多.*选/.test(row.question_type);
@@ -119,6 +128,10 @@ export async function POST(request: Request) {
         }
         const content = { ...decode(row.content_json), options: input.options };
         const answer = { ...decode(row.answer_json), answers };
+        const nextSourceSnapshot = withLowBasisEvidence(row.source_snapshot_json, {
+          excerpt: input.manualEvidenceExcerpt,
+          citation: input.manualEvidenceCitation,
+        });
         const edited = input.stem !== row.stem || JSON.stringify(content) !== JSON.stringify(decode(row.content_json)) ||
           JSON.stringify(answer) !== JSON.stringify(decode(row.answer_json)) || input.analysis !== row.analysis_text;
         let versionId = row.current_version_id;
@@ -131,7 +144,7 @@ export async function POST(request: Request) {
               answer_json,analysis_text,source_snapshot_json,score_rubric_json,content_hash,created_by)
              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
             [versionId, input.questionId, Number(row.version_no) + 1, row.current_version_id, input.opinion, input.stem,
-              JSON.stringify(content), JSON.stringify(answer), input.analysis, JSON.stringify(decode(row.source_snapshot_json)),
+              JSON.stringify(content), JSON.stringify(answer), input.analysis, JSON.stringify(nextSourceSnapshot),
               row.score_rubric_json ? JSON.stringify(decode(row.score_rubric_json)) : null,
               createHash("sha256").update(JSON.stringify({ stem: input.stem, content, answer, analysis: input.analysis, versionId })).digest("hex"), session.user.id],
           );

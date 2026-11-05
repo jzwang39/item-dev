@@ -1,5 +1,6 @@
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { createUlid } from "@/shared/database/ulid";
+import { assertLowBasisEvidence } from "./low-basis-draft";
 
 export async function confirmQuestionBatch(
   db: PoolConnection,
@@ -12,11 +13,12 @@ export async function confirmQuestionBatch(
   }
   const [rows] = await db.execute<(RowDataPacket & {
     id: string; project_id: string; current_version_id: string; current_status: string;
-    confirmed_at: string | null;
+    confirmed_at: string | null; source_snapshot_json: unknown;
   })[]>(
-    `SELECT q.id,q.project_id,q.current_version_id,q.current_status,qrc.confirmed_at
+    `SELECT q.id,q.project_id,q.current_version_id,q.current_status,qrc.confirmed_at,qv.source_snapshot_json
      FROM questions q
      INNER JOIN projects p ON p.id=q.project_id AND p.status='active'
+     INNER JOIN question_versions qv ON qv.id=q.current_version_id
      LEFT JOIN question_review_confirmations qrc ON qrc.question_version_id=q.current_version_id
      WHERE q.id IN (${questions.map(() => "?").join(",")}) AND q.archived_at IS NULL
      ORDER BY q.id FOR UPDATE`,
@@ -28,6 +30,7 @@ export async function confirmQuestionBatch(
       throw new Error("试题版本已变化，请刷新后重试。");
     }
     if (row.current_status !== "approved") throw new Error("仅审核通过的试题可管理员确认。");
+    assertLowBasisEvidence(row.source_snapshot_json);
     if (row.confirmed_at) throw new Error("所选试题已确认，请刷新后重新选择。");
   }
   // The caller runs this entire batch in a transaction, preserving per-version confirmation.

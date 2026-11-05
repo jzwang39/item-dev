@@ -7,6 +7,11 @@ export type EditableReviewTask = {
   questionType: string; stem: string; analysis?: string | null; answer?: unknown;
   content?: { options?: Array<{ key?: string; content?: string; text?: string }> };
   scoreRubric?: unknown;
+  lowBasisDraft?: {
+    placeholderExcerpt: string;
+    manualEvidenceExcerpt?: string;
+    manualEvidenceCitation?: string;
+  } | null;
 };
 
 export function AdminQuestionReview({ task, onClose, onSaved, role = "admin" }: Readonly<{
@@ -21,6 +26,10 @@ export function AdminQuestionReview({ task, onClose, onSaved, role = "admin" }: 
   const [answer, setAnswer] = useState(originalAnswers?.join(practical ? "\n" : "、") ?? (typeof task.answer === "string" ? task.answer : ""));
   const [analysis, setAnalysis] = useState(task.analysis ?? "");
   const [opinion, setOpinion] = useState("");
+  const [manualEvidenceExcerpt, setManualEvidenceExcerpt] = useState(task.lowBasisDraft?.manualEvidenceExcerpt?.trim()
+    || task.lowBasisDraft?.placeholderExcerpt
+    || "");
+  const [manualEvidenceCitation, setManualEvidenceCitation] = useState(task.lowBasisDraft?.manualEvidenceCitation ?? "");
   const [decision, setDecision] = useState("approved");
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -33,6 +42,7 @@ export function AdminQuestionReview({ task, onClose, onSaved, role = "admin" }: 
         body: JSON.stringify({
           questionId: task.id, assignmentId: task.assignmentId, versionId: task.versionId, action: role === "expert" ? "revise" : "review",
           stem, options, answers: answer.split(practical ? /\n+/ : /[、,，]/).map((value) => value.trim()).filter(Boolean), analysis, opinion, decision,
+          manualEvidenceExcerpt, manualEvidenceCitation,
         }),
       });
       const payload = await response.json();
@@ -54,6 +64,10 @@ export function AdminQuestionReview({ task, onClose, onSaved, role = "admin" }: 
             : <input className={field} value={answer} onChange={(event) => setAnswer(event.target.value)} />}
         </label>
         <label className="mt-4 block">解析<textarea className={`${field} h-28`} value={analysis} onChange={(event) => setAnalysis(event.target.value)} /></label>
+        {task.lowBasisDraft ? <>
+          <label className="mt-4 block">人工补充来源摘录<textarea className={`${field} h-28`} value={manualEvidenceExcerpt} onChange={(event) => setManualEvidenceExcerpt(event.target.value)} /></label>
+          <label className="mt-4 block">来源说明<input className={field} value={manualEvidenceCitation} onChange={(event) => setManualEvidenceCitation(event.target.value)} placeholder="如：标题范围人工补录" /></label>
+        </> : null}
         <ScoreRubric value={task.scoreRubric} />
         {role === "admin" ? <label className="mt-4 block">审定结论<select className={field} value={decision} onChange={(event) => setDecision(event.target.value)}><option value="approved">同意通过，待管理员确认</option><option value="returned">退回修订</option></select></label> : null}
         <label className="mt-4 block">{role === "expert" ? "修订说明" : "审定意见"}<textarea className={`${field} h-24`} value={opinion} onChange={(event) => setOpinion(event.target.value)} /></label>
@@ -62,7 +76,7 @@ export function AdminQuestionReview({ task, onClose, onSaved, role = "admin" }: 
       </div>
       <div className="flex justify-end gap-3 border-t p-5">
         <button disabled={busy} className="rounded-lg border px-4 py-2" onClick={onClose}>取消</button>
-        <button disabled={busy || !confirmed || !opinion.trim() || !stem.trim() || !answer.trim() || !analysis.trim()} className="rounded-lg bg-[#405fe7] px-4 py-2 text-white disabled:opacity-50" onClick={() => void submit()}>{busy ? "提交中..." : role === "expert" ? "保存修订，重新审核" : "保存修订并提交审定"}</button>
+        <button disabled={busy || !confirmed || !opinion.trim() || !stem.trim() || !answer.trim() || !analysis.trim() || (!!task.lowBasisDraft && !manualEvidenceExcerpt.trim())} className="rounded-lg bg-[#405fe7] px-4 py-2 text-white disabled:opacity-50" onClick={() => void submit()}>{busy ? "提交中..." : role === "expert" ? "保存修订，重新审核" : "保存修订并提交审定"}</button>
       </div>
     </div>
   </div>;

@@ -327,6 +327,11 @@ type AdminReviewTask = Omit<AssignableQuestion, "assignedExpertName"> & {
   answer?: unknown;
   analysis?: string | null;
   scoreRubric?: unknown;
+  lowBasisDraft?: {
+    placeholderExcerpt: string;
+    manualEvidenceExcerpt?: string;
+    manualEvidenceCitation?: string;
+  } | null;
   versionId: string;
   status: string;
   canAdminReview: boolean;

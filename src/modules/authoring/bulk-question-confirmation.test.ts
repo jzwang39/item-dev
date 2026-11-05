@@ -8,7 +8,7 @@ const id = (index: number) => String(index).padStart(26, "0");
 const question = (index: number) => ({ questionId: id(index), versionId: `V${id(index).slice(1)}` });
 const row = (index: number) => ({
   id: id(index), project_id: id(90), current_version_id: question(index).versionId,
-  current_status: "approved", confirmed_at: null as string | null,
+  current_status: "approved", confirmed_at: null as string | null, source_snapshot_json: {},
 });
 const request = { action: "bulk_confirm", confirmed: true, opinion: "管理员确认。", questions: [question(1)] };
 function database(rows: ReturnType<typeof row>[]) {
@@ -68,5 +68,23 @@ test("缺失试题与重复输入均拒绝", async () => {
   const { db, writes } = database([row(1)]);
   await assert.rejects(confirmQuestionBatch(db, [question(1), question(2)], id(99), "确认"));
   await assert.rejects(confirmQuestionBatch(db, [question(1), question(1)], id(99), "确认"));
+  assert.equal(writes.length, 0);
+});
+
+test("标题相关草稿未补来源摘录时不能管理员确认", async () => {
+  const { db, writes } = database([{
+    ...row(1),
+    source_snapshot_json: {
+      lowBasisDraft: {
+        mode: "title_only",
+        pointName: "宣讲要点",
+        titleContext: "宣讲要点 / 构成要素",
+        placeholderExcerpt: "宣讲要点 / 构成要素",
+        manualEvidenceExcerpt: "",
+        requiresManualEvidence: true,
+      },
+    },
+  }]);
+  await assert.rejects(confirmQuestionBatch(db, [question(1)], id(99), "确认"), /标题相关草稿须先在人工审核时补充来源摘录/);
   assert.equal(writes.length, 0);
 });

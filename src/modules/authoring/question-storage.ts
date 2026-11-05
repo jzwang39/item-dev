@@ -1,6 +1,7 @@
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { createUlid } from "@/shared/database/ulid";
 import { assertQuestionConfirmed } from "./question-confirmation";
+import { assertLowBasisEvidence } from "./low-basis-draft";
 
 export async function storeQuestions(
   connection: PoolConnection,
@@ -13,8 +14,10 @@ export async function storeQuestions(
   }
   const [rows] = await connection.execute<(RowDataPacket & {
     id: string; project_id: string; current_version_id: string | null; current_status: string;
+    source_snapshot_json: unknown;
   })[]>(
-    `SELECT q.id, q.project_id, q.current_version_id, q.current_status FROM questions q
+    `SELECT q.id, q.project_id, q.current_version_id, q.current_status, qv.source_snapshot_json FROM questions q
+     INNER JOIN question_versions qv ON qv.id=q.current_version_id
      INNER JOIN projects p ON p.id=q.project_id AND p.status='active'
      WHERE q.id IN (${questions.map(() => "?").join(",")}) AND q.archived_at IS NULL
      ORDER BY q.id FOR UPDATE`,
@@ -30,6 +33,7 @@ export async function storeQuestions(
     if (expected.versionId && expected.versionId !== row.current_version_id) {
       throw new Error("试题版本已变化，请刷新后重新选择。");
     }
+    assertLowBasisEvidence(row.source_snapshot_json);
     await assertQuestionConfirmed(connection, row.current_version_id);
   }
   for (const row of rows) {

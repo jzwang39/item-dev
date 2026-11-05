@@ -5,6 +5,7 @@ import { z } from "zod";
 import { getVerifiedSession } from "@/auth";
 import { createUlid } from "@/shared/database/ulid";
 import { query, withTransaction } from "@/shared/database/mysql";
+import { lowBasisDraftMeta } from "@/modules/authoring/low-basis-draft";
 
 const assignmentSchema = z.object({
   expertId: z.string().length(26),
@@ -84,6 +85,7 @@ export async function GET() {
           answer_json: unknown;
           analysis_text: string | null;
           score_rubric_json: unknown;
+          source_snapshot_json: unknown;
           current_status: string;
           current_version_id: string;
           reviewer_role: string | null;
@@ -92,7 +94,7 @@ export async function GET() {
         })[]
       >(
         `SELECT q.id, q.project_id, q.question_no,q.occupation_id, COALESCE(po.name,'通用') AS occupation_name, q.level_code, q.assessment_mode, q.question_type,
-                qv.stem, qv.content_json, qv.answer_json, qv.analysis_text, qv.score_rubric_json, ra.id AS assignment_id, ra.assigned_at,
+                qv.stem, qv.content_json, qv.answer_json, qv.analysis_text, qv.score_rubric_json, qv.source_snapshot_json, ra.id AS assignment_id, ra.assigned_at,
                 assigned.display_name AS assigned_expert_name,q.current_status,q.current_version_id,assigned.role AS reviewer_role,qrc.confirmed_at,
                 (SELECT rr.comment FROM review_records rr WHERE rr.question_version_id=qv.id ORDER BY rr.submitted_at DESC,rr.id DESC LIMIT 1) AS review_opinion
            FROM questions q
@@ -170,6 +172,7 @@ export async function GET() {
             answer: decode(question.answer_json),
             analysis: question.analysis_text,
             scoreRubric: question.score_rubric_json ? decode(question.score_rubric_json) : null,
+            lowBasisDraft: lowBasisDraftMeta(question.source_snapshot_json) ?? null,
             status: question.current_status,
             versionId: question.current_version_id,
           })),

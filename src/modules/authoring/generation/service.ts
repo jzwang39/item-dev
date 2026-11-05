@@ -477,6 +477,7 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
         qualityRelaxations: output.state.selectedAngle?.reusesKnowledge
           ? output.state.qualityRelaxations?.filter((entry) => entry.knowledge === output.state.selectedAngle?.angle
             && entry.task === output.state.selectedAngle?.task && entry.questionType === question.questionType) : [],
+        lowBasisDraft: question.lowBasisDraft,
       };
       await db.execute(`INSERT INTO questions(id,project_id,question_no,occupation_id,level_code,assessment_mode,question_type,current_version_id,current_status)
         VALUES(?,?,?,?,?,?,?,?,?)`, [questionId, snapshot.projectId, `AI-${unit.plan_id}-${String(slot.ordinal).padStart(4, "0")}`,
@@ -504,6 +505,14 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
         [createUlid(), versionId, JSON.stringify({
           message: "为满足缺额采用同一知识、不同考查任务，仅放宽知识独立性；请人工核查任务差异、答案和依据。",
           relaxations: source.qualityRelaxations, standard: unit.appliedQualityStandard,
+        })]);
+      }
+      if (source.lowBasisDraft) {
+        await db.execute(`INSERT INTO question_quality_checks(id,question_version_id,check_round,check_code,severity,result,detail_json)
+          VALUES(?,?,'rule','authoring.low_basis_draft','warning','manual_required',?)`,
+        [createUlid(), versionId, JSON.stringify({
+          message: "当前题目仅依据标题范围起草，需在人工审核时补充来源摘录后方可确认和入库。",
+          lowBasisDraft: source.lowBasisDraft,
         })]);
       }
       await db.execute(`INSERT INTO question_status_events(id,question_id,question_version_id,from_status,to_status,reason,actor_id)
