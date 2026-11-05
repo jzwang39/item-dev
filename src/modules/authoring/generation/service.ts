@@ -594,7 +594,7 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
         node.chapterIds,
       );
     }
-    evidenceChapters = chapters;
+    evidenceChapters = chapters.map((chapter) => ({ ...chapter, source_type: "textbook" as const }));
     const pool = buildChapterExcerptPool(chapters.map((chapter) => ({
       id: chapter.id, ordinal: chapter.ordinal, chapterTitle: chapter.chapter_title, sectionTitle: chapter.section_title, content: chapter.content_text,
     })), node.name);
@@ -613,6 +613,7 @@ async function requestQuestions(unit: Unit, cancellation: AbortSignal): Promise<
         chapter_title: segment.locator || `职业标准原文片段${index + 1}`,
         section_title: null,
         content_text: segment.content_excerpt,
+        source_type: "standard",
       }));
     }
   }

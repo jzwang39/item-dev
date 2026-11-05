@@ -40,8 +40,10 @@ test("理论无教材点可用标准原文片段补足可核验依据", () => {
     chapter_title: "职业标准 3.2.1 募捐信息整理",
     section_title: null,
     content_text: "募捐信息整理应当围绕信息收集、甄别、分类和单向筛选展开，明确不同渠道信息的真实性核验要求，并记录筛选依据和流转结果。",
+    source_type: "standard",
   }], theoryEvidenceTopic(node));
   const factual = factualTheorySources(sources);
   assert.ok(factual.length > 0);
+  assert.match(factual[0].id, /^standard:/);
   assert.match(factual[0].content, /单向筛选/);
 });

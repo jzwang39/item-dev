@@ -26,6 +26,10 @@ test("理论按当前考点和题型缺额出题，首轮与补题均保留完�
     assert.equal(data.试题质量标准, snapshot.qualityStandard);
     assert.equal(Object.hasOwn(data, "操作技能试题质量标准"), false);
     assert.doesNotMatch(prompt.prompt, /技能标准全文/);
+    assert.equal(Object.hasOwn(data, "教材片段"), false);
+    assert.equal(Object.hasOwn(data, "标准原文片段"), true);
+    assert.doesNotMatch(prompt.instruction, /提供的教材片段/);
+    assert.match(prompt.instruction, /当前考评点不关联教材/);
     assert.match(data.质量执行策略.不可放宽底线, /单选唯一解/);
     assert.match(data.质量执行策略.多样性策略, targeted ? /同一知识、不同考查任务/ : /首轮/);
     assert.deepEqual(data.已有试题, [{ stem: "已有试题" }]);
@@ -34,6 +38,18 @@ test("理论按当前考点和题型缺额出题，首轮与补题均保留完�
       assert.match(prompt.instruction, /"options":\[\]/);
     }
   }
+});
+
+test("有教材考评点继续使用教材片段字段", () => {
+  const textbookSnapshot = {
+    ...snapshot,
+    nodes: [{ code: "B", name: "档案整理", chapterIds: ["chapter-1"], theoryContext: { evidence: "归档规则" }, skillContext: { evidence: "整理提交资料" } }],
+  } as unknown as Snapshot;
+  const prompt = theoryQuestionPrompt(textbookSnapshot, "B", ["single"], [], [{ chapterId: "chapter-1", content: "教材正文", start: 0 }], 1, false);
+  const data = JSON.parse(prompt.prompt);
+  assert.equal(Object.hasOwn(data, "教材片段"), true);
+  assert.equal(Object.hasOwn(data, "标准原文片段"), false);
+  assert.match(prompt.instruction, /有教材时只能使用关联教材片段和标准依据/);
 });
 
 test("技能仍按专项标准保证任务、成果、步骤及评分，不自动启用理论变式", () => {

@@ -22,6 +22,18 @@ test("完整检查冻结关联章节，排序不移除低相关章节，引用�
   assert.ok(secondPage.every((source) => !firstPage.includes(source)));
 });
 
+test("标准原文片段使用独立前缀并过滤明显噪音段落", () => {
+  const sources = buildEvidenceCatalog({}, [
+    { id: "seg-1", chapter_title: "职业标准 3.2.1 募捐信息整理", section_title: null,
+      content_text: "募捐信息整理应围绕信息收集、甄别、分类和单向筛选展开，并记录筛选依据。", source_type: "standard" },
+    { id: "seg-2", chapter_title: "附录 权重表", section_title: null,
+      content_text: "理论知识 30% 技能考核 70%", source_type: "standard" },
+  ], "募捐信息整理");
+  assert.ok(sources.some((source) => source.id.startsWith("standard:seg-1:")));
+  assert.ok(!sources.some((source) => source.id.startsWith("textbook:seg-1:")));
+  assert.ok(!sources.some((source) => source.id.startsWith("standard:seg-2:")));
+});
+
 test("稳定编号由系统取回原文，不让模型的改写quote成为引用依据，未知编号仍拒绝", () => {
   const sources = buildEvidenceCatalog({ evidence: "借阅资料须登记，归还须核对完整性。" }, [], "归档");
   const content = { remaining: [{ angle: "借阅登记", sourceId: sources[0].id, quote: "模型改写并不是原文" }] };
