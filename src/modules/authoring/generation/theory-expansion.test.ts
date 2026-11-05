@@ -240,12 +240,13 @@ test("标题不能证明具体知识，基础教材版本不使无章节考点�
   assert.equal(factualTheorySources([{ id: "fact", content: "借阅资料须登记。" }]).length, 1);
 });
 
-test("扩展来源只允许政府或教育HTTPS正文，拒绝伪造域名、凭证及内网", () => {
+test("扩展来源允许安全公网HTTPS正文页，仍拒绝凭证、其他协议、异常端口及内网", () => {
   assert.equal(trustedDocumentUrl(url).hostname, "www.moe.gov.cn");
   assert.equal(trustedDocumentUrl("https://www.pku.edu.cn/a").hostname, "www.pku.edu.cn");
-  for (const value of ["http://www.moe.gov.cn/a", "https://www.moe.gov.cn.attacker.com/a",
-    "https://attacker.com/a?url=https://www.moe.gov.cn", "https://user:secret@www.moe.gov.cn/a",
-    "https://www.moe.gov.cn:444/a", "https://127.0.0.1/a", "https://[::1]/a"]) {
+  assert.equal(trustedDocumentUrl("https://journal-n.scnu.edu.cn/cn/article/id/demo").hostname, "journal-n.scnu.edu.cn");
+  assert.equal(trustedDocumentUrl("https://example.com.cn/article").hostname, "example.com.cn");
+  for (const value of ["http://www.moe.gov.cn/a",
+    "https://user:secret@www.moe.gov.cn/a", "https://www.moe.gov.cn:444/a", "https://127.0.0.1/a", "https://[::1]/a"]) {
     assert.throws(() => trustedDocumentUrl(value));
   }
   for (const ip of ["127.0.0.1", "10.0.0.1", "172.31.0.1", "192.168.0.1", "169.254.169.254",
@@ -297,7 +298,7 @@ test("先系统下载再独立核验，出处与原文留存，复用同点已�
   assert.equal(input.state.budget!.theoryExpansion!.documents[0].text, text);
 });
 
-test("只有1条具体事实片段时保留原文但不放行进入出题", async () => {
+test("只有1条强事实片段时也可放行进入出题", async () => {
   const input = fixture();
   const singleQuote = "资料借阅工作应规范管理，并持续核对借阅记录、去向登记、责任签收信息和归还台账的一致性与完整性，确保全过程留痕可追溯。";
   const singleText = `某政府机构资料借阅教学说明。${singleQuote}本页主要介绍资料借阅工作的背景、培训安排、岗位职责、日常提醒和记录保留原则，供内部教学参考使用。相关培训强调借阅工作要做到流程清晰、台账完整、岗位责任明确、记录及时更新，并保持档案去向可追溯。`;
@@ -307,17 +308,33 @@ test("只有1条具体事实片段时保留原文但不放行进入出题", asyn
     call: async () => ++calls === 1 ? JSON.stringify({ sources: [{ url, title: "借阅说明" }] })
       : JSON.stringify({ checks: [{ sourceId: "D1", quote: singleQuote, trustworthy: true, correctScope: true,
         supportsKnowledge: true, standardAllowsExpansion: true, isLegalQuestion: false, explanation: "只有一条事实片段。" }] }) };
-  assert.equal((await acquireTheoryExpansion(input, deps)).length, 0);
-  assert.match(input.state.budget!.theoryExpansion!.errors.at(-1)!, /少于进入出题所需的2条/);
+  assert.equal((await acquireTheoryExpansion(input, deps)).length, 1);
   assert.equal(input.state.budget!.theoryExpansion!.documents.length, 1);
 });
 
-test("伪造网址不会下载；检索两轮无来源后关闭，不凭标题生成", async () => {
+test("只有1条弱事实片段时继续保留原文但不放行进入出题", async () => {
+  const input = fixture();
+  const weakQuote = "资料借阅工作应规范开展并注意日常记录与流程管理，但这段表述未进一步列出具体条件边界和可判定要求。";
+  const weakText = `某机构资料借阅说明。${weakQuote}本页主要介绍日常培训背景、工作意义和一般性提醒，不涉及构成项、条件边界或具体步骤。`;
+  const deps = { signal: new AbortController().signal, persist: async () => {},
+    fetchDocument: async () => ({ url, text: weakText.repeat(2), retrievedAt: document.retrievedAt }),
+    call: async () => JSON.stringify({ checks: [{ sourceId: "D1", quote: weakQuote, trustworthy: true, correctScope: true,
+      supportsKnowledge: true, standardAllowsExpansion: true, isLegalQuestion: false, explanation: "只有一条弱事实片段。" }] }) };
+  input.state.budget!.theoryExpansion = {
+    version: 1, discoveryAttempts: 1, reviewAttempts: 0, sources: [],
+    documents: [{ id: "D1", url, text: weakText.repeat(2), retrievedAt: document.retrievedAt, hash: createHash("sha256").update(weakText.repeat(2)).digest("hex"), suggestedTitle: "弱资料" }],
+    discoveryResponses: [], reviewResponses: [], errors: [],
+  };
+  assert.equal((await acquireTheoryExpansion(input, deps)).length, 0);
+  assert.match(input.state.budget!.theoryExpansion!.errors.at(-1)!, /没有满足放行条件的强事实片段/);
+});
+
+test("不安全网址不会下载；检索两轮无来源后关闭，不凭标题生成", async () => {
   const input = fixture();
   let downloads = 0;
   const deps = { signal: new AbortController().signal, persist: async () => {},
     fetchDocument: async () => { downloads++; return fetchDocument(); },
-    call: async () => JSON.stringify({ sources: [{ url: "https://evil.com/a", title: "伪造资料" }] }) };
+    call: async () => JSON.stringify({ sources: [{ url: "http://evil.com/a", title: "不安全资料" }] }) };
   assert.equal((await acquireTheoryExpansion(input, deps)).length, 0);
   assert.equal((await acquireTheoryExpansion(input, deps)).length, 0);
   await assert.rejects(() => acquireTheoryExpansion(input, deps), /已达2轮/);

@@ -25,6 +25,9 @@ export function theoryQuestionPrompt(snapshot: Snapshot, code: string, requested
   const hasTextbook = Array.isArray(node.chapterIds) && node.chapterIds.length > 0;
   const evidence = partitionEvidence(excerpts, hasTextbook);
   const requestedType = requested[0] ?? "single";
+  const principleRule = /基本原则/u.test(node.name)
+    ? "\n若当前考评点是“基本原则”类，只能考原则判断、适用条件、行为辨析或职责边界；不得仅考术语定义、主体范围、概念列举或分类记忆。"
+    : "";
   const example = requestedType === "judgement"
     ? `{"questions":[{"assessmentPointCode":"指定考评点代码","questionType":"judgement","stem":"真实中文判断题干","options":[],"answers":["正确"],"analysis":"答案依据解析"}]}`
     : requestedType === "multiple"
@@ -47,6 +50,7 @@ ${hasTextbook ? "有教材时只能使用关联教材片段和标准依据；没
 完整遵守输入中的试题质量标准全部要求；题数按每个考评点、每种题型补齐，不能用总数抵消某种题型缺额。质量执行策略不得覆盖或放宽质量标准中的独立性、多样性或其他要求。
 首轮优先不同知识要素；补题优先新知识，仅在完整标准允许时采用同一知识、不同考查任务。不能复制题干、只换词或语序、只换选项顺序或简单正反改写。答案正确、单选唯一解、依据真实、题干完整可答、符合考点与等级等底线不可放宽。
 单选题若使用填空式题干，括号必须写成半角(　　)，不能写全角（　　）。题干已出现正确项核心概念或名称时，不得再把该概念名称本身设为空或作为正确项词面回填，必须改考含义、特征、功能归属、职责边界或关键要素。
+${principleRule}
 仅返回JSON：
 ${example}。
 严格按照本次题型配额生成缺额；mixed仅表示请求含多题型，绝不能作为questionType。

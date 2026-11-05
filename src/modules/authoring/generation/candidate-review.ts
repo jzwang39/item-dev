@@ -49,6 +49,25 @@ function candidateFormatFailures(candidate: GeneratedQuestion) {
   return failures;
 }
 
+function candidateScopeFailures(candidate: GeneratedQuestion, context?: { pointName?: string; kind?: "theory" | "skill" }) {
+  const failures: string[] = [];
+  if (context?.kind !== "theory" || !context.pointName || candidate.questionType !== "single") return failures;
+  if (!/基本原则/u.test(context.pointName)) return failures;
+  const stem = normalizeStemText(candidate.stem);
+  const analysis = normalizeStemText(candidate.analysis);
+  const options = candidate.options.map((option) => normalizeStemText(option.content));
+  const asksDonorDefinition = /捐赠人/u.test(stem)
+    && /(主体范围|范围是|可以成为|是指|定义|包括哪些|属于哪些)/u.test(stem);
+  const optionListsSubjectRange = options.some((option) => /自然人|法人|其他组织/u.test(option))
+    || options.some((option) => /受益人/u.test(option));
+  const analysisTreatsAsDefinition = /捐赠人/u.test(analysis)
+    && /(自然人|法人|其他组织|主体范围|术语定义|范围界定)/u.test(analysis);
+  if (asksDonorDefinition && (optionListsSubjectRange || analysisTreatsAsDefinition)) {
+    failures.push(`当前考评点“${context.pointName}”应考原则判断、适用条件或行为辨析，不应把“捐赠人”主体范围或术语定义当作主要考核目标。`);
+  }
+  return failures;
+}
+
 function normalizeReviewPayload(content: string) {
   const payload = parseModelJson(content) as { checks?: unknown };
   const checks = Array.isArray(payload?.checks) ? payload.checks : [];
@@ -86,6 +105,10 @@ function normalizeReviewPayload(content: string) {
 
 export function candidateReviewPrompt(snapshot: Snapshot, code: string, candidates: GeneratedQuestion[], previous: unknown[], sources: AngleSource[]) {
   const kind = snapshot.scope.assessmentMode === "操作技能" ? "skill" : "theory";
+  const point = snapshot.nodes.find((node) => node.code === code);
+  const principleRule = kind === "theory" && /基本原则/u.test(point?.name ?? "")
+    ? "\n若考评点名称含“基本原则”，候选应考原则判断、适用条件、行为辨析或职责边界，不得仅考术语定义、主体范围、概念列举或分类记忆。"
+    : "";
   return {
     instruction: `你是职业技能试题独立核验助手，只核验候选，不改写试题。必须逐条对照输入中的完整对应质量标准，禁止以缺题、成本或题数为由降低任何要求。
 核对题干、条件、所有选项、答案及解析；单选必须唯一正确，多选答案集合必须完整且唯一确定，判断须有明确正误依据。原文存在不等于能支持答案，必须说明原文如何支持答案。
@@ -93,9 +116,10 @@ export function candidateReviewPrompt(snapshot: Snapshot, code: string, candidat
 技能只按操作技能标准核验情境、任务、完整步骤、成果、评分项目和分值，不套用理论变式放宽；正式参数缺失不得编造。
 覆盖完整标准的所有适用要求，requirements逐条列出要求、是否通过和理由；requirements为必填数组，即使只有1条也必须返回。任一要求不通过，则meetsQualityStandard必须为false。不能确认答案或依据时必须判不通过，不猜测。
 每个候选必须返回唯一index，包含所有候选索引，不得遗漏。evidenceSourceIds只能选择输入中存在的稳定编号，不自行复制或编造原文。
+${principleRule}
 只返回JSON：{"checks":[{"index":0,"meetsQualityStandard":true,"answerCorrect":true,"evidenceSupported":true,"distinctTask":true,"score":90,"explanation":"说明原文如何支持答案及任务差异","evidenceSourceIds":["输入编号"],"requirements":[{"requirement":"适用标准原文要求","passed":true,"explanation":"核验理由"}]}]}。`,
     prompt: JSON.stringify({
-      职业: snapshot.scope.occupation, 等级: snapshot.scope.commonGroupId ? "五级、四级、三级共用基本要求" : snapshot.scope.levelCode, 考评点: snapshot.nodes.find((node) => node.code === code),
+      职业: snapshot.scope.occupation, 等级: snapshot.scope.commonGroupId ? "五级、四级、三级共用基本要求" : snapshot.scope.levelCode, 考评点: point,
       [kind === "skill" ? "操作技能试题质量标准" : "试题质量标准"]: kind === "skill" ? snapshot.skillQualityStandard : snapshot.qualityStandard,
       质量要求: snapshot.qualityRequirements, 质量执行策略: generationQualityPolicy(kind, true),
       候选: candidates.map((candidate, index) => ({ index, ...candidate })), 已有试题: previous,
@@ -104,7 +128,8 @@ export function candidateReviewPrompt(snapshot: Snapshot, code: string, candidat
   };
 }
 
-export function parseCandidateReview(content: string, candidates: GeneratedQuestion[], sources: AngleSource[]) {
+export function parseCandidateReview(content: string, candidates: GeneratedQuestion[], sources: AngleSource[],
+  context?: { pointName?: string; kind?: "theory" | "skill" }) {
   let parsed: z.infer<typeof reviewSchema>;
   try { parsed = reviewSchema.parse(normalizeReviewPayload(content)); }
   catch (error) { throw new GenerationFailure("review_invalid", `候选质量核验格式无效：${skillCandidateIssues(error).slice(0, 20).join("；")}。不将未经核验的候选计入成果。`); }
@@ -120,7 +145,7 @@ export function parseCandidateReview(content: string, candidates: GeneratedQuest
   }
   const blockedByLocalRules = new Map<number, string[]>();
   for (const check of parsed.checks) {
-    const failures = candidateFormatFailures(candidates[check.index]);
+    const failures = [...candidateFormatFailures(candidates[check.index]), ...candidateScopeFailures(candidates[check.index], context)];
     if (failures.length) blockedByLocalRules.set(check.index, failures);
   }
   return {

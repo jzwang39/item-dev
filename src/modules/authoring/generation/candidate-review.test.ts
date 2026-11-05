@@ -106,3 +106,47 @@ test("理论生成提示词明确禁止概念词面回填并要求单选半角�
   assert.match(prompt.instruction, /半角\(　　\)/);
   assert.match(prompt.instruction, /不得再把该概念名称本身设为空/);
 });
+
+test("基本原则类考评点不得把捐赠人主体范围定义题当成合格候选", () => {
+  const single: GeneratedQuestion = {
+    assessmentPointCode: "A",
+    questionType: "single",
+    stem: "可以成为捐赠人的主体范围是(　　)。",
+    options: [
+      { key: "A", content: "自然人、法人或者其他组织" },
+      { key: "B", content: "仅限自然人和法人" },
+      { key: "C", content: "仅限法人和非法人组织" },
+      { key: "D", content: "捐赠人、受益人和志愿者" },
+    ],
+    answers: ["A"],
+    analysis: "标准原文界定捐赠人是以慈善为目的，自愿无偿捐赠财产的自然人、法人或者其他组织。",
+  };
+  const result = parseCandidateReview(JSON.stringify({ checks: [{
+    index: 0,
+    meetsQualityStandard: true,
+    answerCorrect: true,
+    evidenceSupported: true,
+    distinctTask: true,
+    score: 92,
+    explanation: "原文有直接定义依据。",
+    evidenceSourceIds: ["source"],
+    requirements: [{ requirement: "完整质量标准核验", passed: true, explanation: "模型判通过" }],
+  }] }), [single], sources, { pointName: "募捐工作的基本原则", kind: "theory" });
+  assert.equal(result.questions.length, 0);
+  assert.match(result.failures[0].message, /基本原则/);
+  assert.match(result.failures[0].message, /主体范围或术语定义/);
+});
+
+test("基本原则类理论提示词明确禁止定义题和主体范围题", () => {
+  const snapshot: Snapshot = {
+    projectId: "p", requirement: "补题", points: [], qualityRequirements: ["唯一解"], qualityStandard: "理论数据库完整标准",
+    sourceVersionIds: [], skillQualityStandard: undefined,
+    nodes: [{ id: "n", code: "A", name: "募捐工作的基本原则", chapterIds: ["c"], theoryContext: { evidence: "标准原文" } }],
+    scope: { occupationId: "o", occupation: "职业", levelCode: "level_4", assessmentMode: "理论知识", blueprintVersions: { outline: { id: "v", versionNo: 1 }, weights: { id: "w", versionNo: 1 } } },
+    model: { provider: "test", baseUrl: "https://example.com", model: "test" },
+  };
+  const { theoryQuestionPrompt } = require("./theory-prompt") as typeof import("./theory-prompt");
+  const prompt = theoryQuestionPrompt(snapshot, "A", ["single"], [], [{ id: "textbook:1", content: "标准原文" }], 1, true);
+  assert.match(prompt.instruction, /基本原则/);
+  assert.match(prompt.instruction, /不得仅考术语定义、主体范围/);
+});

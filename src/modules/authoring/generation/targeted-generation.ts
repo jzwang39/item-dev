@@ -368,7 +368,7 @@ export async function generateTargeted(input: {
               slot.reviewResponses = [...(slot.reviewResponses ?? []), { mode: "single", index, response: content }];
               await dependencies.persist();
             }
-            const result = parseCandidateReview(content, [candidate], usedSources);
+            const result = parseCandidateReview(content, [candidate], usedSources, { pointName: node.name, kind });
             if (!cached) {
               slot.singleReviews = [...(slot.singleReviews ?? []), { index, response: content }];
               recordTargetedPhase(state, `候选${index + 1}逐题核验：${result.questions.length ? "通过完整标准" : result.failures.map((failure) => failure.message).join("；")}`);
@@ -406,7 +406,7 @@ export async function generateTargeted(input: {
         const content = await call("verification", candidateReviewPrompt(snapshot, code, candidates, previous, usedSources));
         slot.reviewResponses = [...(slot.reviewResponses ?? []), { mode: "batch", response: content }];
         await dependencies.persist();
-        review = parseCandidateReview(content, candidates, usedSources);
+        review = parseCandidateReview(content, candidates, usedSources, { pointName: node.name, kind });
       }
       if (review.questions.length) {
         for (const question of review.questions) {

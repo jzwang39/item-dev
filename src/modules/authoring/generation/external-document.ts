@@ -6,8 +6,8 @@ const MAX_DOCUMENT_BYTES = 512 * 1024;
 export function trustedDocumentUrl(value: string) {
   const url = new URL(value);
   if (url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443")
-    || !/\.(gov|edu)\.cn$/i.test(url.hostname)) {
-    throw new Error("扩展资料仅接受中国政府或教育机构HTTPS网页，不接受内网、登录凭证或其他端口。");
+    || !/\./.test(url.hostname) || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(url.hostname) || /^\[[^\]]+\]$/.test(url.hostname)) {
+    throw new Error("扩展资料仅接受安全公网HTTPS正文页，不接受内网、登录凭证、裸IP或其他端口。");
   }
   url.hash = "";
   return url;
