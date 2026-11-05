@@ -282,6 +282,11 @@ test("先系统下载再独立核验，出处与原文留存，复用同点已�
     call: async (_phase: string, prompt: { instruction: string; prompt: string }) => {
       calls++;
       assert.match(prompt.prompt, /允许可靠扩展/);
+      if (calls === 1) {
+        const data = JSON.parse(prompt.prompt);
+        assert.deepEqual(data.扩展检索约束.标题拆词, ["资料借阅"]);
+        assert.match(prompt.instruction, /标题拆词/);
+      }
       assert.doesNotMatch(prompt.prompt, /操作技能试题质量标准/);
       return calls === 1 ? JSON.stringify({ sources: [{ url, title: "借阅说明" }] }) : audit();
     } };
@@ -290,6 +295,21 @@ test("先系统下载再独立核验，出处与原文留存，复用同点已�
   assert.equal(calls, 2);
   assert.equal(downloads, 1);
   assert.equal(input.state.budget!.theoryExpansion!.documents[0].text, text);
+});
+
+test("只有1条具体事实片段时保留原文但不放行进入出题", async () => {
+  const input = fixture();
+  const singleQuote = "资料借阅工作应规范管理，并持续核对借阅记录、去向登记、责任签收信息和归还台账的一致性与完整性，确保全过程留痕可追溯。";
+  const singleText = `某政府机构资料借阅教学说明。${singleQuote}本页主要介绍资料借阅工作的背景、培训安排、岗位职责、日常提醒和记录保留原则，供内部教学参考使用。相关培训强调借阅工作要做到流程清晰、台账完整、岗位责任明确、记录及时更新，并保持档案去向可追溯。`;
+  let calls = 0;
+  const deps = { signal: new AbortController().signal, persist: async () => {},
+    fetchDocument: async () => ({ url, text: singleText, retrievedAt: document.retrievedAt }),
+    call: async () => ++calls === 1 ? JSON.stringify({ sources: [{ url, title: "借阅说明" }] })
+      : JSON.stringify({ checks: [{ sourceId: "D1", quote: singleQuote, trustworthy: true, correctScope: true,
+        supportsKnowledge: true, standardAllowsExpansion: true, isLegalQuestion: false, explanation: "只有一条事实片段。" }] }) };
+  assert.equal((await acquireTheoryExpansion(input, deps)).length, 0);
+  assert.match(input.state.budget!.theoryExpansion!.errors.at(-1)!, /少于进入出题所需的2条/);
+  assert.equal(input.state.budget!.theoryExpansion!.documents.length, 1);
 });
 
 test("伪造网址不会下载；检索两轮无来源后关闭，不凭标题生成", async () => {
