@@ -16,10 +16,18 @@ const snapshot: Snapshot = {
 const source = { id: "frozen-reference", content: "借阅资料须登记，归还须核对完整性。", systemQuote: true };
 const question: GeneratedQuestion = { assessmentPointCode: "A", questionType: "judgement",
   stem: "借阅资料需要完成登记手续。", options: [], answers: ["正确"], analysis: "原文明确要求借阅登记。" };
-function fixture(type: "single" | "judgement" = "judgement", count = 1) {
+type TheoryTargetedInput = Parameters<typeof generateTargeted>[0];
+
+function fixture(type: "single" | "judgement" = "judgement", count = 1): TheoryTargetedInput {
   const state = { ...retryState(null), targeted: true, targetedAttempts: 6 };
   ensureTargetedBudget(state, Array.from({ length: count }, (_, index) => ({ id: `slot-${index}`, ordinal: index + 1, question_type: type })), 12);
   return { snapshot, code: "A", previous: [], sources: [source], state };
+}
+
+function noTextbookFixture(type: "single" | "judgement" = "judgement", count = 1): TheoryTargetedInput {
+  const input = fixture(type, count);
+  input.snapshot = { ...snapshot, nodes: [{ ...snapshot.nodes[0], chapterIds: [] }] };
+  return input;
 }
 function plan(sourceId = source.id) {
   return JSON.stringify({ remaining: [{ angle: "借阅登记", sourceId, task: "辨析资料借阅是否需要登记", reusesKnowledge: false, reason: "原文明确支持任务" }] });
@@ -144,6 +152,80 @@ test("旧4轮连续复述可一次恢复第5轮，隔离生成输入且独立核
   assert.equal(slot.generations, 5);
   assert.equal(slot.theoryPromptVersion, 2);
   assert.equal(budget.calls, 12);
+});
+
+test("无教材理论点连续失败2次后追加旧题角度摘要和失败原因摘要", async () => {
+  const input = noTextbookFixture("single");
+  const previous = [
+    { stem: "公益活动传播前需要核对传播目标与对象。", analysis: "原文强调传播前需明确目标对象与基本边界。" },
+    { stem: "公益活动传播中应记录渠道反馈并及时修正。", analysis: "原文要求记录反馈并修正传播安排。" },
+  ];
+  input.previous = previous;
+  input.state.budget!.slots["slot-0"].rejectedCandidates = [
+    {
+      response: JSON.stringify({ questions: [{ ...question, questionType: "single", stem: "公益活动传播需要先明确对象。", options: [
+        { key: "A", content: "明确对象" }, { key: "B", content: "忽略对象" }, { key: "C", content: "取消记录" }, { key: "D", content: "跳过反馈" },
+      ], answers: ["A"] }] }),
+      angle: { angle: "传播对象辨析", sourceId: source.id, quote: source.content, task: "辨析传播对象与目标是否匹配" },
+      failures: [{ code: "quality_rejected", message: "原文只到概述层，缺少可判定规则，无法形成单选唯一解。" }],
+      evidenceSources: [source],
+      at: "old-1",
+    },
+    {
+      response: JSON.stringify({ questions: [{ ...question, questionType: "single", stem: "公益活动传播需要及时记录反馈。", options: [
+        { key: "A", content: "记录反馈" }, { key: "B", content: "删除反馈" }, { key: "C", content: "忽略反馈" }, { key: "D", content: "拒绝修正" },
+      ], answers: ["A"] }] }),
+      angle: { angle: "传播反馈处理", sourceId: source.id, quote: source.content, task: "辨析传播反馈记录与修正要求" },
+      failures: [{ code: "duplicate", message: "候选题干与已有题重复，需重新设计任务，不仅换词改写。" }],
+      evidenceSources: [source],
+      at: "old-2",
+    },
+  ];
+  const result = await generateTargeted(input, dependencies(async (prompt) => {
+    const data = JSON.parse(prompt.prompt);
+    if (prompt.instruction.includes("补题分析助手")) return plan();
+    if (prompt.instruction.includes("独立核验助手")) return review(prompt);
+    assert.match(prompt.instruction, /连续失败2次/);
+    assert.equal(data.已有试题.length, 2);
+    assert.deepEqual(data.已有试题, [{ stem: previous[0].stem }, { stem: previous[1].stem }]);
+    assert.equal(data.旧题角度摘要.length, 2);
+    assert.match(data.旧题角度摘要[0].已考角度, /传播前/);
+    assert.equal(Object.hasOwn(data.旧题角度摘要[0], "answers"), false);
+    assert.equal(data.已失败原因摘要.length, 2);
+    assert.match(data.已失败原因摘要[0].失败原因, /概述层/);
+    assert.match(data.已失败原因摘要[1].避开路径, /反馈/);
+    return JSON.stringify({ questions: [{ ...question, questionType: "single", stem: "公益活动传播时应优先核对反馈记录。", options: [
+      { key: "A", content: "核对反馈记录" }, { key: "B", content: "忽略反馈记录" }, { key: "C", content: "删除传播对象" }, { key: "D", content: "取消修正安排" },
+    ], answers: ["A"] }] });
+  }));
+  assert.equal(result.questions.length, 1);
+});
+
+test("有教材理论点即使连续失败也不追加这两类摘要", async () => {
+  const input = fixture("single");
+  const previous = [{ stem: "借阅资料前需要完成登记。", analysis: "原文明确要求借阅登记。" }];
+  input.previous = previous;
+  input.state.budget!.slots["slot-0"].rejectedCandidates = Array.from({ length: 2 }, (_, index) => ({
+    response: JSON.stringify({ questions: [{ ...question, questionType: "single", stem: `旧失败候选${index + 1}`, options: [
+      { key: "A", content: "登记" }, { key: "B", content: "跳过登记" }, { key: "C", content: "删除记录" }, { key: "D", content: "无需核对" },
+    ], answers: ["A"] }] }),
+    angle: { angle: "借阅登记", sourceId: source.id, quote: source.content, task: "辨析借阅登记要求" },
+    failures: [{ code: "duplicate", message: "候选题干与已有题重复，需重新设计任务，不仅换词改写。" }],
+    evidenceSources: [source],
+    at: `old-${index}`,
+  }));
+  const result = await generateTargeted(input, dependencies(async (prompt) => {
+    const data = JSON.parse(prompt.prompt);
+    if (prompt.instruction.includes("补题分析助手")) return plan();
+    if (prompt.instruction.includes("独立核验助手")) return review(prompt);
+    assert.doesNotMatch(prompt.instruction, /连续失败2次/);
+    assert.equal(Object.hasOwn(data, "旧题角度摘要"), false);
+    assert.equal(Object.hasOwn(data, "已失败原因摘要"), false);
+    return JSON.stringify({ questions: [{ ...question, questionType: "single", stem: "归还资料时应先核对完整性。", options: [
+      { key: "A", content: "核对完整性" }, { key: "B", content: "跳过核对" }, { key: "C", content: "删除记录" }, { key: "D", content: "直接归档" },
+    ], answers: ["A"] }] });
+  }));
+  assert.equal(result.questions.length, 1);
 });
 
 test("复述恢复仍重复则关闭，不重新授予旧重设计或复述额度", async () => {
