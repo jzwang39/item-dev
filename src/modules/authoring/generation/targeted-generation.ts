@@ -2,7 +2,7 @@ import { parseQuestions, stemHash, type GeneratedQuestion, type Snapshot } from 
 import { anglePlanningPrompt, failureOf, GenerationFailure, parseAnglePlan, recordQualityRelaxation, type AngleSource, type RequestOutput, type RetryFailure, type RetryState } from "./retry-policy";
 import { theoryGenerationLimit, MAX_SLOT_REPAIRS, MAX_SLOT_TRANSPORT_FAILURES, nextTargetedSlot, recordTargetedPhase, type SlotBudget, type TargetedPhase } from "./targeted-budget";
 import { factualTheorySources, nextEvidencePage } from "./evidence-catalog";
-import { candidateReviewPrompt, localCandidateFailures, parseCandidateReview } from "./candidate-review";
+import { candidateReviewPrompt, parseCandidateReview } from "./candidate-review";
 import { lowBasisTheoryDraftPrompt, theoryQuestionPrompt } from "./theory-prompt";
 import { generateSkillTargeted } from "./skill-targeted";
 import { acquireTheoryExpansion } from "./theory-expansion";
@@ -531,10 +531,10 @@ async function generateLowBasisDraft(
       state,
     };
   }
-  const candidate = parsed.valid.find((question) => !localCandidateFailures(question, { pointName: node.name, kind: "theory" }).length);
+  const candidate = parsed.valid[0];
   if (!candidate) {
     slot.pendingResponse = undefined;
-    const failure: RetryFailure = { code: "invalid_content", message: parsed.invalidReasons[0] ?? "标题相关草稿未通过本地格式校验。" };
+    const failure: RetryFailure = { code: "invalid_content", message: parsed.invalidReasons[0] ?? "标题相关草稿未通过最小结构校验。" };
     return {
       questions: [],
       failures: [failure],

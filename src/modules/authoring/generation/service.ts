@@ -432,7 +432,7 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
     let saved = 0;
     for (const question of questions) {
       if (!slots.length) break;
-      if (output.targetedFlow && !question.standardReview) {
+      if (output.targetedFlow && !question.standardReview && !question.lowBasisDraft) {
         failures.push({ code: "quality_rejected", message: "补题候选未经完整质量标准核验，不计入成果。" });
         continue;
       }

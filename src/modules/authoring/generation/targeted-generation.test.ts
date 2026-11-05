@@ -202,6 +202,41 @@ test("无教材理论点连续失败2次后追加旧题角度摘要和失败原�
   if (result.questions.length !== 1) throw new Error(JSON.stringify(result));
 });
 
+test("标题相关草稿跳过本地内容校验并直接返回可保存候选", async () => {
+  const input = noTextbookFixture("single");
+  input.sources = [];
+  input.state.budget!.theoryExpansion = {
+    version: 1,
+    discoveryAttempts: 2,
+    reviewAttempts: 0,
+    sources: [],
+    documents: [],
+    discoveryResponses: [],
+    reviewResponses: [],
+    errors: [],
+  };
+  const result = await generateTargeted(input, dependencies(async () => JSON.stringify({
+    questions: [{
+      assessmentPointCode: "A",
+      questionType: "single",
+      stem: "在募捐沟通中，根据沟通对象区分不同层次的沟通目标时，更恰当的做法是(　　)。",
+      options: [
+        { key: "A", content: "根据沟通对象区分不同层次的沟通目标" },
+        { key: "B", content: "统一设定单一目标" },
+        { key: "C", content: "忽略沟通场景差异" },
+        { key: "D", content: "只保留临时性目标" },
+      ],
+      answers: ["A"],
+      analysis: "仅依据标题范围起草，待人工补充来源摘录后再审定。",
+    }],
+  })));
+  assert.equal(result.questions.length, 1);
+  assert.equal(result.failures.length, 0);
+  assert.equal(result.questions[0].standardReview, undefined);
+  assert.equal(result.questions[0].lowBasisDraft?.mode, "title_only");
+  assert.match(result.questions[0].analysis, /^\[标题相关草稿]/);
+});
+
 test("有教材理论点即使连续失败也不追加这两类摘要", async () => {
   const input = fixture("single");
   const previous = [{ stem: "借阅资料前需要完成登记。", analysis: "原文明确要求借阅登记。" }];
