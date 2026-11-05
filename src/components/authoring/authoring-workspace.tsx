@@ -5968,7 +5968,7 @@ function AuthoringTaskPanel() {
               </div>
               <p className="mb-0 mt-3 text-sm text-[#6980a4]">
                 {generationJob.currentBatch ? `当前第 ${generationJob.currentBatch} / ${generationJob.totalBatches} 批；` : ""}
-                {generationJob.status === "stopped" ? "原未完成请求已关闭；题量不足时可点击补题创建新请求。" : generationJob.status === "cancelled" ? "任务批次和请求已清理。" : `已完成 ${generationJob.completedBatches} / ${generationJob.totalBatches} 批。每批最多100题，每点合并题型生成，最多2路并发；刷新或关闭页面不会中断。`}
+                {generationJob.status === "stopped" ? "原未完成请求已关闭；题量不足时可点击补题创建新请求。" : generationJob.status === "cancelled" ? "任务批次和请求已清理。" : `已完成 ${generationJob.completedBatches} / ${generationJob.totalBatches} 批。每批最多100题，每点合并题型生成，最多3路并发；刷新或关闭页面不会中断。`}
               </p>
               {generationJob.status === "cancelled" && generationJob.terminationSummary ? (
                 <p className="mb-0 mt-3 text-sm text-[#6980a4]">已清理 {generationJob.terminationSummary.deletedQuestions} 道草稿；保留 {generationJob.terminationSummary.preservedQuestions} 道受保护试题。终止记录已留存。</p>
@@ -5996,7 +5996,7 @@ function AuthoringTaskPanel() {
               ) : null}
               {generationActive && generationJob.activity ? (
                 <div className="mt-3 text-sm text-[#6980a4]">
-                  <p className="m-0">本任务：执行中 {generationJob.activity.running} 个请求，排队 {generationJob.activity.queued} 个请求；全局执行中 {generationJob.activity.globalRunning} / 2 个请求。</p>
+                  <p className="m-0">本任务：执行中 {generationJob.activity.running} 个请求，排队 {generationJob.activity.queued} 个请求；全局执行中 {generationJob.activity.globalRunning} / 3 个请求。</p>
                   {generationJob.activity.recentErrors.map((error, index) => (
                     <p className="mb-0 mt-2 text-[#a6711f]" key={`${error.code}-${index}`}>最近错误 · {error.code} · 第{error.attempts}次尝试：{error.error}</p>
                   ))}

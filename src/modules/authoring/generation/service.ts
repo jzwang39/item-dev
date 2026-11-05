@@ -690,7 +690,7 @@ async function callGenerationModel(snapshot: Snapshot, apiKey: string, input: { 
       ? { model: snapshot.model.model, max_tokens: 8192, system: input.instruction, messages: [{ role: "user", content: input.prompt }] }
       : { model: snapshot.model.model, temperature: 0.5, max_tokens: 8192, response_format: { type: "json_object" },
         messages: [{ role: "system", content: input.instruction }, { role: "user", content: input.prompt }] }),
-      signal: AbortSignal.any([cancellation, AbortSignal.timeout(300000)]),
+      signal: AbortSignal.any([cancellation, AbortSignal.timeout(600000)]),
   });
   cancellation.throwIfAborted();
   if (!response.ok) {

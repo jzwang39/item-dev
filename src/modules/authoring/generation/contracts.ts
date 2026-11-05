@@ -6,7 +6,7 @@ export const questionTypes = ["single", "multiple", "judgement", "practical"] as
 export type QuestionType = typeof questionTypes[number];
 export const BUSINESS_BATCH_LIMIT = 100;
 export const MODEL_REQUEST_LIMIT = 12;
-export const GENERATION_CONCURRENCY = 2;
+export const GENERATION_CONCURRENCY = 3;
 
 export const quotaPointSchema = z.object({
   code: z.string().trim().min(1).max(200),
