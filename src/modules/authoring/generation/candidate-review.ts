@@ -72,6 +72,21 @@ export function localCandidateFailures(candidate: GeneratedQuestion, context?: {
   return [...candidateFormatFailures(candidate), ...candidateScopeFailures(candidate, context)];
 }
 
+function summarizeReviewIssues(check: z.infer<typeof reviewSchema>["checks"][number], localFailures: string[]) {
+  const issues = new Set<string>();
+  if (!check.meetsQualityStandard && check.explanation.trim()) issues.add(check.explanation.trim());
+  for (const requirement of check.requirements) {
+    if (!requirement.passed && requirement.explanation.trim()) issues.add(requirement.explanation.trim());
+  }
+  for (const failure of localFailures) issues.add(failure);
+  return [...issues];
+}
+
+function hasHardDraftBlock(issues: string[]) {
+  const text = issues.join("；");
+  return /(多解|不唯一|多个合理答案|题干歧义|不能仅凭该问法排除|无法排除|均可能|都可能|无依据|依据不足|不能支持答案|无法支持答案|证据不足|答案错误|答案不正确|不直接支持|法律内容|编造|知识重复|题干重复|换词重复|实质相同|同任务)/u.test(text);
+}
+
 function normalizeReviewPayload(content: string) {
   const payload = parseModelJson(content) as { checks?: unknown };
   const checks = Array.isArray(payload?.checks) ? payload.checks : [];
@@ -152,12 +167,39 @@ export function parseCandidateReview(content: string, candidates: GeneratedQuest
     const failures = localCandidateFailures(candidates[check.index], context);
     if (failures.length) blockedByLocalRules.set(check.index, failures);
   }
+  const draftQuestions = parsed.checks.filter((check) => {
+    const localFailures = blockedByLocalRules.get(check.index) ?? [];
+    const issues = summarizeReviewIssues(check, localFailures);
+    return context?.kind === "theory"
+      && (!passed.includes(check) || localFailures.length > 0)
+      && check.answerCorrect
+      && check.evidenceSupported
+      && check.distinctTask
+      && check.evidenceSourceIds.every((id) => ids.has(id))
+      && !hasHardDraftBlock(issues);
+  }).sort((a, b) => b.score - a.score).map((check) => {
+    const localFailures = blockedByLocalRules.get(check.index) ?? [];
+    const issues = summarizeReviewIssues(check, localFailures);
+    return {
+      ...candidates[check.index],
+      draftReview: {
+        score: check.score,
+        explanation: check.explanation,
+        issues,
+        requirements: check.requirements,
+        evidenceSourceIds: check.evidenceSourceIds,
+      },
+    };
+  });
+  const draftIndexes = new Set(draftQuestions.map((question) => candidates.findIndex((candidate) => candidate.stem === question.stem)));
   return {
     questions: passed.filter((check) => !blockedByLocalRules.has(check.index)).sort((a, b) => b.score - a.score).map((check) => ({
       ...candidates[check.index],
       standardReview: { score: check.score, requirements: check.requirements, evidenceSourceIds: check.evidenceSourceIds },
     })),
-    failures: parsed.checks.filter((check) => !passed.includes(check) || blockedByLocalRules.has(check.index)).map((check) => ({
+    draftQuestions,
+    failures: parsed.checks.filter((check) => !draftIndexes.has(check.index)
+      && (!passed.includes(check) || blockedByLocalRules.has(check.index))).map((check) => ({
       code: "quality_rejected" as const,
       message: blockedByLocalRules.has(check.index)
         ? `候选${check.index + 1}未通过完整质量核验：${check.explanation}；${blockedByLocalRules.get(check.index)!.join("；")}`

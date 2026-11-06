@@ -117,6 +117,13 @@ export type GeneratedQuestion = z.infer<typeof questionSchema> & {
   formatRepairs?: { originalAnswers: unknown; originalOptions: unknown; rule: "normalize_judgement" };
   targetSlotId?: string;
   standardReview?: { score: number; requirements: Array<{ requirement: string; passed: boolean; explanation: string }>; evidenceSourceIds: string[] };
+  draftReview?: {
+    score: number;
+    explanation: string;
+    issues: string[];
+    requirements: Array<{ requirement: string; passed: boolean; explanation: string }>;
+    evidenceSourceIds: string[];
+  };
   candidateRepairs?: Array<{ originalResponse: string; correctedResponse: string; errors: string[]; patchResponse?: string; fields?: string[] }>;
   scoringCalculation?: {
     original: { totalScore: 100; criteria: Array<{ item: string; standard: string; weight: number; rationale: string }> };

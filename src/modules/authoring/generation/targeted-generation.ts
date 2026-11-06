@@ -396,9 +396,10 @@ export async function generateTargeted(input: {
       return output();
     }
     try {
-      let review: { questions: GeneratedQuestion[]; failures: RetryFailure[] };
+      let review: { questions: GeneratedQuestion[]; draftQuestions: GeneratedQuestion[]; failures: RetryFailure[] };
       if (slot.reviewMode === "single") {
         const questions: GeneratedQuestion[] = [];
+        const draftQuestions: GeneratedQuestion[] = [];
         const rejected: RetryFailure[] = [];
         let pending = false;
         for (const [index, candidate] of candidates.entries()) {
@@ -420,6 +421,7 @@ export async function generateTargeted(input: {
               await dependencies.persist();
             }
             questions.push(...result.questions);
+            draftQuestions.push(...result.draftQuestions);
             rejected.push(...result.failures.map((failure) => ({ ...failure, message: `候选${index + 1}：${failure.message}` })));
           } catch (error) {
             const failure = failureOf(error);
@@ -438,34 +440,42 @@ export async function generateTargeted(input: {
             await dependencies.persist();
           }
         }
-        if (!questions.length && pending) {
+        if (!questions.length && !draftQuestions.length && pending) {
           failures.push(...rejected);
           return output();
         }
-        if (!questions.length && rejected.some((failure) => failure.code === "review_invalid")) {
+        if (!questions.length && !draftQuestions.length && rejected.some((failure) => failure.code === "review_invalid")) {
           block({ code: "review_invalid", message: rejected.map((failure) => failure.message).join("；") });
           return output();
         }
-        review = { questions: questions.sort((a, b) => b.standardReview!.score - a.standardReview!.score), failures: rejected };
+        review = {
+          questions: questions.sort((a, b) => b.standardReview!.score - a.standardReview!.score),
+          draftQuestions: draftQuestions.sort((a, b) => (b.draftReview?.score ?? 0) - (a.draftReview?.score ?? 0)),
+          failures: rejected,
+        };
       } else {
         const content = await call("verification", candidateReviewPrompt(snapshot, code, candidates, previous, usedSources));
         slot.reviewResponses = [...(slot.reviewResponses ?? []), { mode: "batch", response: content }];
         await dependencies.persist();
         review = parseCandidateReview(content, candidates, usedSources, { pointName: node.name, kind });
       }
-      if (review.questions.length) {
-        for (const question of review.questions) {
-          const expansion = usedSources.filter((source) => source.expansion && question.standardReview?.evidenceSourceIds.includes(source.id));
+      const accepted = review.questions.length ? review.questions : review.draftQuestions;
+      if (accepted.length) {
+        for (const question of accepted) {
+          const evidenceSourceIds = question.standardReview?.evidenceSourceIds ?? question.draftReview?.evidenceSourceIds ?? [];
+          const expansion = usedSources.filter((source) => source.expansion && evidenceSourceIds.includes(source.id));
           if (expansion.length) {
             question.analysis = `[扩展] 依据：${expansion.map((source) => source.expansion!.url).join("；")}\n${question.analysis}`;
             if (question.analysis.length > 20000) throw new GenerationFailure("invalid_content", "标注扩展依据后解析超过长度上限，不能截断答案或省略出处。");
           }
         }
-        recordTargetedPhase(state, `通过完整标准核验，仅保存一个缺额；其他合格候选作为重复冲突备选。${review.failures.map((failure) => failure.message).join("；")}`);
+        recordTargetedPhase(state, review.questions.length
+          ? `通过完整标准核验，仅保存一个缺额；其他合格候选作为重复冲突备选。${review.failures.map((failure) => failure.message).join("；")}`
+          : `未通过完整标准但答案、依据和结构可审，已降级保存人工修订草稿。${accepted[0].draftReview?.issues.join("；") ?? ""}`);
         // A relaxed candidate must stay traceable: the standard's independence
         // rule was loosened, so record why and flag the question for review.
         if (slot.angle?.reusesKnowledge) recordQualityRelaxation(state, slot.angle, slot.type);
-        return { questions: review.questions.map((question) => ({ ...question, targetSlotId: slotId, candidateRepairs: repairs })),
+        return { questions: accepted.map((question) => ({ ...question, targetSlotId: slotId, candidateRepairs: repairs })),
           failures: [], state };
       }
       failures.push(...review.failures);

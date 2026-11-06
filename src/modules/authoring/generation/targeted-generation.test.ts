@@ -237,6 +237,34 @@ test("标题相关草稿跳过本地内容校验并直接返回可保存候选",
   assert.match(result.questions[0].analysis, /^\[标题相关草稿]/);
 });
 
+test("完整质量核验仅剩软性问题时，降级返回人工修订草稿", async () => {
+  const input = fixture("single");
+  const result = await generateTargeted(input, dependencies(async (prompt) => {
+    if (prompt.instruction.includes("补题分析助手")) return plan();
+    if (prompt.instruction.includes("独立核验助手")) {
+      const data = JSON.parse(prompt.prompt);
+      return JSON.stringify({ checks: data.候选.map((candidate: { index: number }) => ({
+        index: candidate.index,
+        meetsQualityStandard: false,
+        answerCorrect: true,
+        evidenceSupported: true,
+        distinctTask: true,
+        score: 84,
+        explanation: "答案和依据成立，但干扰项长度可比性不足，需人工修订。",
+        evidenceSourceIds: [source.id],
+        requirements: [{ requirement: "干扰项质量", passed: false, explanation: "选项长度可比性不足。" }],
+      })) });
+    }
+    return JSON.stringify({ questions: [{ assessmentPointCode: "A", questionType: "single", stem: "借阅资料时更恰当的做法是(　　)。", options: [
+      { key: "A", content: "完成登记并核对资料完整性" }, { key: "B", content: "登记" }, { key: "C", content: "忽略核对" }, { key: "D", content: "删除记录" },
+    ], answers: ["A"], analysis: "原文要求借阅资料登记并核对完整性。" }] });
+  }));
+  assert.equal(result.questions.length, 1);
+  assert.equal(result.questions[0].standardReview, undefined);
+  assert.equal(result.questions[0].draftReview?.score, 84);
+  assert.match(result.questions[0].draftReview?.issues.join("；") ?? "", /长度可比性不足/);
+});
+
 test("有教材理论点即使连续失败也不追加这两类摘要", async () => {
   const input = fixture("single");
   const previous = [{ stem: "借阅资料前需要完成登记。", analysis: "原文明确要求借阅登记。" }];

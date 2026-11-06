@@ -10,12 +10,22 @@ const check = { index: 0, meetsQualityStandard: true, answerCorrect: true, evide
   requirements: [{ requirement: "判断须有明确正误", passed: true, explanation: "原文可支持" }] };
 
 test("任一完整标准要求、答案、依据或任务差异不通过，分数再高也不计入成果", () => {
-  for (const change of [
-    { meetsQualityStandard: false }, { answerCorrect: false }, { evidenceSupported: false }, { distinctTask: false },
-    { requirements: [{ requirement: "每题须独立知识", passed: false, explanation: "知识重复" }] },
-  ]) {
+  const soft = parseCandidateReview(JSON.stringify({ checks: [{ ...check, score: 100, meetsQualityStandard: false }] }),
+    [candidate], sources, { kind: "theory", pointName: "借阅登记要求" });
+  assert.equal(soft.questions.length, 0);
+  assert.equal(soft.draftQuestions.length, 1);
+
+  const duplicate = parseCandidateReview(JSON.stringify({ checks: [{ ...check, score: 100,
+    requirements: [{ requirement: "每题须独立知识", passed: false, explanation: "知识重复" }],
+  }] }), [candidate], sources, { kind: "theory", pointName: "借阅登记要求" });
+  assert.equal(duplicate.questions.length, 0);
+  assert.equal(duplicate.draftQuestions.length, 0);
+  assert.equal(duplicate.failures[0].code, "quality_rejected");
+
+  for (const change of [{ answerCorrect: false }, { evidenceSupported: false }, { distinctTask: false }]) {
     const result = parseCandidateReview(JSON.stringify({ checks: [{ ...check, score: 100, ...change }] }), [candidate], sources);
     assert.equal(result.questions.length, 0);
+    assert.equal(result.draftQuestions.length, 0);
     assert.equal(result.failures[0].code, "quality_rejected");
   }
   assert.throws(() => parseCandidateReview(JSON.stringify({ checks: [{ ...check, evidenceSourceIds: ["虚构来源"] }] }), [candidate], sources), /未知原文编号/);
@@ -37,6 +47,7 @@ test("核验结果兼容 requirements 别名和缺省回填，避免因格式小
     requirementChecks: [{ name: "判断须有明确正误", ok: true, reason: "原文可支持" }],
   }] }), [candidate], sources);
   assert.equal(alias.questions.length, 1);
+  assert.equal(alias.draftQuestions.length, 0);
   assert.equal(alias.questions[0].standardReview?.requirements[0].requirement, "判断须有明确正误");
 
   const fallback = parseCandidateReview(JSON.stringify({ checks: [{
@@ -44,7 +55,69 @@ test("核验结果兼容 requirements 别名和缺省回填，避免因格式小
     requirements: undefined,
   }] }), [candidate], sources);
   assert.equal(fallback.questions.length, 1);
+  assert.equal(fallback.draftQuestions.length, 0);
   assert.equal(fallback.questions[0].standardReview?.requirements[0].requirement, "完整质量标准核验");
+});
+
+test("理论题答案和依据成立但存在软性质量问题时，降级为人工修订草稿保存", () => {
+  const single: GeneratedQuestion = {
+    assessmentPointCode: "A",
+    questionType: "single",
+    stem: "公益慈善技术标准相关知识属于(　　)。",
+    options: [
+      { key: "A", content: "募捐活动管理基本知识" },
+      { key: "B", content: "公益项目品牌推广基本知识" },
+      { key: "C", content: "标准相关知识" },
+      { key: "D", content: "捐赠人关系管理基本知识" },
+    ],
+    answers: ["C"],
+    analysis: "原文列出慈善领域国家和行业标准相关知识。",
+  };
+  const result = parseCandidateReview(JSON.stringify({ checks: [{
+    index: 0,
+    meetsQualityStandard: false,
+    answerCorrect: true,
+    evidenceSupported: true,
+    distinctTask: true,
+    score: 86,
+    explanation: "知识归类方向成立，但题干与正确项词面高度重合，且未真正解释技术标准的含义。",
+    evidenceSourceIds: ["source"],
+    requirements: [{ requirement: "紧扣考评点", passed: false, explanation: "实际更像知识归类题，属于轻度偏题。" }],
+  }] }), [single], sources, { pointName: "公益慈善技术标准的含义", kind: "theory" });
+  assert.equal(result.questions.length, 0);
+  assert.equal(result.draftQuestions.length, 1);
+  assert.match(result.draftQuestions[0].draftReview?.issues.join("；") ?? "", /轻度偏题/);
+  assert.match(result.draftQuestions[0].draftReview?.issues.join("；") ?? "", /核心词/);
+});
+
+test("理论题存在多解或歧义时，仍然必须继续拦截，不能降级保存", () => {
+  const single: GeneratedQuestion = {
+    assessmentPointCode: "A",
+    questionType: "single",
+    stem: "可以成为捐赠人的主体范围是(　　)。",
+    options: [
+      { key: "A", content: "自然人、法人或者其他组织" },
+      { key: "B", content: "受益人" },
+      { key: "C", content: "志愿者" },
+      { key: "D", content: "社会公众" },
+    ],
+    answers: ["A"],
+    analysis: "标准原文界定捐赠人范围。",
+  };
+  const result = parseCandidateReview(JSON.stringify({ checks: [{
+    index: 0,
+    meetsQualityStandard: false,
+    answerCorrect: true,
+    evidenceSupported: true,
+    distinctTask: true,
+    score: 70,
+    explanation: "题干问法过宽，其他主体在特定条件下也可能成立，形成单选多解和题干歧义。",
+    evidenceSourceIds: ["source"],
+    requirements: [{ requirement: "单选唯一解", passed: false, explanation: "不能仅凭该问法排除其他项。" }],
+  }] }), [single], sources, { pointName: "募捐工作的基本原则", kind: "theory" });
+  assert.equal(result.questions.length, 0);
+  assert.equal(result.draftQuestions.length, 0);
+  assert.match(result.failures[0].message, /多解|歧义/);
 });
 
 test("候选核验也严格隔离数据库标准，不覆盖独立性和多样性要求", () => {
@@ -107,7 +180,7 @@ test("理论生成提示词明确禁止概念词面回填并要求单选半角�
   assert.match(prompt.instruction, /不得再把该概念名称本身设为空/);
 });
 
-test("基本原则类考评点不得把捐赠人主体范围定义题当成合格候选", () => {
+test("基本原则类考评点的定义题降级为人工修订草稿，不再作为完整通过候选", () => {
   const single: GeneratedQuestion = {
     assessmentPointCode: "A",
     questionType: "single",
@@ -133,8 +206,9 @@ test("基本原则类考评点不得把捐赠人主体范围定义题当成合�
     requirements: [{ requirement: "完整质量标准核验", passed: true, explanation: "模型判通过" }],
   }] }), [single], sources, { pointName: "募捐工作的基本原则", kind: "theory" });
   assert.equal(result.questions.length, 0);
-  assert.match(result.failures[0].message, /基本原则/);
-  assert.match(result.failures[0].message, /主体范围或术语定义/);
+  assert.equal(result.draftQuestions.length, 1);
+  assert.match(result.draftQuestions[0].draftReview?.issues.join("；") ?? "", /基本原则/);
+  assert.match(result.draftQuestions[0].draftReview?.issues.join("；") ?? "", /主体范围或术语定义/);
 });
 
 test("基本原则类理论提示词明确禁止定义题和主体范围题", () => {

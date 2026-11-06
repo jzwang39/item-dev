@@ -432,7 +432,7 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
     let saved = 0;
     for (const question of questions) {
       if (!slots.length) break;
-      if (output.targetedFlow && !question.standardReview && !question.lowBasisDraft) {
+      if (output.targetedFlow && !question.standardReview && !question.lowBasisDraft && !question.draftReview) {
         failures.push({ code: "quality_rejected", message: "补题候选未经完整质量标准核验，不计入成果。" });
         continue;
       }
@@ -466,7 +466,7 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
         supplement: output.state.supplement,
         stemCleanup: question.originalStem ? { originalStem: question.originalStem, cleanedStem: question.stem, rule: "remove_identity_intro" } : undefined,
         formatRepairs: question.formatRepairs,
-        candidateRepairs: question.candidateRepairs, standardReview: question.standardReview,
+        candidateRepairs: question.candidateRepairs, standardReview: question.standardReview, draftReview: question.draftReview,
         scoringCalculation: question.scoringCalculation,
         skillTaskDesign: skill ? output.state.budget?.slots[slot.id]?.skill : undefined,
         targetedEvidence: output.state.budget?.slots[slot.id]?.evidenceSources,
@@ -498,6 +498,16 @@ async function saveOutput(unit: Unit, output: RequestOutput) {
         await db.execute(`INSERT INTO question_quality_checks(id,question_version_id,check_round,check_code,severity,result,detail_json)
           VALUES(?,?,'independent_review','authoring.full_standard','info','pass',?)`,
         [createUlid(), versionId, JSON.stringify({ review: question.standardReview, standard: unit.appliedQualityStandard, angle: output.state.selectedAngle })]);
+      }
+      if (question.draftReview) {
+        await db.execute(`INSERT INTO question_quality_checks(id,question_version_id,check_round,check_code,severity,result,detail_json)
+          VALUES(?,?,'independent_review','authoring.manual_revision_draft','warning','manual_required',?)`,
+        [createUlid(), versionId, JSON.stringify({
+          review: question.draftReview,
+          standard: unit.appliedQualityStandard,
+          angle: output.state.selectedAngle,
+          message: "答案与依据可审，但完整质量标准未全部通过，需人工修订后再审定。",
+        })]);
       }
       if (source.qualityRelaxations?.length) {
         await db.execute(`INSERT INTO question_quality_checks(id,question_version_id,check_round,check_code,severity,result,detail_json)
